@@ -97,7 +97,7 @@ def _apply_public_filters(traders: list[TrackedTrader], request: web.Request) ->
     q = str(request.query.get("q", "")).strip().lower()
     status = str(request.query.get("status", "ALL")).upper()
 
-    min_age_days = _to_float(request.query.get("min_age_days"), 30.0)
+    min_age_days = _to_float(request.query.get("min_age_days"), 0.0)
     min_trades_30d = _to_int(request.query.get("min_trades_30d"), 0)
     min_active_days_30d = _to_int(request.query.get("min_active_days_30d"), 0)
     min_win_rate_30d = _to_float(request.query.get("min_win_rate_30d"), 0.0)
@@ -206,7 +206,7 @@ def _render_public_directory(
           <option value='ACTIVE'>ACTIVE</option>
           <option value='PAUSED'>PAUSED</option>
         </select>
-        <input name='min_age_days' type='number' step='1' min='0' value='{escape(str(request.query.get("min_age_days", "30")))}' placeholder='min age days' />
+        <input name='min_age_days' type='number' step='1' min='0' value='{escape(str(request.query.get("min_age_days", "0")))}' placeholder='min age days' />
         <input name='min_trades_30d' type='number' step='1' min='0' value='{escape(str(request.query.get("min_trades_30d", "0")))}' placeholder='min trades 30d' />
         <input name='min_active_days_30d' type='number' step='1' min='0' value='{escape(str(request.query.get("min_active_days_30d", "0")))}' placeholder='min active days 30d' />
         <input name='min_win_rate_30d' type='number' step='0.1' min='0' max='100' value='{escape(str(request.query.get("min_win_rate_30d", "0")))}' placeholder='min winrate %' />

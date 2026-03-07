@@ -7,7 +7,7 @@ import aiohttp
 
 from bot.config import ConfigError, load_settings
 from bot.telegram_client import get_updates, send_message
-from bot.trader_store import TraderStore
+from bot.trader_store import STATUS_ACTIVE, TraderStore
 
 
 def _setup_logging() -> None:
@@ -85,6 +85,8 @@ async def _handle_start_with_payload(
             return
 
         store.subscribe_chat_to_trader(chat_id=chat_id, trader_address=trader.address)
+        if trader.status != STATUS_ACTIVE:
+            store.set_status(address=trader.address, status=STATUS_ACTIVE)
 
     await send_message(
         session,
