@@ -2,6 +2,7 @@
 Description=CryptoInsider Admin Web
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -12,7 +13,6 @@ EnvironmentFile=/etc/cryptoinsider/env
 ExecStart=/opt/cryptoinsider/app/.venv/bin/python admin.py --host 127.0.0.1 --port 8080
 Restart=always
 RestartSec=3
-StartLimitIntervalSec=0
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
