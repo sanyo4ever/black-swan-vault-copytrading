@@ -192,7 +192,8 @@ async def run_bot() -> None:
     except ConfigError as exc:
         raise SystemExit(str(exc)) from exc
 
-    timeout = aiohttp.ClientTimeout(total=settings.http_timeout_seconds + 10)
+    long_poll_timeout = 50
+    timeout = aiohttp.ClientTimeout(total=long_poll_timeout + 20)
     offset: int | None = None
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -202,8 +203,11 @@ async def run_bot() -> None:
                     session,
                     bot_token=settings.telegram_bot_token,
                     offset=offset,
-                    timeout=30,
+                    timeout=long_poll_timeout,
                 )
+            except asyncio.TimeoutError:
+                logger.warning("getUpdates timeout; retrying")
+                continue
             except Exception as exc:
                 logger.exception("Failed to fetch updates: %s", exc)
                 await asyncio.sleep(3)
