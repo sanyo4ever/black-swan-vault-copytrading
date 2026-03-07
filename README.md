@@ -40,7 +40,9 @@ cp .env.example .env
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_CHANNEL_ID=-100...
 TELEGRAM_BOT_USERNAME=your_bot_username
-DATABASE_PATH=data/signals.db
+DATABASE_URL=postgresql://cryptoinsider:strong_password@127.0.0.1:5432/cryptoinsider
+# optional local fallback for dev only:
+# DATABASE_PATH=data/signals.db
 
 HYPERLIQUID_INFO_URL=https://api.hyperliquid.xyz/info
 DISCOVERY_CANDIDATE_LIMIT=60
@@ -69,6 +71,15 @@ UNIVERSE_MAX_SIZE=3000
 LIVE_TOP100_INTERVAL_SECONDS=60
 LIVE_TOP100_ACTIVE_WINDOW_MINUTES=60
 LIVE_TOP100_SIZE=100
+```
+
+## PostgreSQL migration (from existing SQLite)
+
+```bash
+source .venv/bin/activate
+python scripts/migrate_sqlite_to_postgres.py \
+  --sqlite-path data/signals.db \
+  --postgres-url postgresql://cryptoinsider:strong_password@127.0.0.1:5432/cryptoinsider
 ```
 
 ## Run

@@ -37,7 +37,7 @@ async def _run() -> None:
     while True:
         cycle_started = time.monotonic()
         try:
-            with TraderStore(settings.database_path) as store:
+            with TraderStore(settings.database_dsn) as store:
                 universe_size = store.refresh_traders_universe_from_tracked(
                     min_age_days=settings.universe_min_age_days,
                     min_trades_30d=settings.universe_min_trades_30d,

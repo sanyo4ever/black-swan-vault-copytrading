@@ -15,7 +15,7 @@ def build_source(source_cfg: dict, *, http_session, settings):
         return HyperliquidFuturesSource(
             source_cfg,
             http_session=http_session,
-            database_path=settings.database_path,
+            database_dsn=settings.database_dsn,
             info_url=settings.hyperliquid_info_url,
         )
 

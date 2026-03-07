@@ -16,7 +16,7 @@ class Settings:
     telegram_bot_username: str
     sources_config_path: Path
     poll_interval_seconds: int
-    database_path: Path
+    database_dsn: str
     max_signals_per_cycle: int
     http_timeout_seconds: int
     hyperliquid_info_url: str
@@ -93,7 +93,10 @@ def load_settings(
         telegram_bot_username=os.getenv("TELEGRAM_BOT_USERNAME", "").strip().removeprefix("@"),
         sources_config_path=Path(os.getenv("SOURCES_CONFIG_PATH", "config/sources.yaml")),
         poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "60")),
-        database_path=Path(os.getenv("DATABASE_PATH", "data/signals.db")),
+        database_dsn=(
+            os.getenv("DATABASE_URL", "").strip()
+            or os.getenv("DATABASE_PATH", "data/signals.db").strip()
+        ),
         max_signals_per_cycle=int(os.getenv("MAX_SIGNALS_PER_CYCLE", "20")),
         http_timeout_seconds=int(os.getenv("HTTP_TIMEOUT_SECONDS", "20")),
         hyperliquid_info_url=os.getenv("HYPERLIQUID_INFO_URL", "https://api.hyperliquid.xyz/info"),

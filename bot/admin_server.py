@@ -434,7 +434,7 @@ def _render_admin_index(*, traders, discovery_runs, message: str | None = None) 
 
 async def subscriber_directory(request: web.Request) -> web.Response:
     settings = request.app["settings"]
-    with TraderStore(settings.database_path) as store:
+    with TraderStore(settings.database_dsn) as store:
         traders = store.list_top100_live_traders(limit=settings.live_top100_size)
 
     filtered = _apply_public_filters(traders, request)
@@ -452,7 +452,7 @@ async def subscribe_redirect(request: web.Request) -> web.Response:
     settings = request.app["settings"]
     address = request.match_info.get("address", "")
 
-    with TraderStore(settings.database_path) as store:
+    with TraderStore(settings.database_dsn) as store:
         trader = store.get_trader(address=address)
         if trader is None:
             raise web.HTTPNotFound(text="Trader not found")
@@ -483,7 +483,7 @@ async def admin_index(request: web.Request) -> web.Response:
     settings = request.app["settings"]
     message = request.query.get("msg")
 
-    with TraderStore(settings.database_path) as store:
+    with TraderStore(settings.database_dsn) as store:
         traders = store.list_traders(limit=1000)
         discovery_runs = store.list_recent_discovery_runs(limit=30)
 
@@ -502,7 +502,7 @@ async def add_trader(request: web.Request) -> web.Response:
     if not address:
         raise web.HTTPFound("/admin?msg=Address+is+required")
 
-    with TraderStore(settings.database_path) as store:
+    with TraderStore(settings.database_dsn) as store:
         store.add_manual(address=address, label=label)
 
     raise web.HTTPFound("/admin?msg=Trader+added")
@@ -512,7 +512,7 @@ async def set_pause_state(request: web.Request, status: str) -> web.Response:
     settings = request.app["settings"]
     address = request.match_info.get("address", "")
 
-    with TraderStore(settings.database_path) as store:
+    with TraderStore(settings.database_dsn) as store:
         store.set_status(address=address, status=status)
 
     action = "paused" if status == STATUS_PAUSED else "resumed"
@@ -531,7 +531,7 @@ async def delete_trader(request: web.Request) -> web.Response:
     settings = request.app["settings"]
     address = request.match_info.get("address", "")
 
-    with TraderStore(settings.database_path) as store:
+    with TraderStore(settings.database_dsn) as store:
         store.delete(address=address)
 
     raise web.HTTPFound("/admin?msg=Trader+deleted")
@@ -541,7 +541,7 @@ async def run_discovery(request: web.Request) -> web.Response:
     settings = request.app["settings"]
     session = request.app["http_session"]
 
-    with TraderStore(settings.database_path) as store:
+    with TraderStore(settings.database_dsn) as store:
         service = HyperliquidDiscoveryService(
             http_session=session,
             store=store,

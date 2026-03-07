@@ -55,7 +55,7 @@ async def _run() -> None:
         while True:
             cycle_started = time.monotonic()
             try:
-                with TraderStore(settings.database_path) as store:
+                with TraderStore(settings.database_dsn) as store:
                     service = HyperliquidDiscoveryService(
                         http_session=session,
                         store=store,

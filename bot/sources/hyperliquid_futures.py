@@ -14,11 +14,11 @@ class HyperliquidFuturesSource(Source):
         config: dict[str, Any],
         *,
         http_session,
-        database_path,
+        database_dsn,
         info_url: str,
     ) -> None:
         super().__init__(config, http_session=http_session)
-        self._database_path = database_path
+        self._database_dsn = database_dsn
         self._info_url = info_url
 
     async def _info(self, payload: dict[str, Any]) -> Any:
@@ -63,7 +63,7 @@ class HyperliquidFuturesSource(Source):
 
         start_ms = int((datetime.now(tz=UTC).timestamp() - (lookback_minutes * 60)) * 1000)
 
-        with TraderStore(self._database_path) as store:
+        with TraderStore(self._database_dsn) as store:
             traders = store.list_monitored_addresses(limit=trader_limit)
 
             signals: list[TradeSignal] = []

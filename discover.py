@@ -27,7 +27,7 @@ async def _main() -> None:
 
     timeout = aiohttp.ClientTimeout(total=settings.http_timeout_seconds)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        with TraderStore(settings.database_path) as store:
+        with TraderStore(settings.database_dsn) as store:
             service = HyperliquidDiscoveryService(
                 http_session=session,
                 store=store,

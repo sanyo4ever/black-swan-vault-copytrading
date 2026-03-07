@@ -39,7 +39,7 @@ def _sort_key(signal) -> tuple[int, datetime]:
 
 
 async def _cleanup_expired_sessions(*, settings, http_session, logger) -> int:
-    with TraderStore(settings.database_path) as store:
+    with TraderStore(settings.database_dsn) as store:
         expired = store.expire_due_delivery_sessions()
 
     if not expired:
@@ -68,7 +68,7 @@ async def _cleanup_expired_sessions(*, settings, http_session, logger) -> int:
                 item.session_id,
                 exc,
             )
-            with TraderStore(settings.database_path) as store:
+            with TraderStore(settings.database_dsn) as store:
                 store.set_delivery_session_cleanup_error(
                     session_id=item.session_id,
                     error=str(exc),
@@ -103,7 +103,7 @@ async def _run_cycle(*, settings, http_session, dedup_store, logger) -> int:
         logger.info("No signals fetched this cycle")
         return 0
 
-    with TraderStore(settings.database_path) as store:
+    with TraderStore(settings.database_dsn) as store:
         subscriber_map = store.list_active_delivery_targets_by_trader()
 
     published = 0
@@ -203,7 +203,7 @@ async def _run() -> None:
         raise SystemExit(str(exc)) from exc
 
     timeout = aiohttp.ClientTimeout(total=settings.http_timeout_seconds)
-    dedup_store = DedupStore(settings.database_path)
+    dedup_store = DedupStore(settings.database_dsn)
 
     try:
         async with aiohttp.ClientSession(timeout=timeout) as http_session:

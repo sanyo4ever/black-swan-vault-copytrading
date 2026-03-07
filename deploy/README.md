@@ -9,6 +9,11 @@ sudo useradd --system --create-home --shell /usr/sbin/nologin cryptoinsider
 - App root: `/opt/cryptoinsider/app`
 - Env file: `/etc/cryptoinsider/env`
 
+Example DB env (`/etc/cryptoinsider/env`):
+```bash
+DATABASE_URL=postgresql://cryptoinsider:strong_password@127.0.0.1:5432/cryptoinsider
+```
+
 Example permissions:
 ```bash
 sudo mkdir -p /opt/cryptoinsider /etc/cryptoinsider
@@ -58,5 +63,13 @@ sudo systemctl reload nginx
 ```
 
 ## 7. Next production step
-Current units run the existing codebase (SQLite + single-node). For full production architecture see:
+If you have old SQLite data, migrate once:
+```bash
+cd /opt/cryptoinsider/app
+/opt/cryptoinsider/app/.venv/bin/python scripts/migrate_sqlite_to_postgres.py \
+  --sqlite-path data/signals.db \
+  --postgres-url "$DATABASE_URL"
+```
+
+For full production architecture see:
 - `docs/PRODUCTION_ARCHITECTURE_UBUNTU.md`

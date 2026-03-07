@@ -37,7 +37,7 @@ async def _run() -> None:
     while True:
         cycle_started = time.monotonic()
         try:
-            with TraderStore(settings.database_path) as store:
+            with TraderStore(settings.database_dsn) as store:
                 count = store.refresh_top100_live(
                     max_rows=settings.live_top100_size,
                     active_window_minutes=settings.live_top100_active_window_minutes,

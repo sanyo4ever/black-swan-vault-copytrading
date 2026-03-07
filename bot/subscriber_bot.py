@@ -41,7 +41,11 @@ def _normalize_command(raw_text: str) -> tuple[str, str]:
     return command, arg
 
 
-def _parse_db_ts(value: str) -> datetime | None:
+def _parse_db_ts(value) -> datetime | None:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
     try:
         return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
     except Exception:
@@ -99,7 +103,7 @@ async def _delete_topics_best_effort(
                 item.message_thread_id,
                 exc,
             )
-            with TraderStore(settings.database_path) as store:
+            with TraderStore(settings.database_dsn) as store:
                 store.set_delivery_session_cleanup_error(
                     session_id=item.session_id,
                     error=str(exc),
@@ -129,7 +133,7 @@ async def _handle_start_with_payload(
         )
         return
 
-    with TraderStore(settings.database_path) as store:
+    with TraderStore(settings.database_dsn) as store:
         trader = store.get_trader(address=address)
         if trader is None:
             await send_message(
@@ -167,7 +171,7 @@ async def _handle_start_with_payload(
         if thread_id <= 0:
             raise RuntimeError(f"Invalid forum topic response: {topic_result}")
 
-        with TraderStore(settings.database_path) as store:
+        with TraderStore(settings.database_dsn) as store:
             session_info = store.create_subscription_with_session(
                 chat_id=chat_id,
                 trader_address=address,
@@ -253,7 +257,7 @@ async def _handle_message(
         return
 
     if command == "my":
-        with TraderStore(settings.database_path) as store:
+        with TraderStore(settings.database_dsn) as store:
             sessions = store.list_delivery_sessions_for_chat(chat_id=chat_id)
 
         if not sessions:
@@ -293,7 +297,7 @@ async def _handle_message(
             )
             return
 
-        with TraderStore(settings.database_path) as store:
+        with TraderStore(settings.database_dsn) as store:
             sessions = store.cancel_chat_trader_subscriptions(
                 chat_id=chat_id,
                 trader_address=address,
