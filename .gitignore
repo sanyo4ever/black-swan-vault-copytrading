@@ -3,3 +3,8 @@ __pycache__/
 *.py[cod]
 .env
 data/*.db
+
+# Local Codex/agent files
+PROJECT_MEMORY.md
+AGENTS.md
+.codex/
