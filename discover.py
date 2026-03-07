@@ -7,11 +7,16 @@ import aiohttp
 
 from bot.config import load_settings
 from bot.discovery import HyperliquidDiscoveryConfig, HyperliquidDiscoveryService
+from bot.logging_setup import build_logging_options, setup_logging
 from bot.trader_store import TraderStore
 
 
 async def _main() -> None:
     settings = load_settings(require_telegram=False)
+    setup_logging(
+        service_name="cryptoinsider.discovery-once",
+        options=build_logging_options(settings),
+    )
     config = HyperliquidDiscoveryConfig(
         info_url=settings.hyperliquid_info_url,
         candidate_limit=settings.discovery_candidate_limit,

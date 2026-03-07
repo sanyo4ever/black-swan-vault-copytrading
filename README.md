@@ -72,6 +72,14 @@ UNIVERSE_MAX_SIZE=3000
 LIVE_TOP100_INTERVAL_SECONDS=60
 LIVE_TOP100_ACTIVE_WINDOW_MINUTES=60
 LIVE_TOP100_SIZE=100
+
+LOG_LEVEL=INFO
+LOG_FORMAT=text
+# Optional rotating logs (in addition to journald):
+# LOG_DIRECTORY=/opt/cryptoinsider/app/data/logs
+LOG_FILE_MAX_BYTES=10485760
+LOG_FILE_BACKUP_COUNT=5
+LOG_TELEGRAM_HTTP=false
 ```
 
 ## PostgreSQL migration (from existing SQLite)
@@ -124,10 +132,27 @@ python subscriber_bot.py
 ## Pages
 
 - `http://127.0.0.1:8080/` -> public subscriber directory with filters
-- `http://127.0.0.1:8080/subscribe/<trader_address>` -> logs request and redirects user to bot deep-link
 - `http://127.0.0.1:8080/subscribe/<trader_address>` -> subscription landing page (shows 24h duration, no payment) and redirects to Telegram
 - `http://127.0.0.1:8080/subscribe/<trader_address>/go` -> direct deep-link redirect endpoint
 - `http://127.0.0.1:8080/admin` -> admin panel (HTTP Basic Auth)
+
+## Logging and Debugging
+
+- All services use a shared logger format and include debug context IDs (`cycle_id`, `poll_id`, `request_id`, `update_id`).
+- Default output goes to `journald`; optionally enable rotating files with `LOG_DIRECTORY`.
+- Switch to JSON logs with `LOG_FORMAT=json` for ingestion into Loki/ELK.
+- To see Telegram HTTP calls (`sendMessage`, `createForumTopic`, etc.), set `LOG_TELEGRAM_HTTP=true`.
+
+Useful commands:
+
+```bash
+sudo journalctl -u cryptoinsider-admin.service -f
+sudo journalctl -u cryptoinsider-subscriberbot.service -f
+sudo journalctl -u cryptoinsider-poster.service -f
+sudo journalctl -u cryptoinsider-discovery.service -f
+sudo journalctl -u cryptoinsider-universe.service -f
+sudo journalctl -u cryptoinsider-top100.service -f
+```
 
 ## Production Planning
 

@@ -43,6 +43,12 @@ class Settings:
     live_top100_interval_seconds: int
     live_top100_active_window_minutes: int
     live_top100_size: int
+    log_level: str
+    log_format: str
+    log_directory: str
+    log_file_max_bytes: int
+    log_file_backup_count: int
+    log_telegram_http: bool
 
 
 class ConfigError(RuntimeError):
@@ -64,6 +70,13 @@ def _get_required_env(name: str) -> str:
     if not value:
         raise ConfigError(f"Missing required environment variable: {name}")
     return value
+
+
+def _get_log_format() -> str:
+    raw = os.getenv("LOG_FORMAT", "text").strip().lower()
+    if raw in {"text", "json"}:
+        return raw
+    return "text"
 
 
 def load_settings(
@@ -127,6 +140,12 @@ def load_settings(
             os.getenv("LIVE_TOP100_ACTIVE_WINDOW_MINUTES", "60")
         ),
         live_top100_size=int(os.getenv("LIVE_TOP100_SIZE", "100")),
+        log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
+        log_format=_get_log_format(),
+        log_directory=os.getenv("LOG_DIRECTORY", "").strip(),
+        log_file_max_bytes=int(os.getenv("LOG_FILE_MAX_BYTES", "10485760")),
+        log_file_backup_count=int(os.getenv("LOG_FILE_BACKUP_COUNT", "5")),
+        log_telegram_http=_get_bool_env("LOG_TELEGRAM_HTTP", False),
     )
 
 

@@ -6,6 +6,7 @@ import logging
 import time
 
 from bot.config import load_settings
+from bot.logging_setup import bind_log_context, build_logging_options, new_trace_id, setup_logging
 from bot.trader_store import TraderStore
 
 
@@ -21,41 +22,47 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _setup_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | universe.worker | %(message)s",
-    )
-
-
 async def _run() -> None:
-    _setup_logging()
     args = _parse_args()
     settings = load_settings(require_telegram=False)
+    setup_logging(
+        service_name="cryptoinsider.universe-worker",
+        options=build_logging_options(settings),
+    )
+    logger = logging.getLogger("cryptoinsider.universe-worker")
     interval_seconds = args.interval_seconds or settings.universe_interval_seconds
+    logger.info(
+        "Service started interval_seconds=%s min_age_days=%s min_trades_30d=%s",
+        interval_seconds,
+        settings.universe_min_age_days,
+        settings.universe_min_trades_30d,
+    )
 
+    cycle = 0
     while True:
+        cycle += 1
         cycle_started = time.monotonic()
-        try:
-            with TraderStore(settings.database_dsn) as store:
-                universe_size = store.refresh_traders_universe_from_tracked(
-                    min_age_days=settings.universe_min_age_days,
-                    min_trades_30d=settings.universe_min_trades_30d,
-                    min_win_rate_30d=settings.universe_min_win_rate_30d,
-                    min_realized_pnl_30d=settings.universe_min_realized_pnl_30d,
-                    min_score=settings.universe_min_score,
-                    max_size=settings.universe_max_size,
-                )
-            logging.info("Universe refresh complete: size=%s", universe_size)
-        except Exception as exc:
-            logging.exception("Universe cycle failed: %s", exc)
+        with bind_log_context(cycle=cycle, cycle_id=new_trace_id("uni")):
+            try:
+                with TraderStore(settings.database_dsn) as store:
+                    universe_size = store.refresh_traders_universe_from_tracked(
+                        min_age_days=settings.universe_min_age_days,
+                        min_trades_30d=settings.universe_min_trades_30d,
+                        min_win_rate_30d=settings.universe_min_win_rate_30d,
+                        min_realized_pnl_30d=settings.universe_min_realized_pnl_30d,
+                        min_score=settings.universe_min_score,
+                        max_size=settings.universe_max_size,
+                    )
+                logger.info("Universe refresh complete: size=%s", universe_size)
+            except Exception as exc:
+                logger.exception("Universe cycle failed: %s", exc)
 
         if args.once:
             return
 
         elapsed = time.monotonic() - cycle_started
         sleep_for = max(1, int(interval_seconds - elapsed))
-        logging.info("Sleeping %s second(s) before next cycle", sleep_for)
+        logger.info("Sleeping %s second(s) before next cycle", sleep_for)
         await asyncio.sleep(sleep_for)
 
 

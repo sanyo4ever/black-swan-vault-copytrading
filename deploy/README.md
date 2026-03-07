@@ -12,6 +12,12 @@ sudo useradd --system --create-home --shell /usr/sbin/nologin cryptoinsider
 Example DB env (`/etc/cryptoinsider/env`):
 ```bash
 DATABASE_URL=postgresql://cryptoinsider:strong_password@127.0.0.1:5432/cryptoinsider
+LOG_LEVEL=INFO
+LOG_FORMAT=text
+LOG_DIRECTORY=/opt/cryptoinsider/app/data/logs
+LOG_FILE_MAX_BYTES=10485760
+LOG_FILE_BACKUP_COUNT=5
+LOG_TELEGRAM_HTTP=false
 ```
 
 Example permissions:
@@ -52,6 +58,13 @@ sudo journalctl -u cryptoinsider-universe.service -f
 sudo journalctl -u cryptoinsider-top100.service -f
 sudo journalctl -u cryptoinsider-poster.service -f
 sudo journalctl -u cryptoinsider-subscriberbot.service -f
+```
+
+Optional file logs (if `LOG_DIRECTORY` is configured):
+
+```bash
+sudo ls -lah /opt/cryptoinsider/app/data/logs
+sudo tail -f /opt/cryptoinsider/app/data/logs/cryptoinsider_subscriber_bot.log
 ```
 
 ## 6. Nginx reverse proxy

@@ -4,7 +4,9 @@ import argparse
 import base64
 import hmac
 import json
+import logging
 import re
+import time
 from datetime import UTC, datetime
 from html import escape
 from typing import Any
@@ -15,6 +17,7 @@ from aiohttp import web
 
 from bot.config import load_settings
 from bot.discovery import HyperliquidDiscoveryConfig, HyperliquidDiscoveryService
+from bot.logging_setup import bind_log_context, build_logging_options, new_trace_id, setup_logging
 from bot.trader_store import (
     CatalogTrader,
     MODERATION_BLACKLIST,
@@ -122,10 +125,69 @@ def _unauthorized() -> web.Response:
     )
 
 
+def _client_ip(request: web.Request) -> str:
+    xff = request.headers.get("X-Forwarded-For", "").strip()
+    if xff:
+        return xff.split(",")[0].strip()
+    return str(request.remote or "-")
+
+
+@web.middleware
+async def _request_logging_middleware(request: web.Request, handler):
+    logger: logging.Logger = request.app["logger"]
+    request_id = request.headers.get("X-Request-ID", "").strip() or new_trace_id("http")
+    started = time.monotonic()
+    method = request.method
+    path_qs = request.path_qs
+    remote = _client_ip(request)
+    ua = (request.headers.get("User-Agent", "") or "").strip()[:300]
+
+    with bind_log_context(request_id=request_id, method=method, path=request.path):
+        try:
+            response = await handler(request)
+        except web.HTTPException as exc:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            logger.log(
+                logging.INFO if exc.status < 400 else logging.WARNING,
+                "HTTP exception status=%s duration_ms=%s remote=%s path_qs=%s ua=%s",
+                exc.status,
+                duration_ms,
+                remote,
+                path_qs,
+                ua or "-",
+            )
+            exc.headers["X-Request-ID"] = request_id
+            raise
+        except Exception as exc:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            logger.exception(
+                "HTTP request failed duration_ms=%s remote=%s path_qs=%s ua=%s error=%s",
+                duration_ms,
+                remote,
+                path_qs,
+                ua or "-",
+                exc,
+            )
+            raise
+
+        duration_ms = int((time.monotonic() - started) * 1000)
+        response.headers["X-Request-ID"] = request_id
+        logger.info(
+            "HTTP request complete status=%s duration_ms=%s remote=%s path_qs=%s ua=%s",
+            response.status,
+            duration_ms,
+            remote,
+            path_qs,
+            ua or "-",
+        )
+        return response
+
+
 @web.middleware
 async def _admin_auth_middleware(request: web.Request, handler):
     if request.path.startswith("/admin"):
         if not _is_admin_authorized(request):
+            request.app["logger"].warning("Admin auth failed remote=%s path=%s", _client_ip(request), request.path)
             return _unauthorized()
     return await handler(request)
 
@@ -768,6 +830,7 @@ async def traders_api(request: web.Request) -> web.Response:
 
 async def subscribe_redirect(request: web.Request) -> web.Response:
     settings = request.app["settings"]
+    logger: logging.Logger = request.app["logger"]
     address = request.match_info.get("address", "")
 
     with TraderStore(settings.database_dsn) as store:
@@ -784,6 +847,7 @@ async def subscribe_redirect(request: web.Request) -> web.Response:
             client_ip=client_ip,
             user_agent=request.headers.get("User-Agent", ""),
         )
+    logger.info("Subscription redirect trader=%s client_ip=%s", trader.address, _client_ip(request))
 
     if not settings.telegram_bot_username:
         return web.Response(
@@ -847,6 +911,7 @@ async def admin_index(request: web.Request) -> web.Response:
 
 async def add_trader(request: web.Request) -> web.Response:
     settings = request.app["settings"]
+    logger: logging.Logger = request.app["logger"]
     payload = await request.post()
 
     address = str(payload.get("address", "")).strip()
@@ -856,12 +921,14 @@ async def add_trader(request: web.Request) -> web.Response:
 
     with TraderStore(settings.database_dsn) as store:
         store.add_manual(address=address, label=label)
+    logger.info("Trader added manually address=%s label=%s", address.lower(), label or "-")
 
     raise web.HTTPFound("/admin?msg=Trader+added")
 
 
 async def bulk_trader_action(request: web.Request) -> web.Response:
     settings = request.app["settings"]
+    logger: logging.Logger = request.app["logger"]
     payload = await request.post()
     action = str(payload.get("action", "")).strip().lower()
     note = str(payload.get("moderation_note", "")).strip() or None
@@ -885,9 +952,11 @@ async def bulk_trader_action(request: web.Request) -> web.Response:
     with TraderStore(settings.database_dsn) as store:
         if action == "pause":
             changed = store.set_status_bulk(addresses=unique_addresses, status=STATUS_PAUSED)
+            logger.info("Bulk action pause addresses=%s changed=%s", len(unique_addresses), changed)
             raise web.HTTPFound(f"/admin?msg=Bulk+pause+applied:+{changed}")
         if action == "resume":
             changed = store.set_status_bulk(addresses=unique_addresses, status=STATUS_ACTIVE)
+            logger.info("Bulk action resume addresses=%s changed=%s", len(unique_addresses), changed)
             raise web.HTTPFound(f"/admin?msg=Bulk+resume+applied:+{changed}")
         moderation_state = _parse_moderation_state(action)
         if moderation_state is None:
@@ -897,15 +966,23 @@ async def bulk_trader_action(request: web.Request) -> web.Response:
             moderation_state=moderation_state,
             note=note,
         )
+        logger.info(
+            "Bulk moderation action=%s addresses=%s changed=%s",
+            moderation_state,
+            len(unique_addresses),
+            changed,
+        )
         raise web.HTTPFound(f"/admin?msg=Bulk+moderation+applied:+{changed}")
 
 
 async def set_pause_state(request: web.Request, status: str) -> web.Response:
     settings = request.app["settings"]
+    logger: logging.Logger = request.app["logger"]
     address = request.match_info.get("address", "")
 
     with TraderStore(settings.database_dsn) as store:
         store.set_status(address=address, status=status)
+    logger.info("Trader status updated address=%s status=%s", address.lower(), status)
 
     action = "paused" if status == STATUS_PAUSED else "resumed"
     raise web.HTTPFound(f"/admin?msg=Trader+{action}")
@@ -921,6 +998,7 @@ async def resume_trader(request: web.Request) -> web.Response:
 
 async def moderate_trader(request: web.Request) -> web.Response:
     settings = request.app["settings"]
+    logger: logging.Logger = request.app["logger"]
     address = request.match_info.get("address", "")
     state_slug = request.match_info.get("state", "")
     moderation_state = _parse_moderation_state(state_slug)
@@ -929,16 +1007,19 @@ async def moderate_trader(request: web.Request) -> web.Response:
 
     with TraderStore(settings.database_dsn) as store:
         store.set_moderation(address=address, moderation_state=moderation_state)
+    logger.info("Trader moderation updated address=%s state=%s", address.lower(), moderation_state)
 
     raise web.HTTPFound(f"/admin?msg=Moderation+set+to+{quote(moderation_state)}")
 
 
 async def delete_trader(request: web.Request) -> web.Response:
     settings = request.app["settings"]
+    logger: logging.Logger = request.app["logger"]
     address = request.match_info.get("address", "")
 
     with TraderStore(settings.database_dsn) as store:
         store.delete(address=address)
+    logger.info("Trader deleted address=%s", address.lower())
 
     raise web.HTTPFound("/admin?msg=Trader+deleted")
 
@@ -946,14 +1027,23 @@ async def delete_trader(request: web.Request) -> web.Response:
 async def run_discovery(request: web.Request) -> web.Response:
     settings = request.app["settings"]
     session = request.app["http_session"]
+    logger: logging.Logger = request.app["logger"]
 
     with TraderStore(settings.database_dsn) as store:
         service = HyperliquidDiscoveryService(
             http_session=session,
             store=store,
             config=_discovery_config_from_settings(settings),
+            logger=logger,
         )
         summary = await service.discover()
+    logger.info(
+        "Discovery triggered from admin: candidates=%s qualified=%s upserted=%s pruned=%s",
+        summary["candidates"],
+        summary["qualified"],
+        summary["upserted"],
+        summary.get("pruned", 0),
+    )
 
     msg = (
         f"Discovery complete: candidates={summary['candidates']}, "
@@ -967,17 +1057,22 @@ async def _on_startup(app: web.Application) -> None:
     settings = app["settings"]
     timeout = aiohttp.ClientTimeout(total=settings.http_timeout_seconds)
     app["http_session"] = aiohttp.ClientSession(timeout=timeout)
+    app["logger"].info("Admin app startup complete")
 
 
 async def _on_cleanup(app: web.Application) -> None:
     session = app.get("http_session")
     if session is not None:
         await session.close()
+    app["logger"].info("Admin app cleanup complete")
 
 
-def create_app() -> web.Application:
-    app = web.Application(middlewares=[_admin_auth_middleware])
-    app["settings"] = load_settings(require_telegram=False, require_admin_password=True)
+def create_app(*, settings=None, logger: logging.Logger | None = None) -> web.Application:
+    resolved_settings = settings or load_settings(require_telegram=False, require_admin_password=True)
+    resolved_logger = logger or logging.getLogger("cryptoinsider.admin")
+    app = web.Application(middlewares=[_request_logging_middleware, _admin_auth_middleware])
+    app["settings"] = resolved_settings
+    app["logger"] = resolved_logger
 
     app.add_routes(
         [
@@ -1011,7 +1106,19 @@ def _parse_args() -> argparse.Namespace:
 
 def run() -> None:
     args = _parse_args()
-    web.run_app(create_app(), host=args.host, port=args.port)
+    settings = load_settings(require_telegram=False, require_admin_password=True)
+    setup_logging(
+        service_name="cryptoinsider.admin",
+        options=build_logging_options(settings),
+    )
+    logger = logging.getLogger("cryptoinsider.admin")
+    logger.info("Starting admin server host=%s port=%s", args.host, args.port)
+    web.run_app(
+        create_app(settings=settings, logger=logger),
+        host=args.host,
+        port=args.port,
+        access_log=None,
+    )
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import time
 from datetime import datetime
 
 import aiohttp
@@ -10,21 +11,20 @@ import aiohttp
 from bot.config import ConfigError, load_settings, load_sources_config
 from bot.dedup import DedupStore
 from bot.formatter import format_signal
+from bot.logging_setup import bind_log_context, build_logging_options, new_trace_id, setup_logging
 from bot.sources import build_source
-from bot.telegram_client import TelegramClientError, delete_forum_topic, send_message
+from bot.telegram_client import (
+    TelegramClientError,
+    delete_forum_topic,
+    send_message,
+    set_telegram_http_logging,
+)
 from bot.trader_store import TraderStore
 
 RETRY_BASE_DELAY_SECONDS = 15
 RETRY_MAX_DELAY_SECONDS = 15 * 60
 RETRY_MAX_ATTEMPTS = 8
 RETRY_BATCH_LIMIT = 200
-
-
-def _setup_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    )
 
 
 def _parse_args() -> argparse.Namespace:
@@ -534,44 +534,60 @@ async def _run_cycle(*, settings, http_session, dedup_store, logger) -> int:
 
 
 async def _run() -> None:
-    _setup_logging()
-    logger = logging.getLogger("cryptoinsider.bot")
     args = _parse_args()
 
     try:
         settings = load_settings()
     except ConfigError as exc:
         raise SystemExit(str(exc)) from exc
+    setup_logging(
+        service_name="cryptoinsider.poster",
+        options=build_logging_options(settings),
+    )
+    logger = logging.getLogger("cryptoinsider.poster")
+    set_telegram_http_logging(settings.log_telegram_http)
+    logger.info(
+        "Service started poll_interval=%s max_signals_per_cycle=%s database_driver=%s",
+        settings.poll_interval_seconds,
+        settings.max_signals_per_cycle,
+        ("postgres" if settings.database_dsn.startswith("postgres") else "sqlite"),
+    )
 
     timeout = aiohttp.ClientTimeout(total=settings.http_timeout_seconds)
     dedup_store = DedupStore(settings.database_dsn)
+    cycle = 0
 
     try:
         async with aiohttp.ClientSession(timeout=timeout) as http_session:
             while True:
-                await _cleanup_expired_sessions(
-                    settings=settings,
-                    http_session=http_session,
-                    logger=logger,
-                )
-                await _process_retry_queue(
-                    settings=settings,
-                    http_session=http_session,
-                    dedup_store=dedup_store,
-                    logger=logger,
-                )
-                await _run_cycle(
-                    settings=settings,
-                    http_session=http_session,
-                    dedup_store=dedup_store,
-                    logger=logger,
-                )
-                await _process_retry_queue(
-                    settings=settings,
-                    http_session=http_session,
-                    dedup_store=dedup_store,
-                    logger=logger,
-                )
+                cycle += 1
+                cycle_started = time.monotonic()
+                with bind_log_context(cycle=cycle, cycle_id=new_trace_id("poster")):
+                    await _cleanup_expired_sessions(
+                        settings=settings,
+                        http_session=http_session,
+                        logger=logger,
+                    )
+                    await _process_retry_queue(
+                        settings=settings,
+                        http_session=http_session,
+                        dedup_store=dedup_store,
+                        logger=logger,
+                    )
+                    await _run_cycle(
+                        settings=settings,
+                        http_session=http_session,
+                        dedup_store=dedup_store,
+                        logger=logger,
+                    )
+                    await _process_retry_queue(
+                        settings=settings,
+                        http_session=http_session,
+                        dedup_store=dedup_store,
+                        logger=logger,
+                    )
+                    elapsed_ms = int((time.monotonic() - cycle_started) * 1000)
+                    logger.info("Cycle finished elapsed_ms=%s", elapsed_ms)
                 if args.once:
                     break
                 await asyncio.sleep(settings.poll_interval_seconds)

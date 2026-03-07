@@ -7,21 +7,16 @@ from datetime import UTC, datetime
 import aiohttp
 
 from bot.config import ConfigError, load_settings
+from bot.logging_setup import bind_log_context, build_logging_options, new_trace_id, setup_logging
 from bot.telegram_client import (
     TelegramClientError,
     create_forum_topic,
     delete_forum_topic,
     get_updates,
     send_message,
+    set_telegram_http_logging,
 )
 from bot.trader_store import STATUS_ACTIVE, TraderStore
-
-
-def _setup_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    )
 
 
 def _short(address: str) -> str:
@@ -209,6 +204,13 @@ async def _handle_start_with_payload(
             )
             if trader.status != STATUS_ACTIVE:
                 store.set_status(address=address, status=STATUS_ACTIVE)
+        logger.info(
+            "Subscription started trader=%s chat_id=%s thread=%s expires_at=%s",
+            address,
+            chat_id,
+            thread_id,
+            session_info.expires_at,
+        )
 
         if topic_supported and thread_id is not None:
             await send_message(
@@ -366,6 +368,13 @@ async def _handle_message(
         )
 
         suffix = "" if failed == 0 else f" (topic delete failed: {failed})"
+        logger.info(
+            "Subscription stopped trader=%s chat_id=%s sessions=%s cleanup_failed=%s",
+            address,
+            chat_id,
+            len(sessions),
+            failed,
+        )
         await send_message(
             session,
             bot_token=settings.telegram_bot_token,
@@ -378,27 +387,34 @@ async def _handle_message(
 
 
 async def run_bot() -> None:
-    _setup_logging()
-    logger = logging.getLogger("cryptoinsider.subscriber-bot")
-
     try:
         settings = load_settings()
     except ConfigError as exc:
         raise SystemExit(str(exc)) from exc
+    setup_logging(
+        service_name="cryptoinsider.subscriber-bot",
+        options=build_logging_options(settings),
+    )
+    logger = logging.getLogger("cryptoinsider.subscriber-bot")
+    set_telegram_http_logging(settings.log_telegram_http)
+    logger.info("Service started long_poll_timeout=%s", 50)
 
     long_poll_timeout = 50
     timeout = aiohttp.ClientTimeout(total=long_poll_timeout + 20)
     offset: int | None = None
+    cycle = 0
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
         while True:
+            cycle += 1
             try:
-                updates = await get_updates(
-                    session,
-                    bot_token=settings.telegram_bot_token,
-                    offset=offset,
-                    timeout=long_poll_timeout,
-                )
+                with bind_log_context(poll_cycle=cycle, poll_id=new_trace_id("poll")):
+                    updates = await get_updates(
+                        session,
+                        bot_token=settings.telegram_bot_token,
+                        offset=offset,
+                        timeout=long_poll_timeout,
+                    )
             except asyncio.TimeoutError:
                 logger.warning("getUpdates timeout; retrying")
                 continue
@@ -420,12 +436,24 @@ async def run_bot() -> None:
                     continue
 
                 try:
-                    await _handle_message(
-                        session=session,
-                        settings=settings,
-                        message=message,
-                        logger=logger,
-                    )
+                    chat = message.get("chat")
+                    chat_id_raw = chat.get("id") if isinstance(chat, dict) else None
+                    chat_id = int(chat_id_raw) if isinstance(chat_id_raw, (int, float)) else None
+                    text = str(message.get("text", "") or "")
+                    command, _ = _normalize_command(text)
+                    with bind_log_context(
+                        update_id=update_id,
+                        update_ctx_id=new_trace_id("upd"),
+                        chat_id=chat_id,
+                        command=command or "-",
+                    ):
+                        logger.info("Processing update")
+                        await _handle_message(
+                            session=session,
+                            settings=settings,
+                            message=message,
+                            logger=logger,
+                        )
                 except Exception as exc:
                     logger.exception("Failed to process update %s: %s", update_id, exc)
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -36,10 +37,12 @@ class HyperliquidDiscoveryService:
         http_session: aiohttp.ClientSession,
         store: TraderStore,
         config: HyperliquidDiscoveryConfig,
+        logger: logging.Logger | None = None,
     ) -> None:
         self._http_session = http_session
         self._store = store
         self._config = config
+        self._logger = logger or logging.getLogger("cryptoinsider.discovery")
 
     async def _info(self, payload: dict[str, Any]) -> Any:
         attempts = 5
@@ -52,6 +55,12 @@ class HyperliquidDiscoveryService:
                     if response.status == 429 and attempt < attempts - 1:
                         retry_after_raw = response.headers.get("Retry-After", "").strip()
                         retry_after = float(retry_after_raw) if retry_after_raw else 0.0
+                        self._logger.warning(
+                            "Hyperliquid rate limit payload_type=%s attempt=%s retry_after=%s",
+                            payload.get("type"),
+                            attempt + 1,
+                            retry_after,
+                        )
                         await asyncio.sleep(max(backoff, retry_after))
                         backoff = min(backoff * 2, 12.0)
                         continue
@@ -61,6 +70,12 @@ class HyperliquidDiscoveryService:
             except aiohttp.ClientResponseError as exc:
                 last_error = exc
                 if exc.status in {429, 500, 502, 503, 504} and attempt < attempts - 1:
+                    self._logger.warning(
+                        "Hyperliquid response error payload_type=%s attempt=%s status=%s",
+                        payload.get("type"),
+                        attempt + 1,
+                        exc.status,
+                    )
                     await asyncio.sleep(backoff)
                     backoff = min(backoff * 2, 12.0)
                     continue
@@ -68,6 +83,12 @@ class HyperliquidDiscoveryService:
             except aiohttp.ClientError as exc:
                 last_error = exc
                 if attempt < attempts - 1:
+                    self._logger.warning(
+                        "Hyperliquid client error payload_type=%s attempt=%s error=%s",
+                        payload.get("type"),
+                        attempt + 1,
+                        exc,
+                    )
                     await asyncio.sleep(backoff)
                     backoff = min(backoff * 2, 12.0)
                     continue
@@ -145,8 +166,10 @@ class HyperliquidDiscoveryService:
             dedup[item["address"]] = item
         vault_candidates = list(dedup.values())[: self._config.candidate_limit]
         if vault_candidates:
+            self._logger.info("Using vault candidates count=%s", len(vault_candidates))
             return vault_candidates
 
+        self._logger.info("Vault candidates empty, fallback to recent trade candidates")
         return await self._fetch_recent_trade_candidates()
 
     async def _fetch_recent_trade_candidates(self) -> list[dict[str, Any]]:
@@ -226,6 +249,7 @@ class HyperliquidDiscoveryService:
                     "vault_tvl": item["volume"],
                 }
             )
+        self._logger.info("Recent trade candidates prepared count=%s", len(candidates))
         return candidates
 
     async def _fetch_metrics(self, candidate: dict[str, Any], *, now_ms: int) -> dict[str, Any]:
@@ -411,6 +435,7 @@ class HyperliquidDiscoveryService:
         discovery_source = "hyperliquid_vault_leader_scan"
         try:
             candidates = await self._fetch_candidates()
+            self._logger.info("Discovery candidates fetched count=%s", len(candidates))
             if not candidates:
                 summary = {
                     "timestamp": datetime.now(tz=UTC).isoformat(),
@@ -435,13 +460,23 @@ class HyperliquidDiscoveryService:
                 async with sem:
                     try:
                         return await self._fetch_metrics(candidate, now_ms=now_ms)
-                    except Exception:
+                    except Exception as exc:
+                        self._logger.warning(
+                            "Failed to fetch metrics for candidate=%s source=%s error=%s",
+                            candidate.get("address"),
+                            candidate.get("source"),
+                            exc,
+                        )
                         return None
 
             metrics = await asyncio.gather(*(gather_metrics(c) for c in candidates))
 
             qualified = 0
             upserted = 0
+            skipped_age = 0
+            skipped_trades_30d = 0
+            skipped_active_days = 0
+            skipped_trades_7d = 0
             qualified_by_source: dict[str, set[str]] = {}
             for item in metrics:
                 if not item:
@@ -449,12 +484,16 @@ class HyperliquidDiscoveryService:
 
                 age_days = item.get("age_days")
                 if age_days is None or age_days < self._config.min_age_days:
+                    skipped_age += 1
                     continue
                 if item["trades_30d"] < self._config.min_trades_30d:
+                    skipped_trades_30d += 1
                     continue
                 if item["active_days_30d"] < self._config.min_active_days_30d:
+                    skipped_active_days += 1
                     continue
                 if item["trades_7d"] < self._config.min_trades_7d:
+                    skipped_trades_7d += 1
                     continue
 
                 qualified += 1
@@ -499,6 +538,16 @@ class HyperliquidDiscoveryService:
                     source=source,
                     keep_addresses=qualified_by_source.get(source, set()),
                 )
+            self._logger.info(
+                "Discovery filtering summary qualified=%s upserted=%s pruned=%s skipped_age=%s skipped_trades30=%s skipped_active_days=%s skipped_trades7=%s",
+                qualified,
+                upserted,
+                pruned,
+                skipped_age,
+                skipped_trades_30d,
+                skipped_active_days,
+                skipped_trades_7d,
+            )
 
             self._store.log_discovery_run(
                 source=discovery_source,
@@ -523,4 +572,5 @@ class HyperliquidDiscoveryService:
                 upserted=0,
                 error_message=str(exc)[:1000],
             )
+            self._logger.exception("Discovery failed: %s", exc)
             raise

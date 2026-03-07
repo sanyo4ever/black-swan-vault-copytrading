@@ -64,6 +64,32 @@ class ConfigTests(unittest.TestCase):
                 os.environ.clear()
                 os.environ.update(old)
 
+    def test_logging_env_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old = dict(os.environ)
+            try:
+                os.environ["TELEGRAM_BOT_TOKEN"] = "123:abc"
+                os.environ["TELEGRAM_CHANNEL_ID"] = "-1001"
+                os.environ["DATABASE_PATH"] = str(Path(tmpdir) / "db.sqlite")
+                os.environ["SOURCES_CONFIG_PATH"] = str(Path(tmpdir) / "sources.yaml")
+                os.environ["LOG_LEVEL"] = "debug"
+                os.environ["LOG_FORMAT"] = "json"
+                os.environ["LOG_DIRECTORY"] = "/tmp/cryptoinsider-logs"
+                os.environ["LOG_FILE_MAX_BYTES"] = "2048"
+                os.environ["LOG_FILE_BACKUP_COUNT"] = "7"
+                os.environ["LOG_TELEGRAM_HTTP"] = "true"
+
+                settings = load_settings()
+                self.assertEqual(settings.log_level, "DEBUG")
+                self.assertEqual(settings.log_format, "json")
+                self.assertEqual(settings.log_directory, "/tmp/cryptoinsider-logs")
+                self.assertEqual(settings.log_file_max_bytes, 2048)
+                self.assertEqual(settings.log_file_backup_count, 7)
+                self.assertTrue(settings.log_telegram_http)
+            finally:
+                os.environ.clear()
+                os.environ.update(old)
+
 
 if __name__ == "__main__":
     unittest.main()

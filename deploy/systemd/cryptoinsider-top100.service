@@ -10,7 +10,11 @@ User=cryptoinsider
 Group=cryptoinsider
 WorkingDirectory=/opt/cryptoinsider/app
 EnvironmentFile=/etc/cryptoinsider/env
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/opt/cryptoinsider/app/.venv/bin/python top100_worker.py
+SyslogIdentifier=cryptoinsider-top100
+StandardOutput=journal
+StandardError=journal
 Restart=always
 RestartSec=3
 NoNewPrivileges=true

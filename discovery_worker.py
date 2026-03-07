@@ -9,6 +9,7 @@ import aiohttp
 
 from bot.config import load_settings
 from bot.discovery import HyperliquidDiscoveryConfig, HyperliquidDiscoveryService
+from bot.logging_setup import bind_log_context, build_logging_options, new_trace_id, setup_logging
 from bot.trader_store import TraderStore
 
 
@@ -24,18 +25,21 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _setup_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | discovery.worker | %(message)s",
-    )
-
-
 async def _run() -> None:
-    _setup_logging()
     args = _parse_args()
     settings = load_settings(require_telegram=False)
+    setup_logging(
+        service_name="cryptoinsider.discovery-worker",
+        options=build_logging_options(settings),
+    )
+    logger = logging.getLogger("cryptoinsider.discovery-worker")
     interval_seconds = args.interval_seconds or settings.discovery_interval_seconds
+    logger.info(
+        "Service started interval_seconds=%s min_age_days=%s min_trades_30d=%s",
+        interval_seconds,
+        settings.discovery_min_age_days,
+        settings.discovery_min_trades_30d,
+    )
 
     config = HyperliquidDiscoveryConfig(
         info_url=settings.hyperliquid_info_url,
@@ -51,33 +55,37 @@ async def _run() -> None:
     )
 
     timeout = aiohttp.ClientTimeout(total=settings.http_timeout_seconds)
+    cycle = 0
     async with aiohttp.ClientSession(timeout=timeout) as session:
         while True:
+            cycle += 1
             cycle_started = time.monotonic()
-            try:
-                with TraderStore(settings.database_dsn) as store:
-                    service = HyperliquidDiscoveryService(
-                        http_session=session,
-                        store=store,
-                        config=config,
+            with bind_log_context(cycle=cycle, cycle_id=new_trace_id("disc")):
+                try:
+                    with TraderStore(settings.database_dsn) as store:
+                        service = HyperliquidDiscoveryService(
+                            http_session=session,
+                            store=store,
+                            config=config,
+                            logger=logger,
+                        )
+                        summary = await service.discover()
+                    logger.info(
+                        "Cycle done: candidates=%s qualified=%s upserted=%s pruned=%s",
+                        summary["candidates"],
+                        summary["qualified"],
+                        summary["upserted"],
+                        summary.get("pruned", 0),
                     )
-                    summary = await service.discover()
-                logging.info(
-                    "Cycle done: candidates=%s qualified=%s upserted=%s pruned=%s",
-                    summary["candidates"],
-                    summary["qualified"],
-                    summary["upserted"],
-                    summary.get("pruned", 0),
-                )
-            except Exception as exc:
-                logging.exception("Discovery cycle failed: %s", exc)
+                except Exception as exc:
+                    logger.exception("Discovery cycle failed: %s", exc)
 
             if args.once:
                 return
 
             elapsed = time.monotonic() - cycle_started
             sleep_for = max(1, int(interval_seconds - elapsed))
-            logging.info("Sleeping %s second(s) before next cycle", sleep_for)
+            logger.info("Sleeping %s second(s) before next cycle", sleep_for)
             await asyncio.sleep(sleep_for)
 
 

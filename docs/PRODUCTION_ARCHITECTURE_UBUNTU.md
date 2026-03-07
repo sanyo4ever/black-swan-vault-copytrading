@@ -176,6 +176,7 @@ All units must have:
 - `StartLimitIntervalSec=0`
 - dedicated `User=cryptoinsider`
 - health endpoint + watchdog metrics.
+- unified structured logs (`LOG_FORMAT=json` in production), with context keys (`request_id`, `cycle_id`, `update_id`) for end-to-end debugging.
 
 ## 8. Security
 - Secrets only in `/etc/cryptoinsider/env` (chmod 600).

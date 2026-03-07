@@ -1,10 +1,20 @@
 from __future__ import annotations
 
+import logging
 import re
+import time
 from typing import Any
 from typing import Mapping
 
 import aiohttp
+
+_LOGGER = logging.getLogger("cryptoinsider.telegram")
+_TELEGRAM_HTTP_LOG_ENABLED = False
+
+
+def set_telegram_http_logging(enabled: bool) -> None:
+    global _TELEGRAM_HTTP_LOG_ENABLED
+    _TELEGRAM_HTTP_LOG_ENABLED = bool(enabled)
 
 
 class TelegramClientError(RuntimeError):
@@ -159,9 +169,30 @@ async def _telegram_request(
     payload: dict[str, Any],
 ) -> dict[str, Any]:
     url = f"https://api.telegram.org/bot{bot_token}/{method}"
+    started = time.monotonic()
     async with session.post(url, json=payload) as response:
         data = await _read_json_or_text(response)
+        duration_ms = int((time.monotonic() - started) * 1000)
         if response.status >= 400:
+            description = ""
+            retry_after = None
+            error_code = None
+            if isinstance(data, Mapping):
+                description = str(data.get("description", "") or "").strip()
+                retry_after = _extract_retry_after(
+                    description=description,
+                    parameters=data.get("parameters"),
+                )
+                error_code = _safe_int(data.get("error_code"))
+            _LOGGER.warning(
+                "Telegram API request failed method=%s status=%s duration_ms=%s error_code=%s retry_after=%s description=%s",
+                method,
+                response.status,
+                duration_ms,
+                error_code,
+                retry_after,
+                (description[:500] if description else "-"),
+            )
             _raise_telegram_error(method=method, status_code=response.status, payload=data)
         if not isinstance(data, Mapping):
             _raise_telegram_error(
@@ -170,7 +201,20 @@ async def _telegram_request(
                 payload={"ok": False, "description": f"Unexpected payload type: {type(data)}"},
             )
         if not data.get("ok", False):
+            _LOGGER.warning(
+                "Telegram API request returned ok=false method=%s status=%s duration_ms=%s",
+                method,
+                response.status,
+                duration_ms,
+            )
             _raise_telegram_error(method=method, status_code=response.status, payload=data)
+        if _TELEGRAM_HTTP_LOG_ENABLED:
+            _LOGGER.info(
+                "Telegram API request ok method=%s status=%s duration_ms=%s",
+                method,
+                response.status,
+                duration_ms,
+            )
         return dict(data)
 
 
