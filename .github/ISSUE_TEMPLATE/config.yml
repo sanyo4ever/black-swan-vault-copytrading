@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability report
+    url: mailto:sanyo4ever@gmail.com
+    about: Report sensitive security issues privately
+  - name: Commercial licensing / partnerships
+    url: mailto:sanyo4ever@gmail.com
+    about: Closed-source and enterprise requests
