@@ -9,6 +9,7 @@ import re
 import time
 from datetime import UTC, datetime
 from html import escape
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode
 
@@ -28,6 +29,7 @@ from bot.trader_store import (
 )
 
 PROJECT_REPO_URL = "https://github.com/sanyo4ever/black-swan-vault-copytrading"
+PUBLIC_SITE_URL = "https://blackswanvault.online"
 PAYPAL_DONATION_EMAIL = "sanyo4ever@gmail.com"
 USDT_TRC20_DONATION_ADDRESS = "TBFmAiNBK9eze43nhAkWXvir9yV6tUzpgQ"
 
@@ -403,6 +405,9 @@ def _render_public_directory(
     origin = _request_origin(request)
     canonical_url = f"{origin}/"
     current_url = f"{origin}{request.path_qs}"
+    logo_mark_url = "/assets/blackswanvault-mark.svg"
+    logo_banner_url = "/assets/blackswanvault-logo.svg"
+    logo_og_url = f"{origin}{logo_banner_url}"
     has_query_filters = bool(request.query)
     robots = (
         "noindex,follow"
@@ -491,9 +496,13 @@ def _render_public_directory(
   <meta property='og:title' content='{escape(page_title)}' />
   <meta property='og:description' content='{escape(page_description)}' />
   <meta property='og:url' content='{escape(current_url)}' />
+  <meta property='og:image' content='{escape(logo_og_url)}' />
   <meta name='twitter:card' content='summary_large_image' />
   <meta name='twitter:title' content='{escape(page_title)}' />
   <meta name='twitter:description' content='{escape(page_description)}' />
+  <meta name='twitter:image' content='{escape(logo_og_url)}' />
+  <link rel='icon' type='image/svg+xml' href='{escape(logo_mark_url)}' />
+  <meta name='theme-color' content='#06080d' />
   <meta http-equiv='refresh' content='30' />
   <title>{escape(page_title)}</title>
   <script type='application/ld+json'>{website_schema}</script>
@@ -534,6 +543,45 @@ def _render_public_directory(
       box-shadow:0 16px 38px rgba(0,0,0,.24);
     }}
     .hero-card {{ background:linear-gradient(180deg,rgba(255,180,60,.07),rgba(255,255,255,.01)); }}
+    .brand-row {{ display:flex; gap:12px; align-items:center; margin-bottom:8px; }}
+    .brand-mark {{
+      width:74px;
+      height:74px;
+      border-radius:18px;
+      background:#0a0f16;
+      border:1px solid #2c3442;
+      padding:6px;
+      box-shadow:inset 0 0 24px rgba(255,159,26,.08);
+      flex:0 0 auto;
+      overflow:hidden;
+    }}
+    .brand-mark img {{ display:block; width:100%; height:100%; object-fit:cover; }}
+    .brand-copy {{ min-width:0; }}
+    .brand-name {{
+      font-size:19px;
+      font-weight:700;
+      letter-spacing:.2px;
+      margin-bottom:3px;
+      color:#f1f4fb;
+    }}
+    .brand-tagline {{
+      margin:0 0 4px;
+      color:#b1bdd6;
+      font-size:12px;
+      letter-spacing:.25px;
+    }}
+    .domain-chip {{
+      display:inline-block;
+      border-radius:999px;
+      border:1px solid #7f5417;
+      background:rgba(255,159,26,.12);
+      color:#ffbc55;
+      text-decoration:none;
+      font-size:12px;
+      font-weight:600;
+      padding:4px 10px;
+    }}
+    .domain-chip:hover {{ background:rgba(255,159,26,.2); }}
     h1 {{ margin:0 0 6px; font-size:29px; letter-spacing:.2px; }}
     h2 {{ margin:0 0 8px; font-size:20px; }}
     h3 {{ margin:0 0 6px; font-size:15px; }}
@@ -641,12 +689,24 @@ def _render_public_directory(
       .tab {{ font-size:17px; }}
       h1 {{ font-size:25px; }}
       .card {{ padding:12px; }}
+      .brand-mark {{ width:62px; height:62px; border-radius:14px; }}
+      .brand-name {{ font-size:16px; }}
     }}
   </style>
 </head>
 <body>
   <div class='wrap'>
     <div class='card hero-card'>
+      <div class='brand-row'>
+        <div class='brand-mark' aria-label='Black Swan Vault logo'>
+          <img src='/assets/blackswanvault-mark.svg' alt='Black Swan Vault mark' />
+        </div>
+        <div class='brand-copy'>
+          <div class='brand-name'>Black Swan Vault</div>
+          <p class='brand-tagline'>Open-source crypto copytrading intelligence</p>
+          <a class='domain-chip' href='{escape(PUBLIC_SITE_URL)}' target='_blank' rel='noopener'>blackswanvault.online</a>
+        </div>
+      </div>
       <h1>Crypto Copy Trading Signals for Futures Traders</h1>
       <p>Find active traders, filter by performance, and open Telegram copy trading feeds in one click.</p>
       <div class='top-tabs'>
@@ -666,7 +726,7 @@ def _render_public_directory(
         <strong>How it works:</strong> Discovery workers collect and score futures traders continuously.<br/>
         Catalog refresh: <strong>{escape(refreshed_at)}</strong>.<br/>
         Table shows objective strategy metrics only (ROI, Drawdown, PnL, Win Rate, P/L Ratio, Sharpe, trade activity).<br/>
-        Click <strong>Open Trader Chat</strong> to receive free crypto signals from your selected trader in Telegram.<br/>
+        Click <strong>Copy</strong> to receive free crypto signals from your selected trader in Telegram.<br/>
         Open-source repository: <a href='{escape(PROJECT_REPO_URL)}' target='_blank' rel='noopener'>GitHub</a>.<br/>
         Project is donation-supported: PayPal <code>{escape(PAYPAL_DONATION_EMAIL)}</code> or USDT TRC20 <code>{escape(USDT_TRC20_DONATION_ADDRESS)}</code>.<br/>
         Informational only. Not financial advice.
@@ -1389,10 +1449,6 @@ async def _on_startup(app: web.Application) -> None:
     settings = app["settings"]
     timeout = aiohttp.ClientTimeout(total=settings.http_timeout_seconds)
     app["http_session"] = aiohttp.ClientSession(timeout=timeout)
-    # Warm DB bootstrap/migrations during startup, not on first user request.
-    with TraderStore(settings.database_dsn) as store:
-        store.list_catalog_traders(limit=1)
-    app["logger"].info("Admin DB bootstrap complete")
     app["logger"].info("Admin app startup complete")
 
 
@@ -1409,6 +1465,12 @@ def create_app(*, settings=None, logger: logging.Logger | None = None) -> web.Ap
     app = web.Application(middlewares=[_request_logging_middleware, _admin_auth_middleware])
     app["settings"] = resolved_settings
     app["logger"] = resolved_logger
+
+    assets_dir = Path(__file__).resolve().parents[1] / "assets"
+    if assets_dir.exists():
+        app.router.add_static("/assets", str(assets_dir), show_index=False)
+    else:
+        resolved_logger.warning("Assets directory not found path=%s", assets_dir)
 
     app.add_routes(
         [

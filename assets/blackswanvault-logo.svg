@@ -1,0 +1,39 @@
+<svg width="1400" height="440" viewBox="0 0 1400 440" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="panel" x1="42" y1="16" x2="1330" y2="438" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0B111A"/>
+      <stop offset="1" stop-color="#06090F"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="105" y1="78" x2="387" y2="396" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFD27D"/>
+      <stop offset="0.52" stop-color="#FF9F1A"/>
+      <stop offset="1" stop-color="#8F5200"/>
+    </linearGradient>
+    <linearGradient id="chip" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FFB74D" stop-opacity="0.2"/>
+      <stop offset="1" stop-color="#FF9F1A" stop-opacity="0.08"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="16" y="16" width="1368" height="408" rx="34" fill="url(#panel)" stroke="#2B3442" stroke-width="2"/>
+
+  <g transform="translate(58 56)">
+    <rect x="0" y="0" width="328" height="328" rx="72" fill="#0A1018" stroke="#2A3443" stroke-width="4"/>
+    <circle cx="164" cy="164" r="128" fill="#0C131D"/>
+    <circle cx="164" cy="164" r="128" stroke="url(#ring)" stroke-width="7"/>
+    <circle cx="164" cy="164" r="104" stroke="#FF9F1A" stroke-opacity="0.22" stroke-width="3"/>
+
+    <path d="M192.682 88.6022C180.057 90.3224 167.759 98.6617 160.75 111.044C152.214 126.126 152.449 144.762 162.849 160.411C168.813 169.417 179.076 176.81 192.411 178.995C204.402 180.98 215.263 177.411 224.14 170.254C219.685 188.342 205.592 203.328 186.622 208.605C163.339 215.086 139.472 205.555 127.637 186.825C135.124 214.384 159.61 233.838 190.067 233.838C223.021 233.838 250.327 209.773 255.52 178.109C259.408 154.361 248.866 133.373 230.121 120.112C218.535 111.851 206.41 87.9821 192.682 88.6022Z" fill="#EEF3FF" fill-opacity="0.97"/>
+    <path d="M212.862 95.1559C226.227 92.9708 238.368 96.0549 248.689 103.418C259.708 111.308 267.549 122.851 270.708 135.67C259.377 126.732 245.507 121.634 229.694 122.214C221.391 122.542 213.331 124.126 206.346 127.75C206.136 115.576 209.845 105.385 212.862 95.1559Z" fill="#FF9F1A" fill-opacity="0.34"/>
+    <path d="M113.581 234.278C125.784 251.071 145.849 261.87 166.792 261.87C180.49 261.87 192.859 257.782 203.149 250.778C193.95 267.662 177.339 278.943 157.668 280.339C137.643 281.763 118.544 273.809 104.969 258.823C96.0713 248.962 89.7264 236.917 88.419 223.846C96.9835 228.553 104.544 232.398 113.581 234.278Z" fill="#FFB13D" fill-opacity="0.96"/>
+    <circle cx="225.597" cy="110.09" r="5.683" fill="#FFB13D"/>
+  </g>
+
+  <g transform="translate(440 118)">
+    <text x="0" y="86" fill="#F4F7FD" font-family="Space Grotesk, Segoe UI, sans-serif" font-size="78" font-weight="700" letter-spacing="1.2">BLACK SWAN VAULT</text>
+    <text x="3" y="138" fill="#FFBF56" font-family="Space Grotesk, Segoe UI, sans-serif" font-size="34" font-weight="600" letter-spacing="1.1">blackswanvault.online</text>
+
+    <rect x="0" y="176" width="636" height="58" rx="29" fill="url(#chip)" stroke="#7F5417"/>
+    <text x="28" y="214" fill="#FFBF54" font-family="Space Grotesk, Segoe UI, sans-serif" font-size="27" font-weight="600">Open-source crypto copytrading intelligence</text>
+  </g>
+</svg>
