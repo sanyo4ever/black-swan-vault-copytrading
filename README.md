@@ -129,6 +129,9 @@ DELIVERY_MONITOR_MAX_POLL_SECONDS=180
 DELIVERY_MONITOR_PRIORITY_RECENCY_MINUTES=120
 DELIVERY_MONITOR_MAX_TRADERS_PER_CYCLE=120
 DELIVERY_MONITOR_HTTP_CONCURRENCY=8
+TRADER_LISTED_WITHIN_MINUTES=60
+TRADER_STALE_AFTER_MINUTES=4320
+TRADER_ARCHIVE_AFTER_DAYS=180
 ```
 
 ## Public and Admin URLs
@@ -150,6 +153,21 @@ Core tables:
 - `catalog_current`: denormalized public catalog view
 - `subscriptions`, `delivery_sessions`: Telegram delivery lifecycle
 - `discovery_runs`: discovery run observability
+
+### Trader Lifecycle Consistency
+
+Tracked traders are never hard-deleted in normal operation.
+
+- `ACTIVE_LISTED`: visible in public catalog, open for new subscriptions.
+- `ACTIVE_UNLISTED`: hidden from default catalog, kept for continuity/history.
+- `STALE`: inactive beyond stale threshold, blocked for new subscriptions.
+- `ARCHIVED`: long-inactive historical record, blocked for new subscriptions.
+
+Lifecycle transitions are automatic (`top100_worker` + `universe_worker`) and subscription-safe:
+
+- active subscriber -> never auto-archived
+- blacklisted trader -> delivery detached by moderation rules
+- discovery "prune" -> soft unlist, not delete
 
 ## Test Data Hygiene
 

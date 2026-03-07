@@ -49,6 +49,11 @@ async def _run() -> None:
         with bind_log_context(cycle=cycle, cycle_id=new_trace_id("uni")):
             try:
                 with TraderStore(settings.database_dsn) as store:
+                    lifecycle_stats = store.apply_trader_lifecycle(
+                        listed_within_minutes=settings.trader_listed_within_minutes,
+                        stale_after_minutes=settings.trader_stale_after_minutes,
+                        archive_after_days=settings.trader_archive_after_days,
+                    )
                     universe_size = store.refresh_traders_universe_from_tracked(
                         min_age_days=settings.universe_min_age_days,
                         min_trades_30d=settings.universe_min_trades_30d,
@@ -60,7 +65,15 @@ async def _run() -> None:
                         min_score=settings.universe_min_score,
                         max_size=settings.universe_max_size,
                     )
-                logger.info("Universe refresh complete: size=%s", universe_size)
+                logger.info(
+                    "Lifecycle changed=%s listed=%s unlisted=%s stale=%s archived=%s | Universe size=%s",
+                    lifecycle_stats.get("changed", 0),
+                    lifecycle_stats.get("ACTIVE_LISTED", 0),
+                    lifecycle_stats.get("ACTIVE_UNLISTED", 0),
+                    lifecycle_stats.get("STALE", 0),
+                    lifecycle_stats.get("ARCHIVED", 0),
+                    universe_size,
+                )
             except Exception as exc:
                 logger.exception("Universe cycle failed: %s", exc)
 

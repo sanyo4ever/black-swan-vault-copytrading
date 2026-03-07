@@ -47,6 +47,11 @@ async def _run() -> None:
         with bind_log_context(cycle=cycle, cycle_id=new_trace_id("top")):
             try:
                 with TraderStore(settings.database_dsn) as store:
+                    lifecycle_stats = store.apply_trader_lifecycle(
+                        listed_within_minutes=settings.trader_listed_within_minutes,
+                        stale_after_minutes=settings.trader_stale_after_minutes,
+                        archive_after_days=settings.trader_archive_after_days,
+                    )
                     catalog_size = store.refresh_catalog_current(
                         activity_window_minutes=settings.live_top100_active_window_minutes,
                     )
@@ -64,7 +69,12 @@ async def _run() -> None:
                         warm_recency_minutes=settings.monitor_warm_recency_minutes,
                     )
                 logger.info(
-                    "Catalog refresh complete: size=%s | Top100 refresh complete: size=%s | Monitoring pool total=%s hot=%s warm=%s cold=%s",
+                    "Lifecycle changed=%s listed=%s unlisted=%s stale=%s archived=%s | Catalog size=%s | Top100 size=%s | Monitoring pool total=%s hot=%s warm=%s cold=%s",
+                    lifecycle_stats.get("changed", 0),
+                    lifecycle_stats.get("ACTIVE_LISTED", 0),
+                    lifecycle_stats.get("ACTIVE_UNLISTED", 0),
+                    lifecycle_stats.get("STALE", 0),
+                    lifecycle_stats.get("ARCHIVED", 0),
                     catalog_size,
                     count,
                     monitoring_stats.get("total", 0),

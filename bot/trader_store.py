@@ -15,8 +15,19 @@ except Exception:  # pragma: no cover - optional dependency for sqlite-only dev 
     psycopg = None
     dict_row = None
 
-STATUS_ACTIVE = "ACTIVE"
+STATUS_ACTIVE_LISTED = "ACTIVE_LISTED"
+STATUS_ACTIVE_UNLISTED = "ACTIVE_UNLISTED"
+STATUS_STALE = "STALE"
+STATUS_ARCHIVED = "ARCHIVED"
+# Backward-compatible alias used by older imports/tests/UI code.
+STATUS_ACTIVE = STATUS_ACTIVE_LISTED
 STATUS_PAUSED = "PAUSED"
+TRACKED_TRADER_STATUSES = (
+    STATUS_ACTIVE_LISTED,
+    STATUS_ACTIVE_UNLISTED,
+    STATUS_STALE,
+    STATUS_ARCHIVED,
+)
 MODERATION_NEUTRAL = "NEUTRAL"
 MODERATION_WHITELIST = "WHITELIST"
 MODERATION_BLACKLIST = "BLACKLIST"
@@ -227,7 +238,7 @@ class TraderStore:
             self._connection.row_factory = sqlite3.Row
         self._database_key = database_str
         self._ensure_schema_once_per_process()
-        self._enforce_active_only_trader_status()
+        self._normalize_trader_status_values()
         self._enforce_permanent_subscriptions()
 
     def _ensure_schema_once_per_process(self) -> None:
@@ -275,26 +286,90 @@ class TraderStore:
         else:
             self._ensure_schema_sqlite()
 
-    def _enforce_active_only_trader_status(self) -> None:
-        # Current product mode: every tracked trader remains ACTIVE.
+    def _ensure_postgres_status_constraint(
+        self,
+        *,
+        table_name: str,
+        constraint_name: str,
+    ) -> None:
+        status_values = "','".join(
+            (
+                STATUS_ACTIVE_LISTED,
+                STATUS_ACTIVE_UNLISTED,
+                STATUS_STALE,
+                STATUS_ARCHIVED,
+                "ACTIVE",
+                "PAUSED",
+            )
+        )
+        self._execute(
+            f"""
+            DO $status$
+            DECLARE existing_def TEXT;
+            BEGIN
+                SELECT pg_get_constraintdef(c.oid)
+                INTO existing_def
+                FROM pg_constraint c
+                JOIN pg_class t ON t.oid = c.conrelid
+                JOIN pg_namespace n ON n.oid = t.relnamespace
+                WHERE c.conname = '{constraint_name}'
+                  AND t.relname = '{table_name}'
+                  AND n.nspname = current_schema();
+
+                IF existing_def IS NULL OR position('ACTIVE_LISTED' in existing_def) = 0 THEN
+                    IF existing_def IS NOT NULL THEN
+                        EXECUTE 'ALTER TABLE {table_name} DROP CONSTRAINT {constraint_name}';
+                    END IF;
+                    EXECUTE
+                        'ALTER TABLE {table_name} ADD CONSTRAINT {constraint_name} '
+                        || 'CHECK (status IN (''{status_values}''))';
+                END IF;
+            END
+            $status$;
+            """
+        )
+
+    def _normalize_trader_status_values(self) -> None:
+        # Migrate legacy enum values to lifecycle statuses.
         try:
             self._execute(
                 """
                 UPDATE tracked_traders
-                SET status = ?,
-                    manual_status_override = 0,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE status <> ?
+                SET status = CASE
+                    WHEN status IN ('ACTIVE', 'ACTIVE_LISTED') THEN ?
+                    WHEN status IN ('PAUSED', 'ACTIVE_UNLISTED') THEN ?
+                    WHEN status = 'STALE' THEN ?
+                    WHEN status = 'ARCHIVED' THEN ?
+                    ELSE ?
+                END,
+                updated_at = CURRENT_TIMESTAMP
                 """,
-                (STATUS_ACTIVE, STATUS_ACTIVE),
+                (
+                    STATUS_ACTIVE_LISTED,
+                    STATUS_ACTIVE_UNLISTED,
+                    STATUS_STALE,
+                    STATUS_ARCHIVED,
+                    STATUS_ACTIVE_UNLISTED,
+                ),
             )
             self._execute(
                 """
                 UPDATE catalog_current
-                SET status = ?
-                WHERE status <> ?
+                SET status = CASE
+                    WHEN status IN ('ACTIVE', 'ACTIVE_LISTED') THEN ?
+                    WHEN status IN ('PAUSED', 'ACTIVE_UNLISTED') THEN ?
+                    WHEN status = 'STALE' THEN ?
+                    WHEN status = 'ARCHIVED' THEN ?
+                    ELSE ?
+                END
                 """,
-                (STATUS_ACTIVE, STATUS_ACTIVE),
+                (
+                    STATUS_ACTIVE_LISTED,
+                    STATUS_ACTIVE_UNLISTED,
+                    STATUS_STALE,
+                    STATUS_ARCHIVED,
+                    STATUS_ACTIVE_UNLISTED,
+                ),
             )
             self._connection.commit()
         except Exception:
@@ -342,7 +417,16 @@ class TraderStore:
                 address TEXT PRIMARY KEY,
                 label TEXT,
                 source TEXT NOT NULL,
-                status TEXT NOT NULL CHECK(status IN ('ACTIVE', 'PAUSED')),
+                status TEXT NOT NULL CHECK(
+                    status IN (
+                        'ACTIVE_LISTED',
+                        'ACTIVE_UNLISTED',
+                        'STALE',
+                        'ARCHIVED',
+                        'ACTIVE',
+                        'PAUSED'
+                    )
+                ),
                 auto_discovered INTEGER NOT NULL DEFAULT 0,
                 manual_status_override INTEGER NOT NULL DEFAULT 0,
                 moderation_state TEXT NOT NULL
@@ -427,7 +511,16 @@ class TraderStore:
                 address TEXT PRIMARY KEY,
                 label TEXT,
                 source TEXT NOT NULL,
-                status TEXT NOT NULL CHECK(status IN ('ACTIVE', 'PAUSED')),
+                status TEXT NOT NULL CHECK(
+                    status IN (
+                        'ACTIVE_LISTED',
+                        'ACTIVE_UNLISTED',
+                        'STALE',
+                        'ARCHIVED',
+                        'ACTIVE',
+                        'PAUSED'
+                    )
+                ),
                 auto_discovered SMALLINT NOT NULL DEFAULT 0,
                 manual_status_override SMALLINT NOT NULL DEFAULT 0,
                 moderation_state TEXT NOT NULL
@@ -499,6 +592,14 @@ class TraderStore:
             )
 
         self._ensure_common_tables_postgres()
+        self._ensure_postgres_status_constraint(
+            table_name="tracked_traders",
+            constraint_name="tracked_traders_status_check",
+        )
+        self._ensure_postgres_status_constraint(
+            table_name="catalog_current",
+            constraint_name="catalog_current_status_check",
+        )
         self._connection.commit()
 
     def _ensure_common_tables_sqlite(self) -> None:
@@ -738,7 +839,16 @@ class TraderStore:
                 address TEXT PRIMARY KEY,
                 label TEXT,
                 source TEXT NOT NULL,
-                status TEXT NOT NULL CHECK(status IN ('ACTIVE', 'PAUSED')),
+                status TEXT NOT NULL CHECK(
+                    status IN (
+                        'ACTIVE_LISTED',
+                        'ACTIVE_UNLISTED',
+                        'STALE',
+                        'ARCHIVED',
+                        'ACTIVE',
+                        'PAUSED'
+                    )
+                ),
                 moderation_state TEXT NOT NULL
                     CHECK(moderation_state IN ('NEUTRAL', 'WHITELIST', 'BLACKLIST')),
                 moderation_note TEXT,
@@ -1158,7 +1268,16 @@ class TraderStore:
                 address TEXT PRIMARY KEY,
                 label TEXT,
                 source TEXT NOT NULL,
-                status TEXT NOT NULL CHECK(status IN ('ACTIVE', 'PAUSED')),
+                status TEXT NOT NULL CHECK(
+                    status IN (
+                        'ACTIVE_LISTED',
+                        'ACTIVE_UNLISTED',
+                        'STALE',
+                        'ARCHIVED',
+                        'ACTIVE',
+                        'PAUSED'
+                    )
+                ),
                 moderation_state TEXT NOT NULL
                     CHECK(moderation_state IN ('NEUTRAL', 'WHITELIST', 'BLACKLIST')),
                 moderation_note TEXT,
@@ -1345,6 +1464,22 @@ class TraderStore:
     @staticmethod
     def normalize_address(address: str) -> str:
         return address.strip().lower()
+
+    @staticmethod
+    def normalize_trader_status(status: str) -> str:
+        raw = str(status or "").strip().upper()
+        mapping = {
+            "ACTIVE": STATUS_ACTIVE_LISTED,
+            "ACTIVE_LISTED": STATUS_ACTIVE_LISTED,
+            "PAUSED": STATUS_ACTIVE_UNLISTED,
+            "ACTIVE_UNLISTED": STATUS_ACTIVE_UNLISTED,
+            "STALE": STATUS_STALE,
+            "ARCHIVED": STATUS_ARCHIVED,
+        }
+        normalized = mapping.get(raw)
+        if normalized is None:
+            raise ValueError(f"Unsupported trader status: {status}")
+        return normalized
 
     @staticmethod
     def _row_to_model(row: Mapping[str, Any]) -> TrackedTrader:
@@ -1547,10 +1682,11 @@ class TraderStore:
             SELECT address
             FROM tracked_traders
             WHERE COALESCE(moderation_state, ?) <> ?
+              AND status <> ?
             ORDER BY COALESCE(score, -1) DESC, updated_at DESC
             LIMIT ?
             """,
-            (MODERATION_NEUTRAL, MODERATION_BLACKLIST, limit),
+            (MODERATION_NEUTRAL, MODERATION_BLACKLIST, STATUS_ARCHIVED, limit),
         ).fetchall()
         return [str(row["address"]) for row in rows]
 
@@ -1595,9 +1731,10 @@ class TraderStore:
     ) -> list[MonitoringTarget]:
         where = [
             "mp.next_poll_at <= CURRENT_TIMESTAMP",
+            "t.status <> ?",
             "COALESCE(t.moderation_state, ?) <> ?",
         ]
-        params: list[Any] = [MODERATION_NEUTRAL, MODERATION_BLACKLIST]
+        params: list[Any] = [STATUS_ARCHIVED, MODERATION_NEUTRAL, MODERATION_BLACKLIST]
         if only_subscribed:
             where.append(
                 """
@@ -1688,10 +1825,11 @@ class TraderStore:
             WHERE ds.status = 'ACTIVE'
               AND s.status = 'ACTIVE'
               AND s.expires_at > CURRENT_TIMESTAMP
+              AND t.status <> ?
               AND COALESCE(t.moderation_state, ?) <> ?
             GROUP BY ds.trader_address
             """,
-            (MODERATION_NEUTRAL, MODERATION_BLACKLIST),
+            (STATUS_ARCHIVED, MODERATION_NEUTRAL, MODERATION_BLACKLIST),
         ).fetchall()
 
         now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
@@ -1819,11 +1957,12 @@ class TraderStore:
             JOIN tracked_traders t ON t.address = dms.address
             WHERE dms.subscriber_count > 0
               AND dms.next_poll_at <= CURRENT_TIMESTAMP
+              AND t.status <> ?
               AND COALESCE(t.moderation_state, ?) <> ?
             ORDER BY dms.priority_score DESC, dms.next_poll_at ASC, dms.address ASC
             LIMIT ?
             """,
-            (MODERATION_NEUTRAL, MODERATION_BLACKLIST, int(limit)),
+            (STATUS_ARCHIVED, MODERATION_NEUTRAL, MODERATION_BLACKLIST, int(limit)),
         ).fetchall()
         return [self._row_to_delivery_monitor_target(row) for row in rows]
 
@@ -1935,7 +2074,8 @@ class TraderStore:
                 last_fill_time
             FROM tracked_traders
             WHERE
-                COALESCE(moderation_state, ?) <> ?
+                status <> ?
+                AND COALESCE(moderation_state, ?) <> ?
                 AND
                 COALESCE(age_days, 0) >= ?
                 AND COALESCE(trades_30d, 0) >= ?
@@ -1949,6 +2089,7 @@ class TraderStore:
             LIMIT ?
             """,
             (
+                STATUS_ARCHIVED,
                 MODERATION_NEUTRAL,
                 MODERATION_BLACKLIST,
                 float(min_age_days),
@@ -2113,9 +2254,10 @@ class TraderStore:
                 t.trades_7d
             FROM traders_universe u
             JOIN tracked_traders t ON t.address = u.address
-            WHERE COALESCE(t.moderation_state, ?) <> ?
+            WHERE t.status <> ?
+              AND COALESCE(t.moderation_state, ?) <> ?
             """,
-            (MODERATION_NEUTRAL, MODERATION_BLACKLIST),
+            (STATUS_ARCHIVED, MODERATION_NEUTRAL, MODERATION_BLACKLIST),
         ).fetchall()
 
         ranked: list[tuple[str, float, int, int, int]] = []
@@ -2482,9 +2624,14 @@ class TraderStore:
                 params.extend([f"%{q_norm}%", f"%{q_norm}%", f"%{q_norm}%"])
 
         status_norm = str(status or "").upper()
-        if status_norm == STATUS_ACTIVE:
-            where.append("status = ?")
-            params.append(status_norm)
+        if status_norm and status_norm != "ALL":
+            try:
+                normalized_status = self.normalize_trader_status(status_norm)
+            except ValueError:
+                normalized_status = ""
+            if normalized_status:
+                where.append("status = ?")
+                params.append(normalized_status)
 
         moderation_norm = str(moderation_state or "").upper()
         if moderation_norm in {
@@ -2590,11 +2737,12 @@ class TraderStore:
                 t.last_fill_time
             FROM traders_top100_live top
             JOIN tracked_traders t ON t.address = top.address
-            WHERE COALESCE(t.moderation_state, ?) <> ?
+            WHERE t.status <> ?
+              AND COALESCE(t.moderation_state, ?) <> ?
             ORDER BY top.rank_position ASC
             LIMIT ?
             """,
-            (MODERATION_NEUTRAL, MODERATION_BLACKLIST, limit),
+            (STATUS_ARCHIVED, MODERATION_NEUTRAL, MODERATION_BLACKLIST, limit),
         ).fetchall()
         return [self._row_to_live_top_trader(row) for row in rows]
 
@@ -2617,8 +2765,13 @@ class TraderStore:
         normalized = self.normalize_address(trader_address)
         if not normalized:
             raise ValueError("Trader address must not be empty")
-        if self.get_trader(address=normalized) is None:
+        trader = self.get_trader(address=normalized)
+        if trader is None:
             raise ValueError("Trader does not exist")
+        if trader.moderation_state == MODERATION_BLACKLIST:
+            raise ValueError("Trader is not available for subscription")
+        if trader.status in {STATUS_STALE, STATUS_ARCHIVED}:
+            raise ValueError("Trader is currently not eligible for new subscriptions")
 
         self._execute(
             """
@@ -2693,8 +2846,13 @@ class TraderStore:
         normalized = self.normalize_address(trader_address)
         if not normalized:
             raise ValueError("Trader address must not be empty")
-        if self.get_trader(address=normalized) is None:
+        trader = self.get_trader(address=normalized)
+        if trader is None:
             raise ValueError("Trader does not exist")
+        if trader.moderation_state == MODERATION_BLACKLIST:
+            raise ValueError("Trader is not available for subscription")
+        if trader.status in {STATUS_STALE, STATUS_ARCHIVED}:
+            raise ValueError("Trader is currently not eligible for new subscriptions")
 
         chat_id_str = str(chat_id)
         # Subscriptions are indefinite and can be stopped only by explicit cancellation.
@@ -3240,8 +3398,15 @@ class TraderStore:
                 label = COALESCE(excluded.label, tracked_traders.label),
                 source = excluded.source,
                 auto_discovered = 1,
-                status = 'ACTIVE',
-                manual_status_override = 0,
+                status = CASE
+                    WHEN tracked_traders.manual_status_override = 1 THEN tracked_traders.status
+                    WHEN tracked_traders.status = 'ARCHIVED' THEN 'ACTIVE_UNLISTED'
+                    ELSE 'ACTIVE_LISTED'
+                END,
+                manual_status_override = CASE
+                    WHEN tracked_traders.manual_status_override = 1 THEN 1
+                    ELSE 0
+                END,
                 trades_24h = excluded.trades_24h,
                 active_hours_24h = excluded.active_hours_24h,
                 trades_7d = excluded.trades_7d,
@@ -3269,7 +3434,7 @@ class TraderStore:
                 normalized,
                 (label or None),
                 source,
-                STATUS_ACTIVE,
+                STATUS_ACTIVE_LISTED,
                 MODERATION_NEUTRAL,
                 trades_24h,
                 active_hours_24h,
@@ -3297,25 +3462,19 @@ class TraderStore:
 
     def set_status(self, *, address: str, status: str) -> None:
         normalized = self.normalize_address(address)
-        if status != STATUS_ACTIVE:
-            raise ValueError(
-                "PAUSED mode is deprecated. Only ACTIVE status is supported in current mode."
-            )
+        normalized_status = self.normalize_trader_status(status)
         self._execute(
             """
             UPDATE tracked_traders
-            SET status = ?, manual_status_override = 0, updated_at = CURRENT_TIMESTAMP
+            SET status = ?, manual_status_override = 1, updated_at = CURRENT_TIMESTAMP
             WHERE address = ?
             """,
-            (STATUS_ACTIVE, normalized),
+            (normalized_status, normalized),
         )
         self._connection.commit()
 
     def set_status_bulk(self, *, addresses: Iterable[str], status: str) -> int:
-        if status != STATUS_ACTIVE:
-            raise ValueError(
-                "PAUSED mode is deprecated. Only ACTIVE status is supported in current mode."
-            )
+        normalized_status = self.normalize_trader_status(status)
 
         normalized = [
             self.normalize_address(address)
@@ -3329,10 +3488,10 @@ class TraderStore:
         cursor = self._execute(
             f"""
             UPDATE tracked_traders
-            SET status = ?, manual_status_override = 0, updated_at = CURRENT_TIMESTAMP
+            SET status = ?, manual_status_override = 1, updated_at = CURRENT_TIMESTAMP
             WHERE address IN ({placeholders})
             """,
-            (STATUS_ACTIVE, *normalized),
+            (normalized_status, *normalized),
         )
         self._connection.commit()
         return int(cursor.rowcount)
@@ -3432,8 +3591,31 @@ class TraderStore:
 
     def delete(self, *, address: str) -> None:
         normalized = self.normalize_address(address)
+        # Soft-delete only: keep history and preserve active subscriptions.
         self._execute(
-            "DELETE FROM tracked_traders WHERE address = ?", (normalized,)
+            """
+            UPDATE tracked_traders
+            SET status = CASE
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM subscriptions s
+                        WHERE s.trader_address = tracked_traders.address
+                          AND s.status = ?
+                          AND s.expires_at > CURRENT_TIMESTAMP
+                    )
+                    THEN ?
+                    ELSE ?
+                END,
+                manual_status_override = 1,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE address = ?
+            """,
+            (
+                SUBSCRIPTION_ACTIVE,
+                STATUS_ACTIVE_UNLISTED,
+                STATUS_ARCHIVED,
+                normalized,
+            ),
         )
         self._connection.commit()
 
@@ -3503,26 +3685,135 @@ class TraderStore:
             placeholders = ",".join("?" for _ in keep)
             cursor = self._execute(
                 f"""
-                DELETE FROM tracked_traders
+                UPDATE tracked_traders
+                SET status = CASE
+                        WHEN status = ? THEN ?
+                        ELSE ?
+                    END,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE auto_discovered = 1
                   AND manual_status_override = 0
                   AND source = ?
                   AND address NOT IN ({placeholders})
                 """,
-                (source, *keep),
+                (
+                    STATUS_ARCHIVED,
+                    STATUS_ARCHIVED,
+                    STATUS_ACTIVE_UNLISTED,
+                    source,
+                    *keep,
+                ),
             )
         else:
             cursor = self._execute(
                 """
-                DELETE FROM tracked_traders
+                UPDATE tracked_traders
+                SET status = CASE
+                        WHEN status = ? THEN ?
+                        ELSE ?
+                    END,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE auto_discovered = 1
                   AND manual_status_override = 0
                   AND source = ?
                 """,
-                (source,),
+                (
+                    STATUS_ARCHIVED,
+                    STATUS_ARCHIVED,
+                    STATUS_ACTIVE_UNLISTED,
+                    source,
+                ),
             )
         self._connection.commit()
         return cursor.rowcount
+
+    def apply_trader_lifecycle(
+        self,
+        *,
+        listed_within_minutes: int = 60,
+        stale_after_minutes: int = 3 * 24 * 60,
+        archive_after_days: int = 180,
+    ) -> dict[str, int]:
+        listed_within_minutes = max(5, int(listed_within_minutes))
+        stale_after_minutes = max(listed_within_minutes + 1, int(stale_after_minutes))
+        archive_after_days = max(1, int(archive_after_days))
+
+        now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
+        listed_cutoff_ms = now_ms - (listed_within_minutes * 60 * 1000)
+        stale_cutoff_ms = now_ms - (stale_after_minutes * 60 * 1000)
+        archive_cutoff_ms = now_ms - (archive_after_days * 24 * 60 * 60 * 1000)
+
+        if self._driver == "postgres":
+            created_at_ms_expr = "(EXTRACT(EPOCH FROM created_at) * 1000)::bigint"
+        else:
+            created_at_ms_expr = "(CAST(strftime('%s', created_at) AS INTEGER) * 1000)"
+
+        activity_ms_expr = f"COALESCE(NULLIF(last_fill_time, 0), {created_at_ms_expr}, 0)"
+        active_subscription_expr = (
+            "EXISTS ("
+            "SELECT 1 FROM subscriptions s "
+            "WHERE s.trader_address = tracked_traders.address "
+            "AND s.status = 'ACTIVE' "
+            "AND s.expires_at > CURRENT_TIMESTAMP"
+            ")"
+        )
+
+        status_case_sql = f"""
+            CASE
+                WHEN COALESCE(moderation_state, ?) = ? THEN status
+                WHEN manual_status_override = 1 THEN status
+                WHEN {active_subscription_expr} AND {activity_ms_expr} >= ? THEN ?
+                WHEN {active_subscription_expr} THEN ?
+                WHEN {activity_ms_expr} >= ? THEN ?
+                WHEN {activity_ms_expr} >= ? THEN ?
+                WHEN {activity_ms_expr} >= ? THEN ?
+                ELSE ?
+            END
+        """
+        params: tuple[Any, ...] = (
+            MODERATION_NEUTRAL,
+            MODERATION_BLACKLIST,
+            int(listed_cutoff_ms),
+            STATUS_ACTIVE_LISTED,
+            STATUS_ACTIVE_UNLISTED,
+            int(listed_cutoff_ms),
+            STATUS_ACTIVE_LISTED,
+            int(stale_cutoff_ms),
+            STATUS_ACTIVE_UNLISTED,
+            int(archive_cutoff_ms),
+            STATUS_STALE,
+            STATUS_ARCHIVED,
+        )
+        try:
+            cursor = self._execute(
+                f"""
+                UPDATE tracked_traders
+                SET status = {status_case_sql},
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE ({status_case_sql}) <> status
+                """,
+                (*params, *params),
+            )
+            changed = int(cursor.rowcount or 0)
+            rows = self._execute(
+                """
+                SELECT status, COUNT(*) AS cnt
+                FROM tracked_traders
+                GROUP BY status
+                """
+            ).fetchall()
+            self._connection.commit()
+        except Exception:
+            self._connection.rollback()
+            raise
+
+        counts: dict[str, int] = {status: 0 for status in TRACKED_TRADER_STATUSES}
+        for row in rows:
+            status = str(row["status"])
+            if status in counts:
+                counts[status] = int(row["cnt"] or 0)
+        counts["changed"] = changed
+        return counts
 
     def record_subscription_request(
         self,

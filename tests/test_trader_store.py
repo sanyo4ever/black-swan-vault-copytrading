@@ -12,6 +12,9 @@ from bot.trader_store import (
     MODERATION_WHITELIST,
     PERMANENT_SUBSCRIPTION_EXPIRES_AT,
     STATUS_ACTIVE,
+    STATUS_ACTIVE_UNLISTED,
+    STATUS_ARCHIVED,
+    STATUS_STALE,
     TIER_HOT,
     TIER_WARM,
     TraderStore,
@@ -40,7 +43,7 @@ class TraderStoreTests(unittest.TestCase):
         self.assertEqual(trader.label, "Manual Trader")
         self.assertEqual(trader.status, STATUS_ACTIVE)
 
-    def test_active_only_mode_normalizes_legacy_paused_status(self) -> None:
+    def test_normalizes_legacy_paused_status_to_unlisted(self) -> None:
         address = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab"
         with TraderStore(self.db_path) as store:
             store.add_manual(address=address, label="Legacy")
@@ -58,8 +61,8 @@ class TraderStoreTests(unittest.TestCase):
             trader = store.get_trader(address=address)
         self.assertIsNotNone(trader)
         assert trader is not None
-        self.assertEqual(trader.status, STATUS_ACTIVE)
-        self.assertFalse(trader.manual_status_override)
+        self.assertEqual(trader.status, STATUS_ACTIVE_UNLISTED)
+        self.assertTrue(trader.manual_status_override)
 
     def test_record_subscription_request(self) -> None:
         with TraderStore(self.db_path) as store:
@@ -98,7 +101,7 @@ class TraderStoreTests(unittest.TestCase):
             subs = store.list_subscriptions_for_chat(chat_id=123456)
             self.assertEqual(len(subs), 1)
             self.assertEqual(subs[0].trader_address, "0xcccccccccccccccccccccccccccccccccccccccc")
-            self.assertEqual(subs[0].status, STATUS_ACTIVE)
+            self.assertEqual(subs[0].status, "ACTIVE")
 
             mapping = store.list_active_subscriber_chat_ids_by_trader()
             self.assertEqual(mapping["0xcccccccccccccccccccccccccccccccccccccccc"], ["123456"])
@@ -406,8 +409,14 @@ class TraderStoreTests(unittest.TestCase):
             self.assertEqual(t1.status, STATUS_ACTIVE)
             self.assertEqual(t2.status, STATUS_ACTIVE)
 
+            changed = store.set_status_bulk(addresses=[a1], status="PAUSED")
+            self.assertEqual(changed, 1)
+            t1 = store.get_trader(address=a1)
+            assert t1 is not None
+            self.assertEqual(t1.status, STATUS_ACTIVE_UNLISTED)
+
             with self.assertRaises(ValueError):
-                store.set_status_bulk(addresses=[a1], status="PAUSED")
+                store.set_status_bulk(addresses=[a1], status="BROKEN")
 
             changed = store.set_moderation_bulk(
                 addresses=[a1, a2],
@@ -492,6 +501,94 @@ class TraderStoreTests(unittest.TestCase):
             )
             self.assertGreaterEqual(len(filtered), 1)
             self.assertTrue(any(item.address == addresses[0] for item in filtered))
+
+    def test_soft_delete_archives_without_active_subscription(self) -> None:
+        address = "0x1212121212121212121212121212121212121212"
+        with TraderStore(self.db_path) as store:
+            store.add_manual(address=address, label="ToArchive")
+            store.delete(address=address)
+            trader = store.get_trader(address=address)
+            self.assertIsNotNone(trader)
+            assert trader is not None
+            self.assertEqual(trader.status, STATUS_ARCHIVED)
+
+    def test_soft_delete_keeps_unlisted_with_active_subscription(self) -> None:
+        address = "0x1313131313131313131313131313131313131313"
+        with TraderStore(self.db_path) as store:
+            store.add_manual(address=address, label="ToUnlist")
+            store.create_subscription_with_session(
+                chat_id=9191,
+                trader_address=address,
+                message_thread_id=91,
+                topic_name="live",
+                lifetime_hours=0,
+            )
+            store.delete(address=address)
+            trader = store.get_trader(address=address)
+            self.assertIsNotNone(trader)
+            assert trader is not None
+            self.assertEqual(trader.status, STATUS_ACTIVE_UNLISTED)
+
+    def test_apply_trader_lifecycle_transitions(self) -> None:
+        now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
+        listed = "0x1414141414141414141414141414141414141414"
+        unlisted = "0x1515151515151515151515151515151515151515"
+        stale = "0x1616161616161616161616161616161616161616"
+        archived = "0x1717171717171717171717171717171717171717"
+
+        with TraderStore(self.db_path) as store:
+            for address, age_minutes in (
+                (listed, 10),
+                (unlisted, 120),
+                (stale, 3 * 24 * 60),
+                (archived, 20 * 24 * 60),
+            ):
+                age_days = max(1.0, age_minutes / (24 * 60))
+                store.upsert_discovered(
+                    address=address,
+                    label="L",
+                    source="hyperliquid_recent_trades",
+                    trades_24h=10,
+                    active_hours_24h=5,
+                    trades_7d=80,
+                    trades_30d=300,
+                    active_days_30d=20,
+                    first_fill_time=now_ms - (40 * 86_400_000),
+                    last_fill_time=now_ms - (age_minutes * 60_000),
+                    age_days=age_days,
+                    volume_usd_30d=10_000.0,
+                    realized_pnl_30d=1_000.0,
+                    fees_30d=100.0,
+                    win_rate_30d=0.6,
+                    long_ratio_30d=0.5,
+                    avg_notional_30d=1_000.0,
+                    max_notional_30d=5_000.0,
+                    account_value=20_000.0,
+                    total_ntl_pos=4_000.0,
+                    total_margin_used=1_500.0,
+                    score=30.0,
+                    stats_json='{"metrics_30d":{"max_drawdown_pct":10.0}}',
+                )
+
+            stats = store.apply_trader_lifecycle(
+                listed_within_minutes=60,
+                stale_after_minutes=24 * 60,
+                archive_after_days=7,
+            )
+            self.assertGreaterEqual(stats["changed"], 1)
+
+            t_listed = store.get_trader(address=listed)
+            t_unlisted = store.get_trader(address=unlisted)
+            t_stale = store.get_trader(address=stale)
+            t_archived = store.get_trader(address=archived)
+            assert t_listed is not None
+            assert t_unlisted is not None
+            assert t_stale is not None
+            assert t_archived is not None
+            self.assertEqual(t_listed.status, STATUS_ACTIVE)
+            self.assertEqual(t_unlisted.status, STATUS_ACTIVE_UNLISTED)
+            self.assertEqual(t_stale.status, STATUS_STALE)
+            self.assertEqual(t_archived.status, STATUS_ARCHIVED)
 
     def test_monitoring_pool_due_targets_and_poll_mark(self) -> None:
         now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)

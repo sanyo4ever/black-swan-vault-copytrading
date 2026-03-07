@@ -84,11 +84,11 @@ async def _run() -> None:
                         )
                         summary = await service.discover()
                     logger.info(
-                        "Cycle done: candidates=%s qualified=%s upserted=%s pruned=%s",
+                        "Cycle done: candidates=%s qualified=%s upserted=%s unlisted=%s",
                         summary["candidates"],
                         summary["qualified"],
                         summary["upserted"],
-                        summary.get("pruned", 0),
+                        summary.get("unlisted", summary.get("pruned", 0)),
                     )
                 except Exception as exc:
                     logger.exception("Discovery cycle failed: %s", exc)

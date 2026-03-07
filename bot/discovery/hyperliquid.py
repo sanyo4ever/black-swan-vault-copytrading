@@ -958,6 +958,7 @@ class HyperliquidDiscoveryService:
                     "candidates": 0,
                     "qualified": 0,
                     "upserted": 0,
+                    "unlisted": 0,
                     "pruned": 0,
                 }
                 self._store.log_discovery_run(
@@ -1069,22 +1070,22 @@ class HyperliquidDiscoveryService:
                 if source:
                     qualified_by_source.setdefault(source, set()).add(item["address"])
 
-            pruned = 0
+            unlisted = 0
             candidate_sources = {
                 str(candidate.get("source", "")).strip()
                 for candidate in candidates
                 if str(candidate.get("source", "")).strip()
             }
             for source in sorted(candidate_sources):
-                pruned += self._store.prune_auto_discovered(
+                unlisted += self._store.prune_auto_discovered(
                     source=source,
                     keep_addresses=qualified_by_source.get(source, set()),
                 )
             self._logger.info(
-                "Discovery filtering summary qualified=%s upserted=%s pruned=%s skipped_age=%s skipped_trades30=%s skipped_active_days=%s skipped_trades7=%s skipped_recent=%s skipped_win_rate=%s skipped_drawdown=%s skipped_pnl=%s",
+                "Discovery filtering summary qualified=%s upserted=%s unlisted=%s skipped_age=%s skipped_trades30=%s skipped_active_days=%s skipped_trades7=%s skipped_recent=%s skipped_win_rate=%s skipped_drawdown=%s skipped_pnl=%s",
                 qualified,
                 upserted,
-                pruned,
+                unlisted,
                 skipped_age,
                 skipped_trades_30d,
                 skipped_active_days,
@@ -1107,7 +1108,8 @@ class HyperliquidDiscoveryService:
                 "candidates": len(candidates),
                 "qualified": qualified,
                 "upserted": upserted,
-                "pruned": pruned,
+                "unlisted": unlisted,
+                "pruned": unlisted,
             }
         except Exception as exc:
             self._store.log_discovery_run(

@@ -16,7 +16,13 @@ from bot.telegram_client import (
     send_message,
     set_telegram_http_logging,
 )
-from bot.trader_store import PERMANENT_SUBSCRIPTION_EXPIRES_AT, TraderStore
+from bot.trader_store import (
+    MODERATION_BLACKLIST,
+    PERMANENT_SUBSCRIPTION_EXPIRES_AT,
+    STATUS_ARCHIVED,
+    STATUS_STALE,
+    TraderStore,
+)
 
 
 def _short(address: str) -> str:
@@ -152,6 +158,25 @@ async def _handle_start_with_payload(
                 bot_token=settings.telegram_bot_token,
                 chat_id=chat_id,
                 text="Trader not found in database.",
+            )
+            return
+        if trader.moderation_state == MODERATION_BLACKLIST:
+            await send_message(
+                session,
+                bot_token=settings.telegram_bot_token,
+                chat_id=chat_id,
+                text="Trader is not available for subscription.",
+            )
+            return
+        if trader.status in {STATUS_STALE, STATUS_ARCHIVED}:
+            await send_message(
+                session,
+                bot_token=settings.telegram_bot_token,
+                chat_id=chat_id,
+                text=(
+                    "Trader is currently not eligible for new subscriptions.\n"
+                    "Pick another trader from the listed catalog."
+                ),
             )
             return
 

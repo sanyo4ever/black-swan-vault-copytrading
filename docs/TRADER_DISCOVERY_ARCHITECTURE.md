@@ -181,7 +181,7 @@ Query params:
 - search: `q` (address, label, source account id)
 - filters:
   - `source[]`
-  - `status` (`ACTIVE`, `PAUSED`, `DORMANT`)
+  - `status` (`ACTIVE_LISTED`, `ACTIVE_UNLISTED`, `STALE`, `ARCHIVED`)
   - `moderation_state`
   - `active_within_minutes`
   - ranges: `trades_30d_min/max`, `win_rate_30d_min/max`,
@@ -210,18 +210,19 @@ Use **keyset pagination** (cursor-based), not offset, to keep response times sta
 
 ## 7. Keeping "needed" traders in DB
 
-Use lifecycle tiers instead of hard deletion:
+Use lifecycle statuses instead of hard deletion:
 
-1. `HOT`: active within 1h, tracked for delivery
-2. `WARM`: active within 30d, shown in catalog
-3. `COLD`: older/inactive, hidden by default but retained for analytics
-4. `ARCHIVED`: compacted historical state
+1. `ACTIVE_LISTED`: visible in public catalog, open for new subscriptions
+2. `ACTIVE_UNLISTED`: hidden from default catalog, retained for continuity
+3. `STALE`: inactive beyond stale threshold, blocked for new subscriptions
+4. `ARCHIVED`: long-inactive historical record
 
 Retention policy:
 
 - Raw events older than N days -> compressed/archive storage
 - Daily snapshots kept long-term for ranking history
 - Never hard-delete moderated/blacklisted records without audit trail
+- Discovery prune should soft-unlist (status change), not remove rows
 
 ---
 
@@ -307,4 +308,3 @@ Target:
   - https://bybit-exchange.github.io/docs/v5/market/instrument
 - Bitget copy trade docs:
   - https://bitgetlimited.github.io/apidoc/en/copyTrade/
-

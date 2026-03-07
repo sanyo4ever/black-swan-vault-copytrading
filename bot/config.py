@@ -55,6 +55,9 @@ class Settings:
     live_top100_interval_seconds: int
     live_top100_active_window_minutes: int
     live_top100_size: int
+    trader_listed_within_minutes: int
+    trader_stale_after_minutes: int
+    trader_archive_after_days: int
     monitor_hot_size: int
     monitor_warm_size: int
     monitor_hot_poll_seconds: int
@@ -203,6 +206,9 @@ def load_settings(
             os.getenv("LIVE_TOP100_ACTIVE_WINDOW_MINUTES", "60")
         ),
         live_top100_size=int(os.getenv("LIVE_TOP100_SIZE", "100")),
+        trader_listed_within_minutes=int(os.getenv("TRADER_LISTED_WITHIN_MINUTES", "60")),
+        trader_stale_after_minutes=int(os.getenv("TRADER_STALE_AFTER_MINUTES", "4320")),
+        trader_archive_after_days=int(os.getenv("TRADER_ARCHIVE_AFTER_DAYS", "180")),
         monitor_hot_size=int(os.getenv("MONITOR_HOT_SIZE", "100")),
         monitor_warm_size=int(os.getenv("MONITOR_WARM_SIZE", "400")),
         monitor_hot_poll_seconds=int(os.getenv("MONITOR_HOT_POLL_SECONDS", "60")),

@@ -25,6 +25,10 @@ from bot.trader_store import (
     MODERATION_NEUTRAL,
     MODERATION_WHITELIST,
     STATUS_ACTIVE,
+    STATUS_ACTIVE_LISTED,
+    STATUS_ACTIVE_UNLISTED,
+    STATUS_ARCHIVED,
+    STATUS_STALE,
     TraderStore,
 )
 
@@ -242,9 +246,11 @@ def _catalog_sort_value(*, trader: CatalogTrader, sort_by: str) -> float | int:
     return float(trader.activity_score or -10**9)
 
 
-def _subscribe_button(*, trader_address: str, bot_username: str) -> str:
+def _subscribe_button(*, trader_address: str, bot_username: str, trader_status: str) -> str:
     if not bot_username:
         return "<span style='opacity:.7'>Bot not configured</span>"
+    if trader_status in {STATUS_STALE, STATUS_ARCHIVED}:
+        return "<span style='opacity:.7'>Unavailable</span>"
     encoded = quote(trader_address, safe="")
     return (
         f"<a class='copy-btn' href='/subscribe/{encoded}' target='_blank' rel='noopener'>"
@@ -545,7 +551,7 @@ def _render_public_directory(
             f"<div>{escape(last_traded_at)}</div>"
             f"<div class='muted-mini'>{escape(freshness)}</div>"
             "</td>"
-            f"<td>{_subscribe_button(trader_address=trader.address, bot_username=bot_username)}</td>"
+            f"<td>{_subscribe_button(trader_address=trader.address, bot_username=bot_username, trader_status=trader.status)}</td>"
             "</tr>"
         )
 
@@ -581,6 +587,7 @@ def _render_public_directory(
 
     filter_values = {
         "q": str(request.query.get("q", "")).strip(),
+        "status": str(request.query.get("status", STATUS_ACTIVE_LISTED)).strip().upper(),
         "min_age_days": str(request.query.get("min_age_days", "")).strip(),
         "min_trades_30d": str(request.query.get("min_trades_30d", "")).strip(),
         "min_active_days_30d": str(request.query.get("min_active_days_30d", "")).strip(),
@@ -598,9 +605,26 @@ def _render_public_directory(
         )
         for value, label in (("1d", "1 day"), ("7d", "7 days"), ("30d", "30 days"))
     )
-    active_filter_count = sum(
-        1 for key, value in filter_values.items() if key != "period" and value
+    status_options_html = "".join(
+        (
+            f"<option value='{value}'{' selected' if filter_values['status'] == value else ''}>"
+            f"{escape(label)}</option>"
+        )
+        for value, label in (
+            (STATUS_ACTIVE_LISTED, "Listed only"),
+            (STATUS_ACTIVE_UNLISTED, "Unlisted"),
+            (STATUS_STALE, "Stale"),
+            (STATUS_ARCHIVED, "Archived"),
+            ("ALL", "All statuses"),
+        )
     )
+    active_filter_count = sum(
+        1
+        for key, value in filter_values.items()
+        if key not in {"period", "status"} and value
+    )
+    if filter_values["status"] != STATUS_ACTIVE_LISTED:
+        active_filter_count += 1
     if selected_period != _CATALOG_DEFAULT_PERIOD:
         active_filter_count += 1
     if sort_selected != _CATALOG_DEFAULT_SORT:
@@ -1049,6 +1073,12 @@ def _render_public_directory(
               </select>
             </div>
             <div class='filter-item'>
+              <label for='f-status'>Status</label>
+              <select id='f-status' name='status'>
+                {status_options_html}
+              </select>
+            </div>
+            <div class='filter-item'>
               <label for='f-age'>Min Age (days)</label>
               <input id='f-age' name='min_age_days' type='number' step='1' min='0' value='{escape(filter_values["min_age_days"])}' placeholder='e.g. 30' />
             </div>
@@ -1174,8 +1204,8 @@ def _render_admin_index(*, traders, discovery_runs, message: str | None = None) 
             "<button class='btn blacklist' type='submit'>Blacklist</button></form> "
             f"<form method='post' action='/admin/traders/{encoded}/moderate/neutral' style='display:inline'>"
             "<button class='btn' type='submit'>Neutral</button></form> "
-            f"<form method='post' action='/admin/traders/{encoded}/delete' style='display:inline' onsubmit='return confirm(\"Delete trader?\")'>"
-            "<button class='btn danger' type='submit'>Delete</button></form>"
+            f"<form method='post' action='/admin/traders/{encoded}/delete' style='display:inline' onsubmit='return confirm(\"Archive trader?\")'>"
+            "<button class='btn danger' type='submit'>Archive</button></form>"
             "</td>"
             "</tr>"
         )
@@ -1249,7 +1279,7 @@ def _render_admin_index(*, traders, discovery_runs, message: str | None = None) 
       {flash}
       <div class='row'>
         <div class='stat'><span>Tracked</span><strong>{len(traders)}</strong></div>
-        <div class='stat'><span>Active</span><strong>{active_count}</strong></div>
+        <div class='stat'><span>Listed</span><strong>{active_count}</strong></div>
         <div class='stat'><span>Whitelist</span><strong>{whitelisted_count}</strong></div>
         <div class='stat'><span>Blacklist</span><strong>{blacklisted_count}</strong></div>
         <div class='stat'><span>Last Discovery</span><strong>{escape(recent_run_label)}</strong></div>
@@ -1281,7 +1311,7 @@ def _render_admin_index(*, traders, discovery_runs, message: str | None = None) 
       <form method='post' action='/admin/traders/add'>
         <input name='address' placeholder='0x... trader address' required />
         <input name='label' placeholder='Optional label' />
-        <button class='btn' type='submit'>Add Trader (ACTIVE)</button>
+        <button class='btn' type='submit'>Add Trader (LISTED)</button>
       </form>
     </div>
 
@@ -1429,7 +1459,7 @@ async def subscriber_directory(request: web.Request) -> web.Response:
         traders = store.list_catalog_traders(
             limit=limit + 1,
             q=str(request.query.get("q", "")),
-            status=str(request.query.get("status", "ALL")).upper(),
+            status=str(request.query.get("status", STATUS_ACTIVE_LISTED)).upper(),
             min_age_days=min_age_days,
             min_trades_30d=min_trades_30d,
             min_active_days_30d=min_active_days_30d,
@@ -1493,7 +1523,7 @@ async def traders_api(request: web.Request) -> web.Response:
         traders = store.list_catalog_traders(
             limit=limit + 1,
             q=str(request.query.get("q", "")),
-            status=str(request.query.get("status", "ALL")).upper(),
+            status=str(request.query.get("status", STATUS_ACTIVE_LISTED)).upper(),
             moderation_state=str(request.query.get("moderation_state", "ALL")).upper(),
             min_age_days=_opt_float("min_age_days"),
             min_trades_30d=_opt_int("min_trades_30d"),
@@ -1569,6 +1599,10 @@ async def subscribe_redirect(request: web.Request) -> web.Response:
             raise web.HTTPNotFound(text="Trader not found")
         if trader.moderation_state == MODERATION_BLACKLIST:
             raise web.HTTPForbidden(text="Trader is not available for subscription")
+        if trader.status in {STATUS_STALE, STATUS_ARCHIVED}:
+            raise web.HTTPServiceUnavailable(
+                text="Trader is currently not eligible for new subscriptions."
+            )
 
         xff = request.headers.get("X-Forwarded-For", "")
         client_ip = xff.split(",")[0].strip() if xff else request.remote
@@ -1602,6 +1636,10 @@ async def subscribe_landing(request: web.Request) -> web.Response:
             raise web.HTTPNotFound(text="Trader not found")
         if trader.moderation_state == MODERATION_BLACKLIST:
             raise web.HTTPForbidden(text="Trader is not available for subscription")
+        if trader.status in {STATUS_STALE, STATUS_ARCHIVED}:
+            raise web.HTTPServiceUnavailable(
+                text="Trader is currently not eligible for new subscriptions."
+            )
 
     if not settings.telegram_bot_username:
         return web.Response(
@@ -1719,9 +1757,9 @@ async def delete_trader(request: web.Request) -> web.Response:
 
     with TraderStore(settings.database_dsn) as store:
         store.delete(address=address)
-    logger.info("Trader deleted address=%s", address.lower())
+    logger.info("Trader archived (soft-delete) address=%s", address.lower())
 
-    raise web.HTTPFound("/admin?msg=Trader+deleted")
+    raise web.HTTPFound("/admin?msg=Trader+archived")
 
 
 async def run_discovery(request: web.Request) -> web.Response:
@@ -1738,17 +1776,17 @@ async def run_discovery(request: web.Request) -> web.Response:
         )
         summary = await service.discover()
     logger.info(
-        "Discovery triggered from admin: candidates=%s qualified=%s upserted=%s pruned=%s",
+        "Discovery triggered from admin: candidates=%s qualified=%s upserted=%s unlisted=%s",
         summary["candidates"],
         summary["qualified"],
         summary["upserted"],
-        summary.get("pruned", 0),
+        summary.get("unlisted", summary.get("pruned", 0)),
     )
 
     msg = (
         f"Discovery complete: candidates={summary['candidates']}, "
         f"qualified={summary['qualified']}, upserted={summary['upserted']}, "
-        f"pruned={summary.get('pruned', 0)}"
+        f"unlisted={summary.get('unlisted', summary.get('pruned', 0))}"
     )
     raise web.HTTPFound(f"/admin?msg={quote(msg)}")
 
