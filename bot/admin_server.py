@@ -29,6 +29,7 @@ from bot.trader_store import (
 
 PROJECT_REPO_URL = "https://github.com/sanyo4ever/black-swan-vault-copytrading"
 PAYPAL_DONATION_EMAIL = "sanyo4ever@gmail.com"
+USDT_TRC20_DONATION_ADDRESS = "TBFmAiNBK9eze43nhAkWXvir9yV6tUzpgQ"
 
 
 def _split_addresses(raw: str) -> list[str]:
@@ -373,7 +374,7 @@ def _render_public_directory(
         Catalog refresh: <strong>{escape(refreshed_at)}</strong>.<br/>
         Click <strong>Open Trader Chat</strong> to receive new fills from that trader in Telegram.<br/>
         This project is open-source: <a href='{escape(PROJECT_REPO_URL)}' target='_blank' rel='noopener'>GitHub</a>.<br/>
-        Project is donation-supported (PayPal): <code>{escape(PAYPAL_DONATION_EMAIL)}</code>.<br/>
+        Project is donation-supported: PayPal <code>{escape(PAYPAL_DONATION_EMAIL)}</code> or USDT TRC20 <code>{escape(USDT_TRC20_DONATION_ADDRESS)}</code>.<br/>
         Informational only. Not financial advice.
       </div>
     </div>
@@ -666,6 +667,7 @@ def _render_subscribe_landing(
       <div class='box'><strong>Support Model</strong><span class='ok'>Donation-supported (no paywall)</span></div>
       <div class='box'><strong>Open Source</strong><a href='{escape(PROJECT_REPO_URL)}' target='_blank' rel='noopener'>GitHub Repository</a></div>
       <div class='box'><strong>Donate (PayPal)</strong><code>{escape(PAYPAL_DONATION_EMAIL)}</code></div>
+      <div class='box'><strong>Donate (USDT TRC20)</strong><code>{escape(USDT_TRC20_DONATION_ADDRESS)}</code></div>
     </div>
     <div class='cta'>
       <a class='btn' href='{escape(go_link)}'>Create Chat in Telegram</a>
