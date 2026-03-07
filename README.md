@@ -3,6 +3,7 @@
 Service stack for discovering futures traders, storing rich metrics, and publishing selected traders to Telegram.
 
 Open-source repository: [github.com/sanyo4ever/black-swan-vault-copytrading](https://github.com/sanyo4ever/black-swan-vault-copytrading)  
+I run a self-hosted public server at [blackswanvault.online](https://blackswanvault.online), where anyone can connect to copytrading feeds.  
 Project is donation-supported. PayPal: `sanyo4ever@gmail.com` or USDT TRC20: `TBFmAiNBK9eze43nhAkWXvir9yV6tUzpgQ`
 
 ## What you have now
