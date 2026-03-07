@@ -158,6 +158,10 @@ class TraderStore:
         return self._connection.execute(self._q(sql), tuple(params))
 
     def _executemany(self, sql: str, params_seq: Iterable[Iterable[Any]]) -> Any:
+        if self._driver == "postgres":
+            with self._connection.cursor() as cursor:
+                cursor.executemany(self._q(sql), params_seq)
+            return None
         return self._connection.executemany(self._q(sql), params_seq)
 
     def _insert_and_get_id(

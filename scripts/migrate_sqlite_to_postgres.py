@@ -3,8 +3,13 @@ from __future__ import annotations
 import argparse
 import os
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Iterable
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 try:
     import psycopg
@@ -110,8 +115,8 @@ def main() -> None:
     # Ensure target schema exists before copy.
     with TraderStore(postgres_url):
         pass
-    with DedupStore(postgres_url):
-        pass
+    dedup_store = DedupStore(postgres_url)
+    dedup_store.close()
 
     sqlite_conn = sqlite3.connect(sqlite_path)
     sqlite_conn.row_factory = sqlite3.Row
