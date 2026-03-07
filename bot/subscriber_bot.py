@@ -8,6 +8,7 @@ import aiohttp
 
 from bot.config import ConfigError, load_settings
 from bot.telegram_client import (
+    TelegramClientError,
     create_forum_topic,
     delete_forum_topic,
     get_updates,
@@ -173,41 +174,70 @@ async def _handle_start_with_payload(
 
     topic_name = f"{_short(address)} | 24h"
     topic_result = None
+    topic_supported = True
+    thread_id: int | None = None
     try:
-        topic_result = await create_forum_topic(
-            session,
-            bot_token=settings.telegram_bot_token,
-            chat_id=chat_id,
-            name=topic_name,
-        )
-        thread_id = int(topic_result.get("message_thread_id", 0))
-        if thread_id <= 0:
-            raise RuntimeError(f"Invalid forum topic response: {topic_result}")
+        try:
+            topic_result = await create_forum_topic(
+                session,
+                bot_token=settings.telegram_bot_token,
+                chat_id=chat_id,
+                name=topic_name,
+            )
+            candidate_thread_id = int(topic_result.get("message_thread_id", 0))
+            if candidate_thread_id <= 0:
+                raise RuntimeError(f"Invalid forum topic response: {topic_result}")
+            thread_id = candidate_thread_id
+        except TelegramClientError as exc:
+            if exc.is_forum_not_supported():
+                topic_supported = False
+                thread_id = None
+                logger.info(
+                    "Forum topics unsupported for chat %s; using direct chat delivery",
+                    chat_id,
+                )
+            else:
+                raise
 
         with TraderStore(settings.database_dsn) as store:
             session_info = store.create_subscription_with_session(
                 chat_id=chat_id,
                 trader_address=address,
                 message_thread_id=thread_id,
-                topic_name=topic_name,
+                topic_name=(topic_name if topic_supported else None),
                 lifetime_hours=settings.subscription_lifetime_hours,
             )
             if trader.status != STATUS_ACTIVE:
                 store.set_status(address=address, status=STATUS_ACTIVE)
 
-        await send_message(
-            session,
-            bot_token=settings.telegram_bot_token,
-            chat_id=chat_id,
-            message_thread_id=thread_id,
-            text=(
-                "<b>Session started ✅</b>\n"
-                f"Trader: <code>{_short(address)}</code>\n"
-                f"Expires: <b>{_fmt_expiry(session_info.expires_at)}</b>\n"
-                f"Remaining: <b>{_fmt_remaining(session_info.expires_at)}</b>\n\n"
-                "Сюди будуть приходити нові угоди цього трейдера."
-            ),
-        )
+        if topic_supported and thread_id is not None:
+            await send_message(
+                session,
+                bot_token=settings.telegram_bot_token,
+                chat_id=chat_id,
+                message_thread_id=thread_id,
+                text=(
+                    "<b>Session started ✅</b>\n"
+                    f"Trader: <code>{_short(address)}</code>\n"
+                    f"Expires: <b>{_fmt_expiry(session_info.expires_at)}</b>\n"
+                    f"Remaining: <b>{_fmt_remaining(session_info.expires_at)}</b>\n\n"
+                    "Сюди будуть приходити нові угоди цього трейдера."
+                ),
+            )
+        else:
+            await send_message(
+                session,
+                bot_token=settings.telegram_bot_token,
+                chat_id=chat_id,
+                text=(
+                    "<b>Session started ✅</b>\n"
+                    f"Trader: <code>{_short(address)}</code>\n"
+                    f"Expires: <b>{_fmt_expiry(session_info.expires_at)}</b>\n"
+                    f"Remaining: <b>{_fmt_remaining(session_info.expires_at)}</b>\n\n"
+                    "<b>Thread mode unavailable in this chat.</b>\n"
+                    "Угоди будуть приходити напряму в цей чат."
+                ),
+            )
 
         await send_message(
             session,
@@ -215,7 +245,7 @@ async def _handle_start_with_payload(
             chat_id=chat_id,
             text=(
                 "<b>Готово ✅</b>\n"
-                f"Створено окремий тред для <code>{_short(address)}</code>.\n"
+                f"Підписка активна для <code>{_short(address)}</code>.\n"
                 f"TTL: {settings.subscription_lifetime_hours}h\n\n"
                 "Переглянути активні треди: <code>/my</code>"
             ),

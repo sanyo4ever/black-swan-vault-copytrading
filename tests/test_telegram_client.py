@@ -58,6 +58,16 @@ class TelegramClientErrorTests(unittest.TestCase):
         self.assertTrue(blocked.is_chat_unavailable())
         self.assertTrue(blocked.is_chat_blocked())
 
+    def test_forum_not_supported_classification(self) -> None:
+        unsupported = TelegramClientError(
+            method="createForumTopic",
+            status_code=400,
+            error_code=400,
+            description="Bad Request: the chat is not a forum",
+        )
+        self.assertTrue(unsupported.is_forum_not_supported())
+        self.assertFalse(unsupported.is_topic_missing())
+
     def test_transient_classification(self) -> None:
         transient = TelegramClientError(
             method="sendMessage",

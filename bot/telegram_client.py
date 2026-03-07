@@ -55,6 +55,14 @@ class TelegramClientError(RuntimeError):
             or "forum topic" in desc and "not found" in desc
         )
 
+    def is_forum_not_supported(self) -> bool:
+        desc = self._desc()
+        return (
+            "chat is not a forum" in desc
+            or "available only for forum supergroups" in desc
+            or "method is available only for forum" in desc
+        )
+
     def is_chat_blocked(self) -> bool:
         desc = self._desc()
         return (
