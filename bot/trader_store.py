@@ -4,6 +4,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Lock
 from typing import Any, Iterable, Mapping
 
 try:
@@ -168,6 +169,9 @@ class DeliveryRetryJob:
 
 
 class TraderStore:
+    _bootstrap_lock = Lock()
+    _bootstrapped_databases: set[str] = set()
+
     def __init__(self, database: str | Path) -> None:
         database_str = str(database).strip()
         if not database_str:
@@ -195,9 +199,19 @@ class TraderStore:
             db_path.parent.mkdir(parents=True, exist_ok=True)
             self._connection = sqlite3.connect(db_path)
             self._connection.row_factory = sqlite3.Row
-        self._ensure_schema()
+        self._database_key = database_str
+        self._ensure_schema_once_per_process()
         self._enforce_active_only_trader_status()
         self._enforce_permanent_subscriptions()
+
+    def _ensure_schema_once_per_process(self) -> None:
+        if self._database_key in self.__class__._bootstrapped_databases:
+            return
+        with self.__class__._bootstrap_lock:
+            if self._database_key in self.__class__._bootstrapped_databases:
+                return
+            self._ensure_schema()
+            self.__class__._bootstrapped_databases.add(self._database_key)
 
     def _q(self, sql: str) -> str:
         if self._driver == "postgres":
@@ -379,6 +393,8 @@ class TraderStore:
         self._connection.commit()
 
     def _ensure_schema_postgres(self) -> None:
+        # Serialize schema/bootstrap DDL across processes to prevent startup deadlocks.
+        self._execute("SELECT pg_advisory_xact_lock(?)", (91386024570631,))
         self._execute(
             """
             CREATE TABLE IF NOT EXISTS tracked_traders (
