@@ -41,6 +41,7 @@ class Settings:
     discovery_interval_seconds: int
     admin_panel_username: str
     admin_panel_password: str
+    google_analytics_measurement_id: str
     subscription_lifetime_hours: int
     universe_interval_seconds: int
     universe_min_age_days: int
@@ -186,6 +187,10 @@ def load_settings(
         discovery_interval_seconds=int(os.getenv("DISCOVERY_INTERVAL_SECONDS", "900")),
         admin_panel_username=admin_panel_username,
         admin_panel_password=admin_panel_password,
+        google_analytics_measurement_id=os.getenv(
+            "GOOGLE_ANALYTICS_MEASUREMENT_ID",
+            "",
+        ).strip(),
         subscription_lifetime_hours=int(os.getenv("SUBSCRIPTION_LIFETIME_HOURS", "0")),
         universe_interval_seconds=int(os.getenv("UNIVERSE_INTERVAL_SECONDS", "300")),
         universe_min_age_days=int(os.getenv("UNIVERSE_MIN_AGE_DAYS", "30")),

@@ -38,6 +38,22 @@ PAYPAL_DONATION_EMAIL = "sanyo4ever@gmail.com"
 USDT_TRC20_DONATION_ADDRESS = "TBFmAiNBK9eze43nhAkWXvir9yV6tUzpgQ"
 
 
+def _render_google_analytics_tag(measurement_id: str) -> str:
+    value = str(measurement_id or "").strip().upper()
+    if not value or not re.fullmatch(r"G-[A-Z0-9]+", value):
+        return ""
+    escaped = escape(value)
+    return (
+        f"  <script async src='https://www.googletagmanager.com/gtag/js?id={escaped}'></script>\n"
+        "  <script>\n"
+        "    window.dataLayer = window.dataLayer || [];\n"
+        "    function gtag(){dataLayer.push(arguments);}\n"
+        "    gtag('js', new Date());\n"
+        f"    gtag('config', '{escaped}');\n"
+        "  </script>\n"
+    )
+
+
 def _split_addresses(raw: str) -> list[str]:
     cleaned = str(raw or "").strip()
     if not cleaned:
@@ -484,6 +500,7 @@ def _render_public_directory(
     request: web.Request,
     bot_username: str,
     next_cursor: str | None,
+    google_analytics_measurement_id: str,
 ) -> str:
     selected_period = _normalize_catalog_period(request.query.get("period"))
     sort_selected = _normalize_catalog_sort(
@@ -723,6 +740,7 @@ def _render_public_directory(
         },
         separators=(",", ":"),
     )
+    analytics_tag = _render_google_analytics_tag(google_analytics_measurement_id)
 
     return f"""
 <!doctype html>
@@ -748,6 +766,7 @@ def _render_public_directory(
   <meta name='theme-color' content='#06080d' />
   <meta http-equiv='refresh' content='30' />
   <title>{escape(page_title)}</title>
+  {analytics_tag}
   <script type='application/ld+json'>{website_schema}</script>
   <script type='application/ld+json'>{faq_schema}</script>
   <style>
@@ -1362,8 +1381,10 @@ def _render_subscribe_landing(
     trader,
     deep_link: str,
     go_link: str,
+    google_analytics_measurement_id: str,
 ) -> str:
     label = trader.label or "-"
+    analytics_tag = _render_google_analytics_tag(google_analytics_measurement_id)
     return f"""
 <!doctype html>
 <html lang='en'>
@@ -1371,6 +1392,7 @@ def _render_subscribe_landing(
   <meta charset='utf-8' />
   <meta name='viewport' content='width=device-width, initial-scale=1' />
   <title>Subscribe Trader</title>
+  {analytics_tag}
   <style>
     :root {{ --bg:#0b1220; --panel:#131f36; --line:#2b4267; --text:#e8f0ff; --muted:#9eb4d8; --accent:#4ca7ff; --ok:#4bd39e; }}
     * {{ box-sizing:border-box; }}
@@ -1504,6 +1526,7 @@ async def subscriber_directory(request: web.Request) -> web.Response:
             request=request,
             bot_username=settings.telegram_bot_username,
             next_cursor=next_cursor,
+            google_analytics_measurement_id=settings.google_analytics_measurement_id,
         ),
         content_type="text/html",
     )
@@ -1667,6 +1690,7 @@ async def subscribe_landing(request: web.Request) -> web.Response:
             trader=trader,
             deep_link=deep_link,
             go_link=go_link,
+            google_analytics_measurement_id=settings.google_analytics_measurement_id,
         ),
         content_type="text/html",
     )

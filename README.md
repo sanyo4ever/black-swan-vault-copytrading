@@ -106,6 +106,7 @@ TELEGRAM_BOT_USERNAME=your_bot_username
 DATABASE_URL=postgresql://cryptoinsider:strong_password@127.0.0.1:5432/cryptoinsider
 ADMIN_PANEL_USERNAME=admin
 ADMIN_PANEL_PASSWORD=strong_password
+GOOGLE_ANALYTICS_MEASUREMENT_ID=G-XXXXXXXXXX
 ```
 
 Run services:
