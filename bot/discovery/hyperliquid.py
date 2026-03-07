@@ -45,6 +45,44 @@ class HyperliquidDiscoveryService:
         self._config = config
         self._logger = logger or logging.getLogger("cryptoinsider.discovery")
 
+    def _merge_with_existing_tracked(
+        self, candidates: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        merged: dict[str, dict[str, Any]] = {}
+        for candidate in candidates:
+            address = str(candidate.get("address", "")).strip().lower()
+            if not address:
+                continue
+            merged[address] = {
+                "address": address,
+                "label": candidate.get("label"),
+                "source": candidate.get("source") or "hyperliquid_recent_trades",
+                "vault_tvl": float(candidate.get("vault_tvl") or 0.0),
+            }
+
+        tracked = self._store.list_traders(limit=5000)
+        tracked_added = 0
+        for trader in tracked:
+            if not str(trader.source).startswith("hyperliquid"):
+                continue
+            address = str(trader.address).strip().lower()
+            if not address or address in merged:
+                continue
+            merged[address] = {
+                "address": address,
+                "label": trader.label,
+                "source": trader.source,
+                "vault_tvl": 0.0,
+            }
+            tracked_added += 1
+        if tracked_added > 0:
+            self._logger.info(
+                "Discovery candidate expansion added_tracked=%s total=%s",
+                tracked_added,
+                len(merged),
+            )
+        return list(merged.values())
+
     async def _info(self, payload: dict[str, Any]) -> Any:
         attempts = 5
         backoff = 1.0
@@ -272,10 +310,11 @@ class HyperliquidDiscoveryService:
         vault_candidates = list(dedup.values())[: self._config.candidate_limit]
         if vault_candidates:
             self._logger.info("Using vault candidates count=%s", len(vault_candidates))
-            return vault_candidates
+            return self._merge_with_existing_tracked(vault_candidates)
 
         self._logger.info("Vault candidates empty, fallback to recent trade candidates")
-        return await self._fetch_recent_trade_candidates()
+        fallback = await self._fetch_recent_trade_candidates()
+        return self._merge_with_existing_tracked(fallback)
 
     async def _fetch_recent_trade_candidates(self) -> list[dict[str, Any]]:
         meta = await self._info({"type": "meta"})
