@@ -93,6 +93,40 @@ def _minutes_since(last_fill_time: int | None) -> int | None:
     return int(delta_ms // 60000)
 
 
+def _fmt_utc_timestamp_ms(raw: int | None) -> str:
+    if raw is None or raw <= 0:
+        return "-"
+    try:
+        dt = datetime.fromtimestamp(int(raw) / 1000.0, tz=UTC)
+    except Exception:
+        return "-"
+    return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _fmt_signed(raw: Any, *, digits: int = 2, suffix: str = "") -> str:
+    if raw is None:
+        return "-"
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return escape(str(raw))
+    css = "metric-pos" if value > 0 else "metric-neg" if value < 0 else "metric-flat"
+    sign = "+" if value > 0 else ""
+    return f"<span class='{css}'>{sign}{value:.{digits}f}{suffix}</span>"
+
+
+def _fmt_percent(raw: Any, *, digits: int = 2, ratio: bool = False) -> str:
+    if raw is None:
+        return "-"
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return escape(str(raw))
+    if ratio:
+        value *= 100.0
+    return f"{value:.{digits}f}%"
+
+
 def _extract_stat_metrics(stats_json: str | None) -> dict[str, Any]:
     if not stats_json:
         return {}
@@ -312,22 +346,39 @@ def _render_public_directory(
 ) -> str:
     rows = []
     for index, trader in enumerate(traders, start=1):
+        metrics = _extract_stat_metrics(trader.stats_json)
+        drawdown_7d = metrics.get("max_drawdown_7d")
+        drawdown_value = -float(drawdown_7d) if drawdown_7d is not None else None
+        win_rate_7d = _fmt_percent(metrics.get("win_rate_7d"), digits=2, ratio=True)
+        pl_ratio_7d_raw = metrics.get("profit_to_loss_ratio_7d")
+        pl_ratio_7d = (
+            f"{float(pl_ratio_7d_raw):.2f} : 1"
+            if pl_ratio_7d_raw is not None
+            else "-"
+        )
+        last_traded_at = _fmt_utc_timestamp_ms(trader.last_fill_time)
         minutes_since = _minutes_since(trader.last_fill_time)
-        freshness = "-" if minutes_since is None else f"{minutes_since}m ago"
+        freshness = f"{minutes_since}m ago" if minutes_since is not None else "-"
+        trader_label = trader.label or trader.address[:10]
         rows.append(
             "<tr>"
             f"<td>{_fmt(index, 0)}</td>"
-            f"<td><code>{escape(trader.address)}</code></td>"
-            f"<td>{escape(trader.label or '-')}</td>"
-            f"<td>{escape(trader.status)}</td>"
-            f"<td>{escape(trader.moderation_state)}</td>"
-            f"<td>{escape(freshness)}</td>"
+            "<td class='trader-cell'>"
+            f"<div class='trader-label'>{escape(trader_label)}</div>"
+            f"<code>{escape(trader.address)}</code>"
+            "</td>"
+            f"<td>{_fmt_signed(metrics.get('roi_7d'), digits=2, suffix='%')}</td>"
+            f"<td>{_fmt_signed(drawdown_value, digits=2, suffix='%')}</td>"
+            f"<td>{_fmt_signed(metrics.get('pnl_7d'), digits=2)}</td>"
+            f"<td>{win_rate_7d}</td>"
+            f"<td>{pl_ratio_7d}</td>"
+            f"<td>{_fmt_signed(metrics.get('sharpe_7d'), digits=2)}</td>"
+            f"<td>{_fmt(metrics.get('weekly_trades'), 0)}</td>"
             f"<td>{_fmt(trader.trades_30d, 0)}</td>"
-            f"<td>{_fmt(trader.active_days_30d, 0)}</td>"
-            f"<td>{_fmt((trader.win_rate_30d or 0.0) * 100.0, 1)}%</td>"
-            f"<td>{_fmt(trader.realized_pnl_30d, 2)}</td>"
-            f"<td>{_fmt(trader.score, 2)}</td>"
-            f"<td>{_fmt(trader.activity_score, 2)}</td>"
+            "<td>"
+            f"<div>{escape(last_traded_at)}</div>"
+            f"<div class='muted-mini'>{escape(freshness)}</div>"
+            "</td>"
             f"<td>{_subscribe_button(trader_address=trader.address, bot_username=bot_username)}</td>"
             "</tr>"
         )
@@ -335,7 +386,7 @@ def _render_public_directory(
     table_rows = (
         "\n".join(rows)
         if rows
-        else "<tr><td colspan='13'>No traders match your filters.</td></tr>"
+        else "<tr><td colspan='12'>No traders match your filters.</td></tr>"
     )
     refreshed_at = traders[0].refreshed_at if traders else "-"
     pager = ""
@@ -471,10 +522,17 @@ def _render_public_directory(
     button {{ background:#20477a; border:1px solid #2f6ab5; color:var(--text); border-radius:8px; padding:7px 10px; cursor:pointer; }}
     .btn-link {{ display:inline-block; background:#1d3f6d; border:1px solid #2f6ab5; color:var(--text); border-radius:8px; padding:5px 9px; text-decoration:none; font-size:12px; }}
     .btn-link:hover {{ background:#24538f; }}
+    .table-wrap {{ overflow-x:auto; }}
     table {{ width:100%; border-collapse:collapse; font-size:14px; }}
     th,td {{ padding:9px 7px; border-bottom:1px solid var(--line); text-align:left; }}
     th {{ color:var(--muted); }}
     code {{ color:var(--accent); }}
+    .trader-cell code {{ font-size:11px; }}
+    .trader-label {{ font-weight:700; margin-bottom:2px; }}
+    .metric-pos {{ color:#27d07d; font-weight:600; }}
+    .metric-neg {{ color:#ff6f7e; font-weight:600; }}
+    .metric-flat {{ color:var(--muted); }}
+    .muted-mini {{ color:var(--muted); font-size:11px; }}
     .faq-item {{ border-top:1px solid var(--line); padding:10px 0; }}
     .faq-item:first-of-type {{ border-top:none; padding-top:0; }}
     .faq-item p {{ line-height:1.5; }}
@@ -495,6 +553,7 @@ def _render_public_directory(
       <div class='quick-info'>
         <strong>How it works:</strong> Discovery workers collect and score futures traders continuously.<br/>
         Catalog refresh: <strong>{escape(refreshed_at)}</strong>.<br/>
+        Table shows objective strategy metrics only (ROI, Drawdown, PnL, Win Rate, P/L Ratio, Sharpe, trade activity).<br/>
         Click <strong>Open Trader Chat</strong> to receive free crypto signals from your selected trader in Telegram.<br/>
         Open-source repository: <a href='{escape(PROJECT_REPO_URL)}' target='_blank' rel='noopener'>GitHub</a>.<br/>
         Project is donation-supported: PayPal <code>{escape(PAYPAL_DONATION_EMAIL)}</code> or USDT TRC20 <code>{escape(USDT_TRC20_DONATION_ADDRESS)}</code>.<br/>
@@ -545,21 +604,21 @@ def _render_public_directory(
     </div>
 
     <div class='card'>
+      <div class='table-wrap'>
       <table>
         <thead>
           <tr>
             <th>#</th>
-            <th>Address</th>
-            <th>Label</th>
-            <th>Status</th>
-            <th>Moderation</th>
-            <th>Last Fill</th>
+            <th>Trader</th>
+            <th>7d ROI</th>
+            <th>7d Drawdown</th>
+            <th>7d PnL</th>
+            <th>7d Win Rate</th>
+            <th>7d Profit-to-Loss</th>
+            <th>7d Sharpe</th>
+            <th>Trades 7d</th>
             <th>Trades 30d</th>
-            <th>Active Days 30d</th>
-            <th>Win Rate 30d</th>
-            <th>Realized PnL 30d</th>
-            <th>Score</th>
-            <th>Activity</th>
+            <th>Last Traded At</th>
             <th>Action</th>
           </tr>
         </thead>
@@ -567,6 +626,7 @@ def _render_public_directory(
           {table_rows}
         </tbody>
       </table>
+      </div>
       {pager}
     </div>
 
