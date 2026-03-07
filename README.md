@@ -2,6 +2,9 @@
 
 Service stack for discovering futures traders, storing rich metrics, and publishing selected traders to Telegram.
 
+Open-source repository: [github.com/sanyo4ever/black-swan-vault-copytrading](https://github.com/sanyo4ever/black-swan-vault-copytrading)  
+Project is donation-supported. PayPal: `sanyo4ever@gmail.com`
+
 ## What you have now
 
 - Continuous discovery worker (`discovery_worker.py`) that updates DB on schedule
@@ -13,7 +16,7 @@ Service stack for discovering futures traders, storing rich metrics, and publish
 - Public subscriber directory page (`/`) over `catalog_current` with keyset pagination
 - Public JSON API for full catalog filtering/sorting/search: `/api/traders`
 - One-click trader chat flow via Telegram bot (`/subscribe/<trader_address>`)
-- Topic-based 24h delivery sessions per subscription (`createForumTopic` + `deleteForumTopic`)
+- Topic-based delivery sessions per subscription (`createForumTopic`)
 - Password-protected admin panel (`/admin`) with add/delete, blacklist/whitelist, bulk moderation, and run discovery now
 - Telegram posting pipeline that sends fills to channel + subscriber topic threads
 
@@ -60,7 +63,8 @@ DISCOVERY_INTERVAL_SECONDS=900
 ADMIN_PANEL_USERNAME=admin
 ADMIN_PANEL_PASSWORD=your_strong_password
 
-SUBSCRIPTION_LIFETIME_HOURS=24
+# 0 = permanent until user cancels with /stop
+SUBSCRIPTION_LIFETIME_HOURS=0
 
 UNIVERSE_INTERVAL_SECONDS=300
 UNIVERSE_MIN_AGE_DAYS=30
@@ -133,7 +137,7 @@ python subscriber_bot.py
 ## Pages
 
 - `http://127.0.0.1:8080/` -> public subscriber directory with filters
-- `http://127.0.0.1:8080/subscribe/<trader_address>` -> subscription landing page (shows 24h duration, no payment) and redirects to Telegram
+- `http://127.0.0.1:8080/subscribe/<trader_address>` -> subscription landing page (open-source + donation info, subscription active until cancel) and redirects to Telegram
 - `http://127.0.0.1:8080/subscribe/<trader_address>/go` -> direct deep-link redirect endpoint
 - `http://127.0.0.1:8080/admin` -> admin panel (HTTP Basic Auth)
 
@@ -205,9 +209,9 @@ sudo journalctl -u cryptoinsider-top100.service -f
 
 ### `subscriptions` + `delivery_sessions`
 
-- each subscription creates a dedicated 24h session
+- each subscription creates a dedicated session
 - bot creates Telegram forum topic and delivers fills in that `message_thread_id`
-- expiry flow marks session expired and deletes topic
+- session is active until explicit cancellation (`/stop 0x...`)
 
 ## Important behavior
 
@@ -217,4 +221,4 @@ sudo journalctl -u cryptoinsider-top100.service -f
 - Discovery keeps all tracked traders active in DB; moderation (`BLACKLIST`) controls blocking from delivery/monitoring.
 - Blacklisted traders are removed from active delivery/monitoring flows until moderation changes.
 - Telegram source monitors addresses from active sessions + active trader set.
-- New subscription creates a new topic thread with TTL 24h.
+- New subscription creates a new topic thread and runs until cancellation.

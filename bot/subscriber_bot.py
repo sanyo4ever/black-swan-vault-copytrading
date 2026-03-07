@@ -16,7 +16,7 @@ from bot.telegram_client import (
     send_message,
     set_telegram_http_logging,
 )
-from bot.trader_store import TraderStore
+from bot.trader_store import PERMANENT_SUBSCRIPTION_EXPIRES_AT, TraderStore
 
 
 def _short(address: str) -> str:
@@ -56,6 +56,8 @@ def _fmt_expiry(value: str) -> str:
 
 
 def _fmt_remaining(value: str) -> str:
+    if str(value).strip() == PERMANENT_SUBSCRIPTION_EXPIRES_AT:
+        return "until cancellation"
     parsed = _parse_db_ts(value)
     if parsed is None:
         return "-"
@@ -77,7 +79,7 @@ async def _send_welcome(*, session: aiohttp.ClientSession, settings, chat_id: in
             "<b>CryptoInsider Bot</b>\n\n"
             "1) Відкрий каталог трейдерів\n"
             "2) Натисни <b>Open Trader Chat</b>\n"
-            "3) Бот створить окремий тред на 24h і буде постити угоди туди\n\n"
+            "3) Бот створить окремий тред і буде постити угоди туди до скасування\n\n"
             "Команди:\n"
             "<code>/my</code> - активні треди\n"
             "<code>/stop 0x...</code> - зупинити трейдера і видалити тред"
@@ -153,7 +155,7 @@ async def _handle_start_with_payload(
             )
             return
 
-        # Each new subscription starts a clean 24h session for this trader in this chat.
+        # Each new subscription starts a clean session for this trader in this chat.
         previous_sessions = store.cancel_chat_trader_subscriptions(
             chat_id=chat_id,
             trader_address=trader.address,
@@ -167,7 +169,7 @@ async def _handle_start_with_payload(
         logger=logger,
     )
 
-    topic_name = f"{_short(address)} | 24h"
+    topic_name = f"{_short(address)} | Live"
     topic_result = None
     topic_supported = True
     thread_id: int | None = None
@@ -219,8 +221,7 @@ async def _handle_start_with_payload(
                 text=(
                     "<b>Session started ✅</b>\n"
                     f"Trader: <code>{_short(address)}</code>\n"
-                    f"Expires: <b>{_fmt_expiry(session_info.expires_at)}</b>\n"
-                    f"Remaining: <b>{_fmt_remaining(session_info.expires_at)}</b>\n\n"
+                    "<b>Status:</b> Active until cancellation\n\n"
                     "Сюди будуть приходити нові угоди цього трейдера."
                 ),
             )
@@ -232,8 +233,7 @@ async def _handle_start_with_payload(
                 text=(
                     "<b>Session started ✅</b>\n"
                     f"Trader: <code>{_short(address)}</code>\n"
-                    f"Expires: <b>{_fmt_expiry(session_info.expires_at)}</b>\n"
-                    f"Remaining: <b>{_fmt_remaining(session_info.expires_at)}</b>\n\n"
+                    "<b>Status:</b> Active until cancellation\n\n"
                     "<b>Thread mode unavailable in this chat.</b>\n"
                     "Угоди будуть приходити напряму в цей чат."
                 ),
@@ -246,7 +246,7 @@ async def _handle_start_with_payload(
             text=(
                 "<b>Готово ✅</b>\n"
                 f"Підписка активна для <code>{_short(address)}</code>.\n"
-                f"TTL: {settings.subscription_lifetime_hours}h\n\n"
+                "Діє безстроково до команди <code>/stop</code>.\n\n"
                 "Переглянути активні треди: <code>/my</code>"
             ),
         )
@@ -317,9 +317,8 @@ async def _handle_message(
         for item in sessions:
             topic = item.topic_name or "Trader thread"
             thread = item.message_thread_id if item.message_thread_id is not None else "-"
-            remaining = _fmt_remaining(item.expires_at)
             lines.append(
-                f"• <code>{_short(item.trader_address)}</code> | {topic} | thread={thread} | exp={_fmt_expiry(item.expires_at)} | left={remaining}"
+                f"• <code>{_short(item.trader_address)}</code> | {topic} | thread={thread} | active until cancellation"
             )
         lines.append("\nЗупинити: <code>/stop 0x...</code>")
 

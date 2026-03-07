@@ -10,6 +10,7 @@ from bot.trader_store import (
     MODERATION_BLACKLIST,
     MODERATION_NEUTRAL,
     MODERATION_WHITELIST,
+    PERMANENT_SUBSCRIPTION_EXPIRES_AT,
     STATUS_ACTIVE,
     TraderStore,
 )
@@ -115,9 +116,10 @@ class TraderStoreTests(unittest.TestCase):
                 chat_id=777,
                 trader_address=address,
                 message_thread_id=42,
-                topic_name="D | 24h",
+                topic_name="D | Live",
                 lifetime_hours=24,
             )
+            self.assertEqual(session.expires_at, PERMANENT_SUBSCRIPTION_EXPIRES_AT)
 
             sessions = store.list_delivery_sessions_for_chat(chat_id=777)
             self.assertEqual(len(sessions), 1)

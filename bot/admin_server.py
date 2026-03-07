@@ -27,6 +27,9 @@ from bot.trader_store import (
     TraderStore,
 )
 
+PROJECT_REPO_URL = "https://github.com/sanyo4ever/black-swan-vault-copytrading"
+PAYPAL_DONATION_EMAIL = "sanyo4ever@gmail.com"
+
 
 def _split_addresses(raw: str) -> list[str]:
     cleaned = str(raw or "").strip()
@@ -139,7 +142,7 @@ def _subscribe_button(*, trader_address: str, bot_username: str) -> str:
     encoded = quote(trader_address, safe="")
     return (
         f"<a class='btn-link' href='/subscribe/{encoded}' target='_blank' rel='noopener'>"
-        "Subscribe (24h Free)"
+        "Open Trader Chat"
         "</a>"
     )
 
@@ -369,6 +372,8 @@ def _render_public_directory(
         <strong>How it works:</strong> Discovery workers collect and score traders continuously.<br/>
         Catalog refresh: <strong>{escape(refreshed_at)}</strong>.<br/>
         Click <strong>Open Trader Chat</strong> to receive new fills from that trader in Telegram.<br/>
+        This project is open-source: <a href='{escape(PROJECT_REPO_URL)}' target='_blank' rel='noopener'>GitHub</a>.<br/>
+        Project is donation-supported (PayPal): <code>{escape(PAYPAL_DONATION_EMAIL)}</code>.<br/>
         Informational only. Not financial advice.
       </div>
     </div>
@@ -623,7 +628,6 @@ def _render_subscribe_landing(
     trader,
     deep_link: str,
     go_link: str,
-    lifetime_hours: int,
 ) -> str:
     label = trader.label or "-"
     return f"""
@@ -658,15 +662,17 @@ def _render_subscribe_landing(
     <div class='meta'>
       <div class='box'><strong>Trader Address</strong><code>{escape(trader.address)}</code></div>
       <div class='box'><strong>Label</strong>{escape(label)}</div>
-      <div class='box'><strong>Subscription Duration</strong><span class='ok'>{int(lifetime_hours)}h</span> from activation</div>
-      <div class='box'><strong>Payment</strong><span class='ok'>Free now (no payment)</span></div>
+      <div class='box'><strong>Subscription</strong><span class='ok'>Active until cancellation</span></div>
+      <div class='box'><strong>Support Model</strong><span class='ok'>Donation-supported (no paywall)</span></div>
+      <div class='box'><strong>Open Source</strong><a href='{escape(PROJECT_REPO_URL)}' target='_blank' rel='noopener'>GitHub Repository</a></div>
+      <div class='box'><strong>Donate (PayPal)</strong><code>{escape(PAYPAL_DONATION_EMAIL)}</code></div>
     </div>
     <div class='cta'>
       <a class='btn' href='{escape(go_link)}'>Create Chat in Telegram</a>
       <a class='btn' href='{escape(deep_link)}' target='_blank' rel='noopener'>Open Bot Directly</a>
       <span class='note'>Auto-open in <span id='count'>5</span>s...</span>
     </div>
-    <p class='note'>After you press <code>/start</code> in Telegram, bot creates a dedicated thread and posts trades until expiry.</p>
+    <p class='note'>After <code>/start</code> in Telegram, bot creates a dedicated thread and posts trades until you cancel with <code>/stop 0x...</code>.</p>
   </div>
   <script>
     (function() {{
@@ -914,7 +920,6 @@ async def subscribe_landing(request: web.Request) -> web.Response:
             trader=trader,
             deep_link=deep_link,
             go_link=go_link,
-            lifetime_hours=settings.subscription_lifetime_hours,
         ),
         content_type="text/html",
     )

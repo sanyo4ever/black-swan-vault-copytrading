@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 from bot.subscriber_bot import _fmt_remaining, _handle_start_with_payload
 from bot.telegram_client import TelegramClientError
-from bot.trader_store import TraderStore
+from bot.trader_store import PERMANENT_SUBSCRIPTION_EXPIRES_AT, TraderStore
 
 
 class SubscriberBotTests(unittest.TestCase):
@@ -28,6 +28,9 @@ class SubscriberBotTests(unittest.TestCase):
         value = _fmt_remaining(future)
         self.assertIn("h", value)
         self.assertIn("m", value)
+
+    def test_fmt_remaining_permanent(self) -> None:
+        self.assertEqual(_fmt_remaining(PERMANENT_SUBSCRIPTION_EXPIRES_AT), "until cancellation")
 
 
 class SubscriberBotFlowTests(unittest.IsolatedAsyncioTestCase):

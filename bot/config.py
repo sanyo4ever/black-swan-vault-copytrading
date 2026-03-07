@@ -125,7 +125,7 @@ def load_settings(
         discovery_interval_seconds=int(os.getenv("DISCOVERY_INTERVAL_SECONDS", "900")),
         admin_panel_username=admin_panel_username,
         admin_panel_password=admin_panel_password,
-        subscription_lifetime_hours=int(os.getenv("SUBSCRIPTION_LIFETIME_HOURS", "24")),
+        subscription_lifetime_hours=int(os.getenv("SUBSCRIPTION_LIFETIME_HOURS", "0")),
         universe_interval_seconds=int(os.getenv("UNIVERSE_INTERVAL_SECONDS", "300")),
         universe_min_age_days=int(os.getenv("UNIVERSE_MIN_AGE_DAYS", "30")),
         universe_min_trades_30d=int(os.getenv("UNIVERSE_MIN_TRADES_30D", "10")),

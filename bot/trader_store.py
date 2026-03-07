@@ -27,6 +27,7 @@ SESSION_ERROR = "ERROR"
 RETRY_PENDING = "PENDING"
 RETRY_SENT = "SENT"
 RETRY_DEAD = "DEAD"
+PERMANENT_SUBSCRIPTION_EXPIRES_AT = "9999-12-31 23:59:59"
 
 
 @dataclass(frozen=True)
@@ -196,6 +197,7 @@ class TraderStore:
             self._connection.row_factory = sqlite3.Row
         self._ensure_schema()
         self._enforce_active_only_trader_status()
+        self._enforce_permanent_subscriptions()
 
     def _q(self, sql: str) -> str:
         if self._driver == "postgres":
@@ -253,6 +255,40 @@ class TraderStore:
                 WHERE status <> ?
                 """,
                 (STATUS_ACTIVE, STATUS_ACTIVE),
+            )
+            self._connection.commit()
+        except Exception:
+            self._connection.rollback()
+            raise
+
+    def _enforce_permanent_subscriptions(self) -> None:
+        # Current product mode: subscriptions remain active until user cancellation.
+        try:
+            self._execute(
+                """
+                UPDATE subscriptions
+                SET expires_at = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE status = ?
+                  AND expires_at <> ?
+                """,
+                (
+                    PERMANENT_SUBSCRIPTION_EXPIRES_AT,
+                    SUBSCRIPTION_ACTIVE,
+                    PERMANENT_SUBSCRIPTION_EXPIRES_AT,
+                ),
+            )
+            self._execute(
+                """
+                UPDATE delivery_sessions
+                SET expires_at = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE status = ?
+                  AND expires_at <> ?
+                """,
+                (
+                    PERMANENT_SUBSCRIPTION_EXPIRES_AT,
+                    SESSION_ACTIVE,
+                    PERMANENT_SUBSCRIPTION_EXPIRES_AT,
+                ),
             )
             self._connection.commit()
         except Exception:
@@ -1936,9 +1972,9 @@ class TraderStore:
             raise ValueError("Trader does not exist")
 
         chat_id_str = str(chat_id)
-        expires_at = (datetime.now(tz=UTC) + timedelta(hours=max(1, lifetime_hours))).strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
+        # Subscriptions are indefinite and can be stopped only by explicit cancellation.
+        _ = lifetime_hours
+        expires_at = PERMANENT_SUBSCRIPTION_EXPIRES_AT
 
         try:
             # New subscription means new session: expire any previous active records for this pair.
