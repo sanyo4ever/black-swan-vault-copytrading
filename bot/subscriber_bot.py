@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import UTC, datetime
 
 import aiohttp
 
 from bot.config import ConfigError, load_settings
-from bot.telegram_client import get_updates, send_message
+from bot.telegram_client import (
+    create_forum_topic,
+    delete_forum_topic,
+    get_updates,
+    send_message,
+)
 from bot.trader_store import STATUS_ACTIVE, TraderStore
 
 
@@ -35,6 +41,20 @@ def _normalize_command(raw_text: str) -> tuple[str, str]:
     return command, arg
 
 
+def _parse_db_ts(value: str) -> datetime | None:
+    try:
+        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
+    except Exception:
+        return None
+
+
+def _fmt_expiry(value: str) -> str:
+    parsed = _parse_db_ts(value)
+    if parsed is None:
+        return value
+    return parsed.strftime("%Y-%m-%d %H:%M UTC")
+
+
 async def _send_welcome(*, session: aiohttp.ClientSession, settings, chat_id: int) -> None:
     await send_message(
         session,
@@ -44,12 +64,47 @@ async def _send_welcome(*, session: aiohttp.ClientSession, settings, chat_id: in
             "<b>CryptoInsider Bot</b>\n\n"
             "1) Відкрий каталог трейдерів\n"
             "2) Натисни <b>Open Trader Chat</b>\n"
-            "3) Бот автоматично підпише тебе на обраного трейдера\n\n"
+            "3) Бот створить окремий тред на 24h і буде постити угоди туди\n\n"
             "Команди:\n"
-            "<code>/my</code> - мої підписки\n"
-            "<code>/stop 0x...</code> - відписатись від трейдера"
+            "<code>/my</code> - активні треди\n"
+            "<code>/stop 0x...</code> - зупинити трейдера і видалити тред"
         ),
     )
+
+
+async def _delete_topics_best_effort(
+    *,
+    session: aiohttp.ClientSession,
+    settings,
+    chat_id: int,
+    sessions,
+    logger: logging.Logger,
+) -> int:
+    failed = 0
+    for item in sessions:
+        if item.message_thread_id is None:
+            continue
+        try:
+            await delete_forum_topic(
+                session,
+                bot_token=settings.telegram_bot_token,
+                chat_id=chat_id,
+                message_thread_id=item.message_thread_id,
+            )
+        except Exception as exc:
+            failed += 1
+            logger.warning(
+                "Failed to delete forum topic chat_id=%s thread=%s: %s",
+                chat_id,
+                item.message_thread_id,
+                exc,
+            )
+            with TraderStore(settings.database_path) as store:
+                store.set_delivery_session_cleanup_error(
+                    session_id=item.session_id,
+                    error=str(exc),
+                )
+    return failed
 
 
 async def _handle_start_with_payload(
@@ -58,6 +113,7 @@ async def _handle_start_with_payload(
     settings,
     chat_id: int,
     payload: str,
+    logger: logging.Logger,
 ) -> None:
     if not payload.startswith("sub_"):
         await _send_welcome(session=session, settings=settings, chat_id=chat_id)
@@ -84,24 +140,98 @@ async def _handle_start_with_payload(
             )
             return
 
-        store.subscribe_chat_to_trader(chat_id=chat_id, trader_address=trader.address)
-        if trader.status != STATUS_ACTIVE:
-            store.set_status(address=trader.address, status=STATUS_ACTIVE)
+        # Each new subscription starts a clean 24h session for this trader in this chat.
+        previous_sessions = store.cancel_chat_trader_subscriptions(
+            chat_id=chat_id,
+            trader_address=trader.address,
+        )
 
-    await send_message(
-        session,
-        bot_token=settings.telegram_bot_token,
+    await _delete_topics_best_effort(
+        session=session,
+        settings=settings,
         chat_id=chat_id,
-        text=(
-            "<b>Готово ✅</b>\n"
-            f"Тепер ти отримуватимеш трейди для <code>{_short(address)}</code>.\n\n"
-            "Подивитися підписки: <code>/my</code>\n"
-            "Відписатись: <code>/stop 0x...</code>"
-        ),
+        sessions=previous_sessions,
+        logger=logger,
     )
 
+    topic_name = f"{_short(address)} | 24h"
+    topic_result = None
+    try:
+        topic_result = await create_forum_topic(
+            session,
+            bot_token=settings.telegram_bot_token,
+            chat_id=chat_id,
+            name=topic_name,
+        )
+        thread_id = int(topic_result.get("message_thread_id", 0))
+        if thread_id <= 0:
+            raise RuntimeError(f"Invalid forum topic response: {topic_result}")
 
-async def _handle_message(*, session: aiohttp.ClientSession, settings, message: dict) -> None:
+        with TraderStore(settings.database_path) as store:
+            session_info = store.create_subscription_with_session(
+                chat_id=chat_id,
+                trader_address=address,
+                message_thread_id=thread_id,
+                topic_name=topic_name,
+                lifetime_hours=settings.subscription_lifetime_hours,
+            )
+            if trader.status != STATUS_ACTIVE:
+                store.set_status(address=address, status=STATUS_ACTIVE)
+
+        await send_message(
+            session,
+            bot_token=settings.telegram_bot_token,
+            chat_id=chat_id,
+            message_thread_id=thread_id,
+            text=(
+                "<b>Session started ✅</b>\n"
+                f"Trader: <code>{_short(address)}</code>\n"
+                f"Expires: <b>{_fmt_expiry(session_info.expires_at)}</b>\n\n"
+                "Сюди будуть приходити нові угоди цього трейдера."
+            ),
+        )
+
+        await send_message(
+            session,
+            bot_token=settings.telegram_bot_token,
+            chat_id=chat_id,
+            text=(
+                "<b>Готово ✅</b>\n"
+                f"Створено окремий тред для <code>{_short(address)}</code>.\n"
+                f"TTL: {settings.subscription_lifetime_hours}h\n\n"
+                "Переглянути активні треди: <code>/my</code>"
+            ),
+        )
+    except Exception as exc:
+        logger.exception("Failed to create topic subscription for chat %s: %s", chat_id, exc)
+        if topic_result and topic_result.get("message_thread_id"):
+            try:
+                await delete_forum_topic(
+                    session,
+                    bot_token=settings.telegram_bot_token,
+                    chat_id=chat_id,
+                    message_thread_id=int(topic_result["message_thread_id"]),
+                )
+            except Exception:
+                pass
+        await send_message(
+            session,
+            bot_token=settings.telegram_bot_token,
+            chat_id=chat_id,
+            text=(
+                "Не вдалося створити новий тред для підписки.\n"
+                "Спробуй ще раз через 10-20 секунд."
+            ),
+        )
+
+
+async def _handle_message(
+    *,
+    session: aiohttp.ClientSession,
+    settings,
+    message: dict,
+    logger: logging.Logger,
+) -> None:
     chat = message.get("chat")
     if not isinstance(chat, dict):
         return
@@ -118,29 +248,31 @@ async def _handle_message(*, session: aiohttp.ClientSession, settings, message: 
             settings=settings,
             chat_id=chat_id,
             payload=arg,
+            logger=logger,
         )
         return
 
     if command == "my":
         with TraderStore(settings.database_path) as store:
-            subscriptions = store.list_subscriptions_for_chat(chat_id=chat_id)
+            sessions = store.list_delivery_sessions_for_chat(chat_id=chat_id)
 
-        if not subscriptions:
+        if not sessions:
             await send_message(
                 session,
                 bot_token=settings.telegram_bot_token,
                 chat_id=chat_id,
-                text="Підписок поки немає. Обери трейдера в каталозі.",
+                text="Активних тредів поки немає. Обери трейдера в каталозі.",
             )
             return
 
-        lines = ["<b>Твої підписки</b>"]
-        for sub in subscriptions:
-            label = sub.trader_label or "Unnamed"
+        lines = ["<b>Твої активні треди</b>"]
+        for item in sessions:
+            topic = item.topic_name or "Trader thread"
+            thread = item.message_thread_id if item.message_thread_id is not None else "-"
             lines.append(
-                f"• <code>{_short(sub.trader_address)}</code> - {label} ({sub.status})"
+                f"• <code>{_short(item.trader_address)}</code> | {topic} | thread={thread} | exp={_fmt_expiry(item.expires_at)}"
             )
-        lines.append("\nВідписатись: <code>/stop 0x...</code>")
+        lines.append("\nЗупинити: <code>/stop 0x...</code>")
 
         await send_message(
             session,
@@ -162,22 +294,35 @@ async def _handle_message(*, session: aiohttp.ClientSession, settings, message: 
             return
 
         with TraderStore(settings.database_path) as store:
-            removed = store.unsubscribe_chat_from_trader(chat_id=chat_id, trader_address=address)
+            sessions = store.cancel_chat_trader_subscriptions(
+                chat_id=chat_id,
+                trader_address=address,
+            )
 
-        if removed > 0:
+        if not sessions:
             await send_message(
                 session,
                 bot_token=settings.telegram_bot_token,
                 chat_id=chat_id,
-                text=f"Відписку від <code>{_short(address)}</code> вимкнено.",
+                text="Активної підписки на цього трейдера не знайдено.",
             )
-        else:
-            await send_message(
-                session,
-                bot_token=settings.telegram_bot_token,
-                chat_id=chat_id,
-                text="Такої підписки не знайдено.",
-            )
+            return
+
+        failed = await _delete_topics_best_effort(
+            session=session,
+            settings=settings,
+            chat_id=chat_id,
+            sessions=sessions,
+            logger=logger,
+        )
+
+        suffix = "" if failed == 0 else f" (topic delete failed: {failed})"
+        await send_message(
+            session,
+            bot_token=settings.telegram_bot_token,
+            chat_id=chat_id,
+            text=f"Підписку на <code>{_short(address)}</code> зупинено{suffix}.",
+        )
         return
 
     await _send_welcome(session=session, settings=settings, chat_id=chat_id)
@@ -226,7 +371,12 @@ async def run_bot() -> None:
                     continue
 
                 try:
-                    await _handle_message(session=session, settings=settings, message=message)
+                    await _handle_message(
+                        session=session,
+                        settings=settings,
+                        message=message,
+                        logger=logger,
+                    )
                 except Exception as exc:
                     logger.exception("Failed to process update %s: %s", update_id, exc)
 

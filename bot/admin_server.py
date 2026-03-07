@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hmac
+from datetime import UTC, datetime
 from html import escape
 from typing import Any
 from urllib.parse import quote
@@ -12,7 +13,7 @@ from aiohttp import web
 
 from bot.config import load_settings
 from bot.discovery import HyperliquidDiscoveryConfig, HyperliquidDiscoveryService
-from bot.trader_store import STATUS_ACTIVE, STATUS_PAUSED, TraderStore, TrackedTrader
+from bot.trader_store import LiveTopTrader, STATUS_ACTIVE, STATUS_PAUSED, TraderStore
 
 
 def _discovery_config_from_settings(settings) -> HyperliquidDiscoveryConfig:
@@ -48,6 +49,14 @@ def _fmt(raw: Any, digits: int = 2) -> str:
     if isinstance(raw, float):
         return f"{raw:.{digits}f}"
     return escape(str(raw))
+
+
+def _minutes_since(last_fill_time: int | None) -> int | None:
+    if last_fill_time is None or last_fill_time <= 0:
+        return None
+    now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
+    delta_ms = max(0, now_ms - int(last_fill_time))
+    return int(delta_ms // 60000)
 
 
 def _subscribe_button(*, trader_address: str, bot_username: str) -> str:
@@ -93,7 +102,7 @@ async def _admin_auth_middleware(request: web.Request, handler):
     return await handler(request)
 
 
-def _apply_public_filters(traders: list[TrackedTrader], request: web.Request) -> list[TrackedTrader]:
+def _apply_public_filters(traders: list[LiveTopTrader], request: web.Request) -> list[LiveTopTrader]:
     q = str(request.query.get("q", "")).strip().lower()
     status = str(request.query.get("status", "ALL")).upper()
 
@@ -103,8 +112,9 @@ def _apply_public_filters(traders: list[TrackedTrader], request: web.Request) ->
     min_win_rate_30d = _to_float(request.query.get("min_win_rate_30d"), 0.0)
     min_realized_pnl_30d = _to_float(request.query.get("min_realized_pnl_30d"), -10**9)
     min_score = _to_float(request.query.get("min_score"), 0.0)
+    min_activity_score = _to_float(request.query.get("min_activity_score"), 0.0)
 
-    filtered: list[TrackedTrader] = []
+    filtered: list[LiveTopTrader] = []
     for trader in traders:
         if q and q not in trader.address and q not in (trader.label or "").lower():
             continue
@@ -122,47 +132,58 @@ def _apply_public_filters(traders: list[TrackedTrader], request: web.Request) ->
             continue
         if (trader.score or 0.0) < min_score:
             continue
+        if (trader.activity_score or 0.0) < min_activity_score:
+            continue
         filtered.append(trader)
 
-    sort_by = str(request.query.get("sort", "score_desc")).strip().lower()
+    sort_by = str(request.query.get("sort", "activity_desc")).strip().lower()
     sort_map = {
+        "activity_desc": (lambda t: (t.activity_score, -(t.rank_position or 100000)), True),
         "score_desc": (lambda t: (t.score or -10**9), True),
         "pnl_desc": (lambda t: (t.realized_pnl_30d or -10**9), True),
         "win_desc": (lambda t: (t.win_rate_30d or -1), True),
         "trades_desc": (lambda t: (t.trades_30d or -1), True),
-        "age_desc": (lambda t: (t.age_days or -1), True),
+        "rank_asc": (lambda t: (t.rank_position or 10**9), False),
         "recent_desc": (lambda t: (t.last_fill_time or 0), True),
     }
-    sort_fn, reverse = sort_map.get(sort_by, sort_map["score_desc"])
+    sort_fn, reverse = sort_map.get(sort_by, sort_map["activity_desc"])
     filtered.sort(key=sort_fn, reverse=reverse)
     return filtered
 
 
 def _render_public_directory(
     *,
-    traders: list[TrackedTrader],
+    traders: list[LiveTopTrader],
     request: web.Request,
     bot_username: str,
 ) -> str:
     rows = []
     for trader in traders:
+        minutes_since = _minutes_since(trader.last_fill_time)
+        freshness = "-" if minutes_since is None else f"{minutes_since}m ago"
         rows.append(
             "<tr>"
+            f"<td>{_fmt(trader.rank_position, 0)}</td>"
             f"<td><code>{escape(trader.address)}</code></td>"
             f"<td>{escape(trader.label or '-')}</td>"
             f"<td>{escape(trader.status)}</td>"
-            f"<td>{_fmt(trader.age_days, 1)}</td>"
+            f"<td>{escape(freshness)}</td>"
             f"<td>{_fmt(trader.trades_30d, 0)}</td>"
             f"<td>{_fmt(trader.active_days_30d, 0)}</td>"
             f"<td>{_fmt((trader.win_rate_30d or 0.0) * 100.0, 1)}%</td>"
             f"<td>{_fmt(trader.realized_pnl_30d, 2)}</td>"
-            f"<td>{_fmt(trader.volume_usd_30d, 2)}</td>"
             f"<td>{_fmt(trader.score, 2)}</td>"
+            f"<td>{_fmt(trader.activity_score, 2)}</td>"
             f"<td>{_subscribe_button(trader_address=trader.address, bot_username=bot_username)}</td>"
             "</tr>"
         )
 
-    table_rows = "\n".join(rows) if rows else "<tr><td colspan='11'>No traders match your filters.</td></tr>"
+    table_rows = (
+        "\n".join(rows)
+        if rows
+        else "<tr><td colspan='12'>No live traders match your filters.</td></tr>"
+    )
+    refreshed_at = traders[0].refreshed_at if traders else "-"
 
     return f"""
 <!doctype html>
@@ -195,10 +216,11 @@ def _render_public_directory(
 <body>
   <div class='wrap'>
     <div class='card'>
-      <h1>Futures Trader Directory</h1>
+      <h1>Live Futures Top 100</h1>
       <p>Choose a trader and open a personal Telegram chat in one click.</p>
       <div class='quick-info'>
-        <strong>How it works:</strong> We rank active futures traders by recent performance and activity.<br/>
+        <strong>How it works:</strong> We rank active futures traders by recency + frequency + quality score.<br/>
+        Top list refreshed by worker. Last refresh: <strong>{escape(refreshed_at)}</strong>.<br/>
         Click <strong>Open Trader Chat</strong> to receive new fills from that trader in Telegram.<br/>
         Informational only. Not financial advice.
       </div>
@@ -218,12 +240,14 @@ def _render_public_directory(
         <input name='min_win_rate_30d' type='number' step='0.1' min='0' max='100' value='{escape(str(request.query.get("min_win_rate_30d", "0")))}' placeholder='min winrate %' />
         <input name='min_realized_pnl_30d' type='number' step='0.01' value='{escape(str(request.query.get("min_realized_pnl_30d", "-1000000000")))}' placeholder='min pnl 30d' />
         <input name='min_score' type='number' step='0.01' value='{escape(str(request.query.get("min_score", "0")))}' placeholder='min score' />
+        <input name='min_activity_score' type='number' step='0.01' value='{escape(str(request.query.get("min_activity_score", "0")))}' placeholder='min activity score' />
         <select name='sort'>
+          <option value='activity_desc'>activity desc</option>
+          <option value='rank_asc'>rank asc</option>
           <option value='score_desc'>score desc</option>
           <option value='pnl_desc'>pnl desc</option>
           <option value='win_desc'>win rate desc</option>
           <option value='trades_desc'>trades desc</option>
-          <option value='age_desc'>age desc</option>
           <option value='recent_desc'>recent desc</option>
         </select>
         <button type='submit'>Apply Filters</button>
@@ -234,16 +258,17 @@ def _render_public_directory(
       <table>
         <thead>
           <tr>
+            <th>Rank</th>
             <th>Address</th>
             <th>Label</th>
             <th>Status</th>
-            <th>Age (days)</th>
+            <th>Last Fill</th>
             <th>Trades 30d</th>
             <th>Active Days 30d</th>
             <th>Win Rate 30d</th>
             <th>Realized PnL 30d</th>
-            <th>Volume USD 30d</th>
             <th>Score</th>
+            <th>Activity</th>
             <th>Action</th>
           </tr>
         </thead>
@@ -408,7 +433,7 @@ def _render_admin_index(*, traders, discovery_runs, message: str | None = None) 
 async def subscriber_directory(request: web.Request) -> web.Response:
     settings = request.app["settings"]
     with TraderStore(settings.database_path) as store:
-        traders = store.list_traders(limit=4000)
+        traders = store.list_top100_live_traders(limit=settings.live_top100_size)
 
     filtered = _apply_public_filters(traders, request)
     return web.Response(

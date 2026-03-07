@@ -30,6 +30,17 @@ class Settings:
     discovery_interval_seconds: int
     admin_panel_username: str
     admin_panel_password: str
+    subscription_lifetime_hours: int
+    universe_interval_seconds: int
+    universe_min_age_days: int
+    universe_min_trades_30d: int
+    universe_min_win_rate_30d: float
+    universe_min_realized_pnl_30d: float
+    universe_min_score: float
+    universe_max_size: int
+    live_top100_interval_seconds: int
+    live_top100_active_window_minutes: int
+    live_top100_size: int
 
 
 class ConfigError(RuntimeError):
@@ -84,6 +95,21 @@ def load_settings(
         discovery_interval_seconds=int(os.getenv("DISCOVERY_INTERVAL_SECONDS", "900")),
         admin_panel_username=admin_panel_username,
         admin_panel_password=admin_panel_password,
+        subscription_lifetime_hours=int(os.getenv("SUBSCRIPTION_LIFETIME_HOURS", "24")),
+        universe_interval_seconds=int(os.getenv("UNIVERSE_INTERVAL_SECONDS", "300")),
+        universe_min_age_days=int(os.getenv("UNIVERSE_MIN_AGE_DAYS", "30")),
+        universe_min_trades_30d=int(os.getenv("UNIVERSE_MIN_TRADES_30D", "10")),
+        universe_min_win_rate_30d=float(os.getenv("UNIVERSE_MIN_WIN_RATE_30D", "0.0")),
+        universe_min_realized_pnl_30d=float(
+            os.getenv("UNIVERSE_MIN_REALIZED_PNL_30D", "0.0")
+        ),
+        universe_min_score=float(os.getenv("UNIVERSE_MIN_SCORE", "0.0")),
+        universe_max_size=int(os.getenv("UNIVERSE_MAX_SIZE", "3000")),
+        live_top100_interval_seconds=int(os.getenv("LIVE_TOP100_INTERVAL_SECONDS", "60")),
+        live_top100_active_window_minutes=int(
+            os.getenv("LIVE_TOP100_ACTIVE_WINDOW_MINUTES", "60")
+        ),
+        live_top100_size=int(os.getenv("LIVE_TOP100_SIZE", "100")),
     )
 
 

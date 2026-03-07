@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Iterable
 
 
 STATUS_ACTIVE = "ACTIVE"
 STATUS_PAUSED = "PAUSED"
+SUBSCRIPTION_ACTIVE = "ACTIVE"
+SUBSCRIPTION_EXPIRED = "EXPIRED"
+SUBSCRIPTION_CANCELLED = "CANCELLED"
+SESSION_ACTIVE = "ACTIVE"
+SESSION_EXPIRED = "EXPIRED"
+SESSION_ERROR = "ERROR"
 
 
 @dataclass(frozen=True)
@@ -64,6 +71,46 @@ class ChatSubscription:
     status: str
     created_at: str
     updated_at: str
+
+
+@dataclass(frozen=True)
+class LiveTopTrader:
+    rank_position: int
+    activity_score: float
+    address: str
+    label: str | None
+    source: str
+    status: str
+    age_days: float | None
+    trades_30d: int | None
+    active_days_30d: int | None
+    win_rate_30d: float | None
+    realized_pnl_30d: float | None
+    volume_usd_30d: float | None
+    score: float | None
+    last_fill_time: int | None
+    refreshed_at: str
+
+
+@dataclass(frozen=True)
+class DeliveryTarget:
+    session_id: int
+    subscription_id: int
+    chat_id: str
+    trader_address: str
+    message_thread_id: int | None
+    expires_at: str
+
+
+@dataclass(frozen=True)
+class DeliverySessionInfo:
+    session_id: int
+    subscription_id: int
+    chat_id: str
+    trader_address: str
+    message_thread_id: int | None
+    topic_name: str | None
+    expires_at: str
 
 
 class TraderStore:
@@ -221,6 +268,115 @@ class TraderStore:
             ON telegram_trader_subscriptions(chat_id, status)
             """
         )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS traders_universe (
+                address TEXT PRIMARY KEY,
+                label TEXT,
+                source TEXT NOT NULL,
+                score REAL,
+                win_rate_30d REAL,
+                realized_pnl_30d REAL,
+                volume_usd_30d REAL,
+                trades_30d INTEGER,
+                active_days_30d INTEGER,
+                age_days REAL,
+                last_fill_time INTEGER,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(address) REFERENCES tracked_traders(address) ON DELETE CASCADE
+            )
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_traders_universe_score
+            ON traders_universe(score DESC)
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_traders_universe_last_fill
+            ON traders_universe(last_fill_time DESC)
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS traders_top100_live (
+                rank_position INTEGER PRIMARY KEY,
+                address TEXT NOT NULL UNIQUE,
+                activity_score REAL NOT NULL DEFAULT 0,
+                last_fill_time INTEGER,
+                refreshed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(address) REFERENCES tracked_traders(address) ON DELETE CASCADE
+            )
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_top100_live_address
+            ON traders_top100_live(address)
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id TEXT NOT NULL,
+                trader_address TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('ACTIVE', 'EXPIRED', 'CANCELLED')),
+                started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(trader_address) REFERENCES tracked_traders(address) ON DELETE CASCADE
+            )
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_subscriptions_trader_status_exp
+            ON subscriptions(trader_address, status, expires_at)
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_subscriptions_chat_status_exp
+            ON subscriptions(chat_id, status, expires_at)
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS delivery_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subscription_id INTEGER NOT NULL UNIQUE,
+                chat_id TEXT NOT NULL,
+                trader_address TEXT NOT NULL,
+                message_thread_id INTEGER,
+                topic_name TEXT,
+                status TEXT NOT NULL CHECK(status IN ('ACTIVE', 'EXPIRED', 'ERROR')),
+                started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                expires_at TEXT NOT NULL,
+                closed_at TEXT,
+                last_error TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE,
+                FOREIGN KEY(trader_address) REFERENCES tracked_traders(address) ON DELETE CASCADE
+            )
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_delivery_sessions_trader_status_exp
+            ON delivery_sessions(trader_address, status, expires_at)
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_delivery_sessions_chat_status_exp
+            ON delivery_sessions(chat_id, status, expires_at)
+            """
+        )
         self._connection.commit()
 
     @staticmethod
@@ -286,6 +442,57 @@ class TraderStore:
             updated_at=row["updated_at"],
         )
 
+    @staticmethod
+    def _row_to_live_top_trader(row: sqlite3.Row) -> LiveTopTrader:
+        return LiveTopTrader(
+            rank_position=int(row["rank_position"]),
+            activity_score=float(row["activity_score"]),
+            address=row["address"],
+            label=row["label"],
+            source=row["source"],
+            status=row["status"],
+            age_days=row["age_days"],
+            trades_30d=row["trades_30d"],
+            active_days_30d=row["active_days_30d"],
+            win_rate_30d=row["win_rate_30d"],
+            realized_pnl_30d=row["realized_pnl_30d"],
+            volume_usd_30d=row["volume_usd_30d"],
+            score=row["score"],
+            last_fill_time=row["last_fill_time"],
+            refreshed_at=row["refreshed_at"],
+        )
+
+    @staticmethod
+    def _row_to_delivery_target(row: sqlite3.Row) -> DeliveryTarget:
+        return DeliveryTarget(
+            session_id=int(row["session_id"]),
+            subscription_id=int(row["subscription_id"]),
+            chat_id=str(row["chat_id"]),
+            trader_address=row["trader_address"],
+            message_thread_id=(
+                int(row["message_thread_id"])
+                if row["message_thread_id"] is not None
+                else None
+            ),
+            expires_at=row["expires_at"],
+        )
+
+    @staticmethod
+    def _row_to_delivery_session_info(row: sqlite3.Row) -> DeliverySessionInfo:
+        return DeliverySessionInfo(
+            session_id=int(row["session_id"]),
+            subscription_id=int(row["subscription_id"]),
+            chat_id=str(row["chat_id"]),
+            trader_address=row["trader_address"],
+            message_thread_id=(
+                int(row["message_thread_id"])
+                if row["message_thread_id"] is not None
+                else None
+            ),
+            topic_name=row["topic_name"],
+            expires_at=row["expires_at"],
+        )
+
     def list_traders(self, *, limit: int = 500) -> list[TrackedTrader]:
         rows = self._connection.execute(
             """
@@ -313,6 +520,238 @@ class TraderStore:
             (STATUS_ACTIVE, limit),
         ).fetchall()
         return [str(row["address"]) for row in rows]
+
+    def list_active_subscription_addresses(self, *, limit: int = 200) -> list[str]:
+        rows = self._connection.execute(
+            """
+            SELECT DISTINCT trader_address AS address
+            FROM subscriptions
+            WHERE status = 'ACTIVE' AND expires_at > CURRENT_TIMESTAMP
+            ORDER BY trader_address ASC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [str(row["address"]) for row in rows]
+
+    def list_monitored_addresses(self, *, limit: int = 200) -> list[str]:
+        addresses: list[str] = []
+        addresses.extend(self.list_active_subscription_addresses(limit=limit))
+        if len(addresses) < limit:
+            addresses.extend(self.list_active_addresses(limit=limit))
+        dedup: list[str] = []
+        seen: set[str] = set()
+        for address in addresses:
+            normalized = self.normalize_address(address)
+            if not normalized or normalized in seen:
+                continue
+            dedup.append(normalized)
+            seen.add(normalized)
+            if len(dedup) >= limit:
+                break
+        return dedup
+
+    def refresh_traders_universe_from_tracked(
+        self,
+        *,
+        min_age_days: int,
+        min_trades_30d: int,
+        min_win_rate_30d: float,
+        min_realized_pnl_30d: float,
+        min_score: float,
+        max_size: int = 3000,
+    ) -> int:
+        rows = self._connection.execute(
+            """
+            SELECT
+                address,
+                label,
+                source,
+                score,
+                win_rate_30d,
+                realized_pnl_30d,
+                volume_usd_30d,
+                trades_30d,
+                active_days_30d,
+                age_days,
+                last_fill_time
+            FROM tracked_traders
+            WHERE
+                COALESCE(age_days, 0) >= ?
+                AND COALESCE(trades_30d, 0) >= ?
+                AND COALESCE(win_rate_30d, 0) >= ?
+                AND COALESCE(realized_pnl_30d, -1000000000) >= ?
+                AND COALESCE(score, -1000000000) >= ?
+            ORDER BY COALESCE(score, -1000000000) DESC, COALESCE(last_fill_time, 0) DESC
+            LIMIT ?
+            """,
+            (
+                float(min_age_days),
+                int(min_trades_30d),
+                float(min_win_rate_30d),
+                float(min_realized_pnl_30d),
+                float(min_score),
+                int(max_size),
+            ),
+        ).fetchall()
+
+        payload = [
+            (
+                str(row["address"]),
+                row["label"],
+                str(row["source"]),
+                row["score"],
+                row["win_rate_30d"],
+                row["realized_pnl_30d"],
+                row["volume_usd_30d"],
+                row["trades_30d"],
+                row["active_days_30d"],
+                row["age_days"],
+                row["last_fill_time"],
+            )
+            for row in rows
+        ]
+
+        keep = [item[0] for item in payload]
+        self._connection.execute("BEGIN")
+        try:
+            self._connection.executemany(
+                """
+                INSERT INTO traders_universe(
+                    address,
+                    label,
+                    source,
+                    score,
+                    win_rate_30d,
+                    realized_pnl_30d,
+                    volume_usd_30d,
+                    trades_30d,
+                    active_days_30d,
+                    age_days,
+                    last_fill_time,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(address) DO UPDATE SET
+                    label = excluded.label,
+                    source = excluded.source,
+                    score = excluded.score,
+                    win_rate_30d = excluded.win_rate_30d,
+                    realized_pnl_30d = excluded.realized_pnl_30d,
+                    volume_usd_30d = excluded.volume_usd_30d,
+                    trades_30d = excluded.trades_30d,
+                    active_days_30d = excluded.active_days_30d,
+                    age_days = excluded.age_days,
+                    last_fill_time = excluded.last_fill_time,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                payload,
+            )
+            if keep:
+                placeholders = ",".join("?" for _ in keep)
+                self._connection.execute(
+                    f"DELETE FROM traders_universe WHERE address NOT IN ({placeholders})",
+                    keep,
+                )
+            else:
+                self._connection.execute("DELETE FROM traders_universe")
+            self._connection.execute("COMMIT")
+        except Exception:
+            self._connection.execute("ROLLBACK")
+            raise
+        return len(payload)
+
+    def refresh_top100_live(
+        self,
+        *,
+        max_rows: int = 100,
+        active_window_minutes: int = 60,
+    ) -> int:
+        now = datetime.now(tz=UTC)
+        now_ms = int(now.timestamp() * 1000)
+        cutoff_ms = now_ms - (active_window_minutes * 60 * 1000)
+
+        rows = self._connection.execute(
+            """
+            SELECT
+                address,
+                score,
+                trades_30d,
+                last_fill_time
+            FROM traders_universe
+            WHERE COALESCE(last_fill_time, 0) >= ?
+            """,
+            (cutoff_ms,),
+        ).fetchall()
+
+        ranked: list[tuple[str, float, int | None]] = []
+        for row in rows:
+            address = str(row["address"])
+            score = float(row["score"] or 0.0)
+            trades_30d = int(row["trades_30d"] or 0)
+            last_fill_time = int(row["last_fill_time"]) if row["last_fill_time"] is not None else None
+            if last_fill_time is None:
+                continue
+
+            age_minutes = max(0.0, (now_ms - last_fill_time) / 60000.0)
+            recency_component = max(0.0, 1.0 - (age_minutes / max(1, active_window_minutes))) * 40.0
+            frequency_component = min(30.0, trades_30d / 12.0)
+            quality_component = min(30.0, max(0.0, score))
+            activity_score = recency_component + frequency_component + quality_component
+            ranked.append((address, round(activity_score, 4), last_fill_time))
+
+        ranked.sort(key=lambda item: (item[1], item[2]), reverse=True)
+        ranked = ranked[: max_rows]
+
+        self._connection.execute("BEGIN")
+        try:
+            self._connection.execute("DELETE FROM traders_top100_live")
+            self._connection.executemany(
+                """
+                INSERT INTO traders_top100_live(
+                    rank_position, address, activity_score, last_fill_time, refreshed_at
+                )
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                [
+                    (idx + 1, item[0], item[1], item[2])
+                    for idx, item in enumerate(ranked)
+                ],
+            )
+            self._connection.execute("COMMIT")
+        except Exception:
+            self._connection.execute("ROLLBACK")
+            raise
+
+        return len(ranked)
+
+    def list_top100_live_traders(self, *, limit: int = 100) -> list[LiveTopTrader]:
+        rows = self._connection.execute(
+            """
+            SELECT
+                top.rank_position,
+                top.activity_score,
+                top.refreshed_at,
+                t.address,
+                t.label,
+                t.source,
+                t.status,
+                t.age_days,
+                t.trades_30d,
+                t.active_days_30d,
+                t.win_rate_30d,
+                t.realized_pnl_30d,
+                t.volume_usd_30d,
+                t.score,
+                t.last_fill_time
+            FROM traders_top100_live top
+            JOIN tracked_traders t ON t.address = top.address
+            ORDER BY top.rank_position ASC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [self._row_to_live_top_trader(row) for row in rows]
 
     def get_trader(self, *, address: str) -> TrackedTrader | None:
         normalized = self.normalize_address(address)
@@ -396,6 +835,273 @@ class TraderStore:
             address = str(row["trader_address"])
             mapping.setdefault(address, []).append(str(row["chat_id"]))
         return mapping
+
+    def create_subscription_with_session(
+        self,
+        *,
+        chat_id: str | int,
+        trader_address: str,
+        message_thread_id: int | None,
+        topic_name: str | None,
+        lifetime_hours: int = 24,
+    ) -> DeliverySessionInfo:
+        normalized = self.normalize_address(trader_address)
+        if not normalized:
+            raise ValueError("Trader address must not be empty")
+        if self.get_trader(address=normalized) is None:
+            raise ValueError("Trader does not exist")
+
+        chat_id_str = str(chat_id)
+        expires_at = (datetime.now(tz=UTC) + timedelta(hours=max(1, lifetime_hours))).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+
+        self._connection.execute("BEGIN")
+        try:
+            # New subscription means new session: expire any previous active records for this pair.
+            self._connection.execute(
+                """
+                UPDATE subscriptions
+                SET status = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE chat_id = ? AND trader_address = ? AND status = ?
+                """,
+                (SUBSCRIPTION_EXPIRED, chat_id_str, normalized, SUBSCRIPTION_ACTIVE),
+            )
+            self._connection.execute(
+                """
+                UPDATE delivery_sessions
+                SET status = ?, closed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+                WHERE chat_id = ? AND trader_address = ? AND status = ?
+                """,
+                (SESSION_EXPIRED, chat_id_str, normalized, SESSION_ACTIVE),
+            )
+
+            cursor = self._connection.execute(
+                """
+                INSERT INTO subscriptions(
+                    chat_id, trader_address, status, started_at, expires_at, updated_at
+                )
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, CURRENT_TIMESTAMP)
+                """,
+                (chat_id_str, normalized, SUBSCRIPTION_ACTIVE, expires_at),
+            )
+            subscription_id = int(cursor.lastrowid)
+
+            session_cursor = self._connection.execute(
+                """
+                INSERT INTO delivery_sessions(
+                    subscription_id,
+                    chat_id,
+                    trader_address,
+                    message_thread_id,
+                    topic_name,
+                    status,
+                    started_at,
+                    expires_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, CURRENT_TIMESTAMP)
+                """,
+                (
+                    subscription_id,
+                    chat_id_str,
+                    normalized,
+                    message_thread_id,
+                    (topic_name or None),
+                    SESSION_ACTIVE,
+                    expires_at,
+                ),
+            )
+            session_id = int(session_cursor.lastrowid)
+            self._connection.execute("COMMIT")
+        except Exception:
+            self._connection.execute("ROLLBACK")
+            raise
+
+        return DeliverySessionInfo(
+            session_id=session_id,
+            subscription_id=subscription_id,
+            chat_id=chat_id_str,
+            trader_address=normalized,
+            message_thread_id=message_thread_id,
+            topic_name=topic_name,
+            expires_at=expires_at,
+        )
+
+    def list_delivery_sessions_for_chat(self, *, chat_id: str | int) -> list[DeliverySessionInfo]:
+        rows = self._connection.execute(
+            """
+            SELECT
+                ds.id AS session_id,
+                ds.subscription_id,
+                ds.chat_id,
+                ds.trader_address,
+                ds.message_thread_id,
+                ds.topic_name,
+                ds.expires_at
+            FROM delivery_sessions ds
+            JOIN subscriptions s ON s.id = ds.subscription_id
+            WHERE ds.chat_id = ?
+              AND ds.status = 'ACTIVE'
+              AND s.status = 'ACTIVE'
+              AND s.expires_at > CURRENT_TIMESTAMP
+            ORDER BY ds.expires_at ASC
+            """,
+            (str(chat_id),),
+        ).fetchall()
+        return [self._row_to_delivery_session_info(row) for row in rows]
+
+    def list_active_delivery_targets_by_trader(self) -> dict[str, list[DeliveryTarget]]:
+        rows = self._connection.execute(
+            """
+            SELECT
+                ds.id AS session_id,
+                ds.subscription_id,
+                ds.chat_id,
+                ds.trader_address,
+                ds.message_thread_id,
+                ds.expires_at
+            FROM delivery_sessions ds
+            JOIN subscriptions s ON s.id = ds.subscription_id
+            WHERE ds.status = 'ACTIVE'
+              AND s.status = 'ACTIVE'
+              AND s.expires_at > CURRENT_TIMESTAMP
+            ORDER BY ds.trader_address ASC, ds.chat_id ASC
+            """
+        ).fetchall()
+
+        mapping: dict[str, list[DeliveryTarget]] = {}
+        for row in rows:
+            target = self._row_to_delivery_target(row)
+            mapping.setdefault(target.trader_address, []).append(target)
+        return mapping
+
+    def expire_due_delivery_sessions(self) -> list[DeliverySessionInfo]:
+        rows = self._connection.execute(
+            """
+            SELECT
+                ds.id AS session_id,
+                ds.subscription_id,
+                ds.chat_id,
+                ds.trader_address,
+                ds.message_thread_id,
+                ds.topic_name,
+                ds.expires_at
+            FROM delivery_sessions ds
+            JOIN subscriptions s ON s.id = ds.subscription_id
+            WHERE ds.status = 'ACTIVE'
+              AND s.status = 'ACTIVE'
+              AND s.expires_at <= CURRENT_TIMESTAMP
+            ORDER BY s.expires_at ASC
+            """
+        ).fetchall()
+        expired = [self._row_to_delivery_session_info(row) for row in rows]
+        if not expired:
+            return []
+
+        sub_ids = [item.subscription_id for item in expired]
+        sess_ids = [item.session_id for item in expired]
+        sub_ph = ",".join("?" for _ in sub_ids)
+        sess_ph = ",".join("?" for _ in sess_ids)
+
+        self._connection.execute("BEGIN")
+        try:
+            self._connection.execute(
+                f"""
+                UPDATE subscriptions
+                SET status = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id IN ({sub_ph})
+                """,
+                (SUBSCRIPTION_EXPIRED, *sub_ids),
+            )
+            self._connection.execute(
+                f"""
+                UPDATE delivery_sessions
+                SET status = ?, closed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+                WHERE id IN ({sess_ph})
+                """,
+                (SESSION_EXPIRED, *sess_ids),
+            )
+            self._connection.execute("COMMIT")
+        except Exception:
+            self._connection.execute("ROLLBACK")
+            raise
+
+        return expired
+
+    def set_delivery_session_cleanup_error(self, *, session_id: int, error: str) -> None:
+        self._connection.execute(
+            """
+            UPDATE delivery_sessions
+            SET status = 'ERROR',
+                last_error = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (error[:1000], int(session_id)),
+        )
+        self._connection.commit()
+
+    def cancel_chat_trader_subscriptions(
+        self,
+        *,
+        chat_id: str | int,
+        trader_address: str,
+    ) -> list[DeliverySessionInfo]:
+        chat_id_str = str(chat_id)
+        normalized = self.normalize_address(trader_address)
+        rows = self._connection.execute(
+            """
+            SELECT
+                ds.id AS session_id,
+                ds.subscription_id,
+                ds.chat_id,
+                ds.trader_address,
+                ds.message_thread_id,
+                ds.topic_name,
+                ds.expires_at
+            FROM delivery_sessions ds
+            JOIN subscriptions s ON s.id = ds.subscription_id
+            WHERE ds.chat_id = ?
+              AND ds.trader_address = ?
+              AND ds.status = 'ACTIVE'
+              AND s.status = 'ACTIVE'
+            """,
+            (chat_id_str, normalized),
+        ).fetchall()
+        sessions = [self._row_to_delivery_session_info(row) for row in rows]
+        if not sessions:
+            return []
+
+        sub_ids = [item.subscription_id for item in sessions]
+        sess_ids = [item.session_id for item in sessions]
+        sub_ph = ",".join("?" for _ in sub_ids)
+        sess_ph = ",".join("?" for _ in sess_ids)
+
+        self._connection.execute("BEGIN")
+        try:
+            self._connection.execute(
+                f"""
+                UPDATE subscriptions
+                SET status = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id IN ({sub_ph})
+                """,
+                (SUBSCRIPTION_CANCELLED, *sub_ids),
+            )
+            self._connection.execute(
+                f"""
+                UPDATE delivery_sessions
+                SET status = ?, closed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+                WHERE id IN ({sess_ph})
+                """,
+                (SESSION_EXPIRED, *sess_ids),
+            )
+            self._connection.execute("COMMIT")
+        except Exception:
+            self._connection.execute("ROLLBACK")
+            raise
+
+        return sessions
 
     def add_manual(self, *, address: str, label: str | None = None) -> None:
         normalized = self.normalize_address(address)

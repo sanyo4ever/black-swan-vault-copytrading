@@ -64,7 +64,7 @@ class HyperliquidFuturesSource(Source):
         start_ms = int((datetime.now(tz=UTC).timestamp() - (lookback_minutes * 60)) * 1000)
 
         with TraderStore(self._database_path) as store:
-            traders = store.list_active_addresses(limit=trader_limit)
+            traders = store.list_monitored_addresses(limit=trader_limit)
 
             signals: list[TradeSignal] = []
             last_fill_updates: list[tuple[str, int]] = []

@@ -23,6 +23,8 @@ sudo cp deploy/systemd/cryptoinsider-*.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now cryptoinsider-admin.service
 sudo systemctl enable --now cryptoinsider-discovery.service
+sudo systemctl enable --now cryptoinsider-universe.service
+sudo systemctl enable --now cryptoinsider-top100.service
 sudo systemctl enable --now cryptoinsider-poster.service
 sudo systemctl enable --now cryptoinsider-subscriberbot.service
 ```
@@ -31,6 +33,8 @@ sudo systemctl enable --now cryptoinsider-subscriberbot.service
 ```bash
 sudo systemctl status cryptoinsider-admin.service
 sudo systemctl status cryptoinsider-discovery.service
+sudo systemctl status cryptoinsider-universe.service
+sudo systemctl status cryptoinsider-top100.service
 sudo systemctl status cryptoinsider-poster.service
 sudo systemctl status cryptoinsider-subscriberbot.service
 ```
@@ -39,6 +43,8 @@ sudo systemctl status cryptoinsider-subscriberbot.service
 ```bash
 sudo journalctl -u cryptoinsider-admin.service -f
 sudo journalctl -u cryptoinsider-discovery.service -f
+sudo journalctl -u cryptoinsider-universe.service -f
+sudo journalctl -u cryptoinsider-top100.service -f
 sudo journalctl -u cryptoinsider-poster.service -f
 sudo journalctl -u cryptoinsider-subscriberbot.service -f
 ```

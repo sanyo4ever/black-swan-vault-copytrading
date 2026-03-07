@@ -5,18 +5,23 @@ Service stack for discovering futures traders, storing rich metrics, and publish
 ## What you have now
 
 - Continuous discovery worker (`discovery_worker.py`) that updates DB on schedule
+- Universe worker (`universe_worker.py`) that builds long-lived qualified trader pool
+- Top100 worker (`top100_worker.py`) that refreshes live active list (<1h) for subscriber page
 - Auto-discovered traders are added as `PAUSED` by default
 - Rich trader stats (7d/30d activity, PnL, fees, win rate, volume, age, score, margin stats)
-- Public subscriber directory page with filters (`/`)
+- Public subscriber directory page with filters (`/`) over `traders_top100_live`
 - One-click trader chat flow via Telegram bot (`/subscribe/<trader_address>`)
+- Topic-based 24h delivery sessions per subscription (`createForumTopic` + `deleteForumTopic`)
 - Password-protected admin panel (`/admin`) for add/delete/pause/resume + run discovery now
-- Telegram posting pipeline that sends fills for `ACTIVE` traders to channel + subscribed users
+- Telegram posting pipeline that sends fills to channel + subscriber topic threads
 
 ## Entrypoints
 
 - `python main.py` -> Telegram posting loop
 - `python discover.py` -> one discovery cycle
 - `python discovery_worker.py` -> continuous discovery service
+- `python universe_worker.py` -> continuous universe refresh service
+- `python top100_worker.py` -> continuous live top100 refresh service
 - `python admin.py --host 127.0.0.1 --port 8080` -> web server
 - `python subscriber_bot.py` -> Telegram command bot for user subscriptions
 
@@ -48,6 +53,20 @@ DISCOVERY_INTERVAL_SECONDS=900
 
 ADMIN_PANEL_USERNAME=admin
 ADMIN_PANEL_PASSWORD=your_strong_password
+
+SUBSCRIPTION_LIFETIME_HOURS=24
+
+UNIVERSE_INTERVAL_SECONDS=300
+UNIVERSE_MIN_AGE_DAYS=30
+UNIVERSE_MIN_TRADES_30D=10
+UNIVERSE_MIN_WIN_RATE_30D=0.0
+UNIVERSE_MIN_REALIZED_PNL_30D=0.0
+UNIVERSE_MIN_SCORE=0.0
+UNIVERSE_MAX_SIZE=3000
+
+LIVE_TOP100_INTERVAL_SECONDS=60
+LIVE_TOP100_ACTIVE_WINDOW_MINUTES=60
+LIVE_TOP100_SIZE=100
 ```
 
 ## Run
@@ -64,13 +83,25 @@ source .venv/bin/activate
 python discovery_worker.py
 ```
 
-3. Start Telegram posting:
+3. Start universe worker:
+```bash
+source .venv/bin/activate
+python universe_worker.py
+```
+
+4. Start top100 worker:
+```bash
+source .venv/bin/activate
+python top100_worker.py
+```
+
+5. Start Telegram posting:
 ```bash
 source .venv/bin/activate
 python main.py
 ```
 
-4. Start subscriber bot:
+6. Start subscriber bot:
 ```bash
 source .venv/bin/activate
 python subscriber_bot.py
@@ -103,14 +134,26 @@ python subscriber_bot.py
 
 - run metadata: `source`, `status`, `candidates`, `qualified`, `upserted`, `error_message`, `finished_at`
 
-### `telegram_trader_subscriptions`
+### `traders_universe`
 
-- links a private Telegram chat (`chat_id`) to selected `trader_address`
-- supports one-click subscribe via bot deep-link payload `sub_<trader_address>`
+- persistent qualified pool built from `tracked_traders`
+- supports thresholds: age, activity, winrate, pnl, score
+
+### `traders_top100_live`
+
+- rolling live shortlist of active traders (`last_fill_time` within configured window)
+- ranked by activity score for subscriber page
+
+### `subscriptions` + `delivery_sessions`
+
+- each subscription creates a dedicated 24h session
+- bot creates Telegram forum topic and delivers fills in that `message_thread_id`
+- expiry flow marks session expired and deletes topic
 
 ## Important behavior
 
-- Discovery can update stats for a trader, but does not auto-enable posting.
+- Discovery updates `tracked_traders` stats.
+- Universe/top100 workers derive subscriber-facing list from discovery results.
 - Traders stay `PAUSED` until you manually click `Resume` in admin.
-- Telegram source posts only `ACTIVE` traders.
-- Subscriber receives only trades from traders they selected in bot.
+- Telegram source monitors addresses from active sessions + active trader set.
+- New subscription creates a new topic thread with TTL 24h.

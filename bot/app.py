@@ -11,7 +11,7 @@ from bot.config import ConfigError, load_settings, load_sources_config
 from bot.dedup import DedupStore
 from bot.formatter import format_signal
 from bot.sources import build_source
-from bot.telegram_client import send_message
+from bot.telegram_client import delete_forum_topic, send_message
 from bot.trader_store import TraderStore
 
 
@@ -38,6 +38,51 @@ def _sort_key(signal) -> tuple[int, datetime]:
     return (0, signal.timestamp)
 
 
+async def _cleanup_expired_sessions(*, settings, http_session, logger) -> int:
+    with TraderStore(settings.database_path) as store:
+        expired = store.expire_due_delivery_sessions()
+
+    if not expired:
+        return 0
+
+    cleanup_ok = 0
+    cleanup_failed = 0
+    for item in expired:
+        if item.message_thread_id is None:
+            cleanup_ok += 1
+            continue
+        try:
+            await delete_forum_topic(
+                http_session,
+                bot_token=settings.telegram_bot_token,
+                chat_id=item.chat_id,
+                message_thread_id=item.message_thread_id,
+            )
+            cleanup_ok += 1
+        except Exception as exc:
+            cleanup_failed += 1
+            logger.warning(
+                "Failed to delete expired topic chat_id=%s thread=%s session_id=%s: %s",
+                item.chat_id,
+                item.message_thread_id,
+                item.session_id,
+                exc,
+            )
+            with TraderStore(settings.database_path) as store:
+                store.set_delivery_session_cleanup_error(
+                    session_id=item.session_id,
+                    error=str(exc),
+                )
+
+    logger.info(
+        "Expired sessions cleanup: total=%s ok=%s failed=%s",
+        len(expired),
+        cleanup_ok,
+        cleanup_failed,
+    )
+    return cleanup_ok
+
+
 async def _run_cycle(*, settings, http_session, dedup_store, logger) -> int:
     source_configs = load_sources_config(settings.sources_config_path)
     sources = [
@@ -59,7 +104,7 @@ async def _run_cycle(*, settings, http_session, dedup_store, logger) -> int:
         return 0
 
     with TraderStore(settings.database_path) as store:
-        subscriber_map = store.list_active_subscriber_chat_ids_by_trader()
+        subscriber_map = store.list_active_delivery_targets_by_trader()
 
     published = 0
     for signal in sorted(all_signals, key=_sort_key):
@@ -70,13 +115,12 @@ async def _run_cycle(*, settings, http_session, dedup_store, logger) -> int:
         if dedup_store.seen(dedup_key):
             continue
 
-        targets: list[str] = []
-        if settings.telegram_channel_id:
-            targets.append(settings.telegram_channel_id)
+        channel_target_count = 1 if settings.telegram_channel_id else 0
+        delivery_targets = []
         if signal.trader_address:
-            targets.extend(subscriber_map.get(signal.trader_address, []))
-        unique_targets = list(dict.fromkeys(targets))
-        if not unique_targets:
+            delivery_targets = subscriber_map.get(signal.trader_address, [])
+
+        if channel_target_count == 0 and not delivery_targets:
             logger.info("No targets for signal %s; skipping", dedup_key)
             continue
 
@@ -84,21 +128,47 @@ async def _run_cycle(*, settings, http_session, dedup_store, logger) -> int:
         failed = 0
         try:
             text = format_signal(signal)
-            for chat_id in unique_targets:
+
+            if settings.telegram_channel_id:
                 try:
                     await send_message(
                         http_session,
                         bot_token=settings.telegram_bot_token,
-                        chat_id=chat_id,
+                        chat_id=settings.telegram_channel_id,
                         text=text,
                     )
                     delivered += 1
                 except Exception as exc:
                     failed += 1
                     logger.exception(
-                        "Failed to send signal %s to chat %s: %s",
+                        "Failed to send signal %s to channel %s: %s",
                         dedup_key,
-                        chat_id,
+                        settings.telegram_channel_id,
+                        exc,
+                    )
+
+            seen_sub_targets: set[tuple[str, int | None]] = set()
+            for target in delivery_targets:
+                target_key = (target.chat_id, target.message_thread_id)
+                if target_key in seen_sub_targets:
+                    continue
+                seen_sub_targets.add(target_key)
+                try:
+                    await send_message(
+                        http_session,
+                        bot_token=settings.telegram_bot_token,
+                        chat_id=target.chat_id,
+                        text=text,
+                        message_thread_id=target.message_thread_id,
+                    )
+                    delivered += 1
+                except Exception as exc:
+                    failed += 1
+                    logger.exception(
+                        "Failed to send signal %s to chat=%s thread=%s: %s",
+                        dedup_key,
+                        target.chat_id,
+                        target.message_thread_id,
                         exc,
                     )
         except Exception as exc:
@@ -138,6 +208,11 @@ async def _run() -> None:
     try:
         async with aiohttp.ClientSession(timeout=timeout) as http_session:
             while True:
+                await _cleanup_expired_sessions(
+                    settings=settings,
+                    http_session=http_session,
+                    logger=logger,
+                )
                 await _run_cycle(
                     settings=settings,
                     http_session=http_session,
