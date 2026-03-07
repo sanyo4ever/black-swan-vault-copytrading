@@ -171,7 +171,6 @@ async def _handle_start_with_payload(
 
     topic_name = f"{_short(address)} | Live"
     topic_result = None
-    topic_supported = True
     thread_id: int | None = None
     try:
         try:
@@ -187,21 +186,32 @@ async def _handle_start_with_payload(
             thread_id = candidate_thread_id
         except TelegramClientError as exc:
             if exc.is_forum_not_supported():
-                topic_supported = False
-                thread_id = None
-                logger.info(
-                    "Forum topics unsupported for chat %s; using direct chat delivery",
+                logger.warning(
+                    "Forum topics unsupported for chat %s; strict-thread mode rejects subscription",
                     chat_id,
                 )
+                await send_message(
+                    session,
+                    bot_token=settings.telegram_bot_token,
+                    chat_id=chat_id,
+                    text=(
+                        "Thread mode is required for trader subscriptions.\n"
+                        "This chat does not support forum topics yet.\n"
+                        "Please update Telegram and try again from this private bot chat."
+                    ),
+                )
+                return
             else:
                 raise
+        if thread_id is None:
+            raise RuntimeError("Missing forum thread id for strict-thread subscription mode")
 
         with TraderStore(settings.database_dsn) as store:
             session_info = store.create_subscription_with_session(
                 chat_id=chat_id,
                 trader_address=address,
                 message_thread_id=thread_id,
-                topic_name=(topic_name if topic_supported else None),
+                topic_name=topic_name,
                 lifetime_hours=settings.subscription_lifetime_hours,
             )
         logger.info(
@@ -212,32 +222,18 @@ async def _handle_start_with_payload(
             session_info.expires_at,
         )
 
-        if topic_supported and thread_id is not None:
-            await send_message(
-                session,
-                bot_token=settings.telegram_bot_token,
-                chat_id=chat_id,
-                message_thread_id=thread_id,
-                text=(
-                    "<b>Session started ✅</b>\n"
-                    f"Trader: <code>{_short(address)}</code>\n"
-                    "<b>Status:</b> Active until cancellation\n\n"
-                    "New trades from this trader will be posted in this thread."
-                ),
-            )
-        else:
-            await send_message(
-                session,
-                bot_token=settings.telegram_bot_token,
-                chat_id=chat_id,
-                text=(
-                    "<b>Session started ✅</b>\n"
-                    f"Trader: <code>{_short(address)}</code>\n"
-                    "<b>Status:</b> Active until cancellation\n\n"
-                    "<b>Thread mode unavailable in this chat.</b>\n"
-                    "Trades will be delivered directly to this private chat."
-                ),
-            )
+        await send_message(
+            session,
+            bot_token=settings.telegram_bot_token,
+            chat_id=chat_id,
+            message_thread_id=thread_id,
+            text=(
+                "<b>Session started ✅</b>\n"
+                f"Trader: <code>{_short(address)}</code>\n"
+                "<b>Status:</b> Active until cancellation\n\n"
+                "New trades from this trader will be posted in this thread."
+            ),
+        )
 
         await send_message(
             session,
