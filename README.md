@@ -130,6 +130,7 @@ python subscriber_bot.py
 
 - Project memory / decision log: `PROJECT_MEMORY.md`
 - Ubuntu production architecture: `docs/PRODUCTION_ARCHITECTURE_UBUNTU.md`
+- Trader discovery + full catalog architecture: `docs/TRADER_DISCOVERY_ARCHITECTURE.md`
 - Deployment templates (systemd + nginx): `deploy/`
 
 ## Main DB tables
