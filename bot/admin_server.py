@@ -180,6 +180,7 @@ def _render_public_directory(
     .card {{ background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(255,255,255,.01)); border:1px solid var(--line); border-radius:14px; padding:14px; margin-bottom:14px; }}
     h1 {{ margin:0 0 8px; }}
     p {{ margin:0; color:var(--muted); }}
+    .quick-info {{ margin-top:10px; color:var(--muted); font-size:13px; line-height:1.5; }}
     form {{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; }}
     input,select {{ background:#0e1a30; border:1px solid var(--line); color:var(--text); border-radius:8px; padding:7px 9px; }}
     button {{ background:#20477a; border:1px solid #2f6ab5; color:var(--text); border-radius:8px; padding:7px 10px; cursor:pointer; }}
@@ -196,6 +197,11 @@ def _render_public_directory(
     <div class='card'>
       <h1>Futures Trader Directory</h1>
       <p>Choose a trader and open a personal Telegram chat in one click.</p>
+      <div class='quick-info'>
+        <strong>How it works:</strong> We rank active futures traders by recent performance and activity.<br/>
+        Click <strong>Open Trader Chat</strong> to receive new fills from that trader in Telegram.<br/>
+        Informational only. Not financial advice.
+      </div>
     </div>
 
     <div class='card'>
