@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hmac
+import re
 from datetime import UTC, datetime
 from html import escape
 from typing import Any
@@ -13,7 +14,31 @@ from aiohttp import web
 
 from bot.config import load_settings
 from bot.discovery import HyperliquidDiscoveryConfig, HyperliquidDiscoveryService
-from bot.trader_store import LiveTopTrader, STATUS_ACTIVE, STATUS_PAUSED, TraderStore
+from bot.trader_store import (
+    MODERATION_BLACKLIST,
+    MODERATION_NEUTRAL,
+    MODERATION_WHITELIST,
+    LiveTopTrader,
+    STATUS_ACTIVE,
+    STATUS_PAUSED,
+    TraderStore,
+)
+
+
+def _split_addresses(raw: str) -> list[str]:
+    cleaned = str(raw or "").strip()
+    if not cleaned:
+        return []
+    return [item for item in re.split(r"[\s,;]+", cleaned) if item]
+
+
+def _parse_moderation_state(raw: str) -> str | None:
+    mapping = {
+        "neutral": MODERATION_NEUTRAL,
+        "whitelist": MODERATION_WHITELIST,
+        "blacklist": MODERATION_BLACKLIST,
+    }
+    return mapping.get(str(raw or "").strip().lower())
 
 
 def _discovery_config_from_settings(settings) -> HyperliquidDiscoveryConfig:
@@ -288,6 +313,12 @@ def _render_public_directory(
 def _render_admin_index(*, traders, discovery_runs, message: str | None = None) -> str:
     active_count = sum(1 for trader in traders if trader.status == STATUS_ACTIVE)
     paused_count = sum(1 for trader in traders if trader.status == STATUS_PAUSED)
+    blacklisted_count = sum(
+        1 for trader in traders if trader.moderation_state == MODERATION_BLACKLIST
+    )
+    whitelisted_count = sum(
+        1 for trader in traders if trader.moderation_state == MODERATION_WHITELIST
+    )
     recent_run = discovery_runs[0] if discovery_runs else None
     recent_run_label = (
         f"{recent_run.status.upper()} at {recent_run.finished_at}"
@@ -305,13 +336,22 @@ def _render_admin_index(*, traders, discovery_runs, message: str | None = None) 
             else f"<form method='post' action='/admin/traders/{encoded}/resume' style='display:inline'>"
             "<button class='btn resume' type='submit'>Resume</button></form>"
         )
+        moderation_class = "moder-neutral"
+        if trader.moderation_state == MODERATION_BLACKLIST:
+            moderation_class = "moder-blacklist"
+        elif trader.moderation_state == MODERATION_WHITELIST:
+            moderation_class = "moder-whitelist"
+        moderation_note = trader.moderation_note or "-"
 
         rows.append(
             "<tr>"
+            f"<td><input type='checkbox' name='addresses' value='{escape(trader.address)}' form='bulk-form' /></td>"
             f"<td><code>{escape(trader.address)}</code></td>"
             f"<td>{escape(trader.label or '-')}</td>"
             f"<td>{escape(trader.source)}</td>"
             f"<td>{escape(trader.status)}</td>"
+            f"<td><span class='moder-tag {moderation_class}'>{escape(trader.moderation_state)}</span></td>"
+            f"<td>{escape(moderation_note)}</td>"
             f"<td>{_fmt(trader.age_days, 1)}</td>"
             f"<td>{_fmt(trader.trades_30d, 0)}</td>"
             f"<td>{_fmt(trader.active_days_30d, 0)}</td>"
@@ -320,13 +360,23 @@ def _render_admin_index(*, traders, discovery_runs, message: str | None = None) 
             f"<td>{_fmt(trader.score, 2)}</td>"
             "<td>"
             f"{action_button} "
+            f"<form method='post' action='/admin/traders/{encoded}/moderate/whitelist' style='display:inline'>"
+            "<button class='btn whitelist' type='submit'>Whitelist</button></form> "
+            f"<form method='post' action='/admin/traders/{encoded}/moderate/blacklist' style='display:inline'>"
+            "<button class='btn blacklist' type='submit'>Blacklist</button></form> "
+            f"<form method='post' action='/admin/traders/{encoded}/moderate/neutral' style='display:inline'>"
+            "<button class='btn' type='submit'>Neutral</button></form> "
             f"<form method='post' action='/admin/traders/{encoded}/delete' style='display:inline' onsubmit='return confirm(\"Delete trader?\")'>"
             "<button class='btn danger' type='submit'>Delete</button></form>"
             "</td>"
             "</tr>"
         )
 
-    table_rows = "\n".join(rows) if rows else "<tr><td colspan='11'>No tracked traders yet.</td></tr>"
+    table_rows = (
+        "\n".join(rows)
+        if rows
+        else "<tr><td colspan='14'>No tracked traders yet.</td></tr>"
+    )
     discovery_rows = []
     for run in discovery_runs:
         discovery_rows.append(
@@ -372,9 +422,17 @@ def _render_admin_index(*, traders, discovery_runs, message: str | None = None) 
     .btn {{ border:1px solid var(--line); color:var(--text); background:#1e2740; border-radius:8px; padding:6px 10px; cursor:pointer; }}
     .pause {{ border-color:#c3871f; }}
     .resume {{ border-color:var(--ok); }}
+    .whitelist {{ border-color:var(--ok); }}
+    .blacklist {{ border-color:#ff9f43; }}
     .danger {{ border-color:var(--danger); }}
-    input {{ border:1px solid var(--line); background:#0e1427; color:var(--text); border-radius:8px; padding:8px 10px; min-width:260px; }}
+    input, select, textarea {{ border:1px solid var(--line); background:#0e1427; color:var(--text); border-radius:8px; padding:8px 10px; }}
+    textarea {{ width:380px; min-height:74px; resize:vertical; }}
+    input[type=checkbox] {{ min-width:auto; }}
     .flash {{ border:1px solid var(--accent); background:rgba(63,140,255,.15); border-radius:10px; padding:10px 12px; margin-bottom:14px; }}
+    .moder-tag {{ font-size:11px; padding:2px 8px; border-radius:999px; border:1px solid var(--line); }}
+    .moder-neutral {{ color:var(--muted); }}
+    .moder-whitelist {{ color:var(--ok); border-color:var(--ok); }}
+    .moder-blacklist {{ color:#ff9f43; border-color:#ff9f43; }}
     code {{ color:#90e5ff; }}
   </style>
 </head>
@@ -387,6 +445,8 @@ def _render_admin_index(*, traders, discovery_runs, message: str | None = None) 
         <div class='stat'><span>Tracked</span><strong>{len(traders)}</strong></div>
         <div class='stat'><span>Active</span><strong>{active_count}</strong></div>
         <div class='stat'><span>Paused</span><strong>{paused_count}</strong></div>
+        <div class='stat'><span>Whitelist</span><strong>{whitelisted_count}</strong></div>
+        <div class='stat'><span>Blacklist</span><strong>{blacklisted_count}</strong></div>
         <div class='stat'><span>Last Discovery</span><strong>{escape(recent_run_label)}</strong></div>
       </div>
     </div>
@@ -395,6 +455,23 @@ def _render_admin_index(*, traders, discovery_runs, message: str | None = None) 
       <form method='post' action='/admin/discover'>
         <button class='btn' type='submit'>Run Discovery Now</button>
       </form>
+    </div>
+
+    <div class='card'>
+      <h3>Bulk Actions</h3>
+      <form id='bulk-form' method='post' action='/admin/traders/bulk' class='row'>
+        <select name='action'>
+          <option value='pause'>Pause selected</option>
+          <option value='resume'>Resume selected</option>
+          <option value='whitelist'>Whitelist selected</option>
+          <option value='blacklist'>Blacklist selected</option>
+          <option value='neutral'>Set neutral selected</option>
+        </select>
+        <input name='moderation_note' placeholder='Optional moderation note' />
+        <textarea name='bulk_addresses' placeholder='Optional: paste addresses (space/newline/comma separated)'></textarea>
+        <button class='btn' type='submit'>Apply Bulk Action</button>
+      </form>
+      <p style='color:var(--muted); margin:8px 0 0;'>Tip: tick checkboxes in table and/or paste addresses.</p>
     </div>
 
     <div class='card'>
@@ -409,7 +486,7 @@ def _render_admin_index(*, traders, discovery_runs, message: str | None = None) 
       <table>
         <thead>
           <tr>
-            <th>Address</th><th>Label</th><th>Source</th><th>Status</th>
+            <th>#</th><th>Address</th><th>Label</th><th>Source</th><th>Status</th><th>Moderation</th><th>Note</th>
             <th>Age d</th><th>Trades 30d</th><th>Active Days 30d</th><th>Win 30d</th><th>PnL 30d</th><th>Score</th><th>Actions</th>
           </tr>
         </thead>
@@ -456,6 +533,8 @@ async def subscribe_redirect(request: web.Request) -> web.Response:
         trader = store.get_trader(address=address)
         if trader is None:
             raise web.HTTPNotFound(text="Trader not found")
+        if trader.moderation_state == MODERATION_BLACKLIST:
+            raise web.HTTPForbidden(text="Trader is not available for subscription")
 
         xff = request.headers.get("X-Forwarded-For", "")
         client_ip = xff.split(",")[0].strip() if xff else request.remote
@@ -508,6 +587,46 @@ async def add_trader(request: web.Request) -> web.Response:
     raise web.HTTPFound("/admin?msg=Trader+added")
 
 
+async def bulk_trader_action(request: web.Request) -> web.Response:
+    settings = request.app["settings"]
+    payload = await request.post()
+    action = str(payload.get("action", "")).strip().lower()
+    note = str(payload.get("moderation_note", "")).strip() or None
+
+    addresses = [str(item).strip() for item in payload.getall("addresses", []) if str(item).strip()]
+    addresses.extend(_split_addresses(payload.get("bulk_addresses", "")))
+
+    # Preserve order while deduplicating.
+    unique_addresses: list[str] = []
+    seen: set[str] = set()
+    for address in addresses:
+        lowered = address.lower()
+        if lowered in seen:
+            continue
+        unique_addresses.append(address)
+        seen.add(lowered)
+
+    if not unique_addresses:
+        raise web.HTTPFound("/admin?msg=No+addresses+selected+for+bulk+action")
+
+    with TraderStore(settings.database_dsn) as store:
+        if action == "pause":
+            changed = store.set_status_bulk(addresses=unique_addresses, status=STATUS_PAUSED)
+            raise web.HTTPFound(f"/admin?msg=Bulk+pause+applied:+{changed}")
+        if action == "resume":
+            changed = store.set_status_bulk(addresses=unique_addresses, status=STATUS_ACTIVE)
+            raise web.HTTPFound(f"/admin?msg=Bulk+resume+applied:+{changed}")
+        moderation_state = _parse_moderation_state(action)
+        if moderation_state is None:
+            raise web.HTTPFound("/admin?msg=Unknown+bulk+action")
+        changed = store.set_moderation_bulk(
+            addresses=unique_addresses,
+            moderation_state=moderation_state,
+            note=note,
+        )
+        raise web.HTTPFound(f"/admin?msg=Bulk+moderation+applied:+{changed}")
+
+
 async def set_pause_state(request: web.Request, status: str) -> web.Response:
     settings = request.app["settings"]
     address = request.match_info.get("address", "")
@@ -525,6 +644,20 @@ async def pause_trader(request: web.Request) -> web.Response:
 
 async def resume_trader(request: web.Request) -> web.Response:
     return await set_pause_state(request, STATUS_ACTIVE)
+
+
+async def moderate_trader(request: web.Request) -> web.Response:
+    settings = request.app["settings"]
+    address = request.match_info.get("address", "")
+    state_slug = request.match_info.get("state", "")
+    moderation_state = _parse_moderation_state(state_slug)
+    if moderation_state is None:
+        raise web.HTTPFound("/admin?msg=Unsupported+moderation+state")
+
+    with TraderStore(settings.database_dsn) as store:
+        store.set_moderation(address=address, moderation_state=moderation_state)
+
+    raise web.HTTPFound(f"/admin?msg=Moderation+set+to+{quote(moderation_state)}")
 
 
 async def delete_trader(request: web.Request) -> web.Response:
@@ -581,8 +714,10 @@ def create_app() -> web.Application:
             web.get("/admin", admin_index),
             web.post("/admin/discover", run_discovery),
             web.post("/admin/traders/add", add_trader),
+            web.post("/admin/traders/bulk", bulk_trader_action),
             web.post("/admin/traders/{address}/pause", pause_trader),
             web.post("/admin/traders/{address}/resume", resume_trader),
+            web.post("/admin/traders/{address}/moderate/{state}", moderate_trader),
             web.post("/admin/traders/{address}/delete", delete_trader),
         ]
     )

@@ -6,7 +6,14 @@ import unittest
 from datetime import UTC, datetime
 from pathlib import Path
 
-from bot.trader_store import STATUS_ACTIVE, TraderStore
+from bot.trader_store import (
+    MODERATION_BLACKLIST,
+    MODERATION_NEUTRAL,
+    MODERATION_WHITELIST,
+    STATUS_ACTIVE,
+    STATUS_PAUSED,
+    TraderStore,
+)
 
 
 class TraderStoreTests(unittest.TestCase):
@@ -303,6 +310,100 @@ class TraderStoreTests(unittest.TestCase):
             self.assertIsNotNone(remaining)
             assert remaining is not None
             self.assertEqual(remaining[0], 1)
+
+    def test_blacklist_moderation_detaches_trader_from_delivery(self) -> None:
+        address = "0x3333333333333333333333333333333333333333"
+        other = "0x4444444444444444444444444444444444444444"
+        with TraderStore(self.db_path) as store:
+            store.add_manual(address=address, label="Blk")
+            store.add_manual(address=other, label="Other")
+            store.create_subscription_with_session(
+                chat_id=555,
+                trader_address=address,
+                message_thread_id=77,
+                topic_name="blk",
+                lifetime_hours=24,
+            )
+            store.enqueue_delivery_retry(
+                dedup_key="sig-blacklist",
+                chat_id=555,
+                trader_address=address,
+                message_thread_id=77,
+                message_text="retry",
+                delay_seconds=60,
+            )
+            store.set_moderation(
+                address=address,
+                moderation_state=MODERATION_BLACKLIST,
+                note="manual review",
+            )
+
+            trader = store.get_trader(address=address)
+            self.assertIsNotNone(trader)
+            assert trader is not None
+            self.assertEqual(trader.moderation_state, MODERATION_BLACKLIST)
+            self.assertEqual(trader.status, STATUS_PAUSED)
+            self.assertEqual(trader.moderation_note, "manual review")
+
+            active_addresses = store.list_active_addresses(limit=10)
+            self.assertNotIn(address, active_addresses)
+
+            monitored = store.list_monitored_addresses(limit=10)
+            self.assertNotIn(address, monitored)
+            self.assertIn(other, monitored)
+
+            pending = store._connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM delivery_retry_queue
+                WHERE trader_address = ? AND status = 'PENDING'
+                """,
+                (address,),
+            ).fetchone()
+            self.assertIsNotNone(pending)
+            assert pending is not None
+            self.assertEqual(pending[0], 0)
+
+    def test_bulk_status_and_moderation_actions(self) -> None:
+        a1 = "0x5555555555555555555555555555555555555555"
+        a2 = "0x6666666666666666666666666666666666666666"
+        with TraderStore(self.db_path) as store:
+            store.add_manual(address=a1, label="A1")
+            store.add_manual(address=a2, label="A2")
+
+            changed = store.set_status_bulk(addresses=[a1, a2], status=STATUS_PAUSED)
+            self.assertEqual(changed, 2)
+            t1 = store.get_trader(address=a1)
+            t2 = store.get_trader(address=a2)
+            self.assertIsNotNone(t1)
+            self.assertIsNotNone(t2)
+            assert t1 is not None
+            assert t2 is not None
+            self.assertEqual(t1.status, STATUS_PAUSED)
+            self.assertEqual(t2.status, STATUS_PAUSED)
+
+            changed = store.set_moderation_bulk(
+                addresses=[a1, a2],
+                moderation_state=MODERATION_WHITELIST,
+                note="trusted",
+            )
+            self.assertEqual(changed, 2)
+            t1 = store.get_trader(address=a1)
+            t2 = store.get_trader(address=a2)
+            assert t1 is not None
+            assert t2 is not None
+            self.assertEqual(t1.moderation_state, MODERATION_WHITELIST)
+            self.assertEqual(t2.moderation_state, MODERATION_WHITELIST)
+            self.assertEqual(t1.moderation_note, "trusted")
+
+            changed = store.set_moderation_bulk(
+                addresses=[a1],
+                moderation_state=MODERATION_NEUTRAL,
+            )
+            self.assertEqual(changed, 1)
+            t1 = store.get_trader(address=a1)
+            assert t1 is not None
+            self.assertEqual(t1.moderation_state, MODERATION_NEUTRAL)
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ Service stack for discovering futures traders, storing rich metrics, and publish
 - Public subscriber directory page with filters (`/`) over `traders_top100_live`
 - One-click trader chat flow via Telegram bot (`/subscribe/<trader_address>`)
 - Topic-based 24h delivery sessions per subscription (`createForumTopic` + `deleteForumTopic`)
-- Password-protected admin panel (`/admin`) for add/delete/pause/resume + run discovery now
+- Password-protected admin panel (`/admin`) with add/delete, pause/resume, blacklist/whitelist, bulk moderation, and run discovery now
 - Telegram posting pipeline that sends fills to channel + subscriber topic threads
 
 ## Entrypoints
@@ -137,7 +137,7 @@ python subscriber_bot.py
 ### `tracked_traders`
 
 - identity: `address`, `label`, `source`
-- control: `status`, `manual_status_override`
+- control: `status`, `manual_status_override`, `moderation_state`, `moderation_note`, `moderated_at`
 - activity: `trades_24h`, `active_hours_24h`, `trades_7d`, `trades_30d`, `active_days_30d`
 - quality/finance: `realized_pnl_30d`, `win_rate_30d`, `volume_usd_30d`, `fees_30d`, `score`
 - risk/state: `account_value`, `total_ntl_pos`, `total_margin_used`
@@ -168,5 +168,6 @@ python subscriber_bot.py
 - Discovery updates `tracked_traders` stats.
 - Universe/top100 workers derive subscriber-facing list from discovery results.
 - Traders stay `PAUSED` until you manually click `Resume` in admin.
+- Blacklisted traders are removed from active delivery/monitoring flows until moderation changes.
 - Telegram source monitors addresses from active sessions + active trader set.
 - New subscription creates a new topic thread with TTL 24h.

@@ -15,6 +15,9 @@ except Exception:  # pragma: no cover - optional dependency for sqlite-only dev 
 
 STATUS_ACTIVE = "ACTIVE"
 STATUS_PAUSED = "PAUSED"
+MODERATION_NEUTRAL = "NEUTRAL"
+MODERATION_WHITELIST = "WHITELIST"
+MODERATION_BLACKLIST = "BLACKLIST"
 SUBSCRIPTION_ACTIVE = "ACTIVE"
 SUBSCRIPTION_EXPIRED = "EXPIRED"
 SUBSCRIPTION_CANCELLED = "CANCELLED"
@@ -34,6 +37,9 @@ class TrackedTrader:
     status: str
     auto_discovered: bool
     manual_status_override: bool
+    moderation_state: str
+    moderation_note: str | None
+    moderated_at: str | None
     trades_24h: int | None
     active_hours_24h: int | None
     trades_7d: int | None
@@ -90,6 +96,7 @@ class LiveTopTrader:
     label: str | None
     source: str
     status: str
+    moderation_state: str
     age_days: float | None
     trades_30d: int | None
     active_days_30d: int | None
@@ -211,6 +218,11 @@ class TraderStore:
                 status TEXT NOT NULL CHECK(status IN ('ACTIVE', 'PAUSED')),
                 auto_discovered INTEGER NOT NULL DEFAULT 0,
                 manual_status_override INTEGER NOT NULL DEFAULT 0,
+                moderation_state TEXT NOT NULL
+                    CHECK(moderation_state IN ('NEUTRAL', 'WHITELIST', 'BLACKLIST'))
+                    DEFAULT 'NEUTRAL',
+                moderation_note TEXT,
+                moderated_at TEXT,
                 trades_24h INTEGER,
                 active_hours_24h INTEGER,
                 trades_7d INTEGER,
@@ -240,6 +252,12 @@ class TraderStore:
 
         expected_columns: dict[str, str] = {
             "manual_status_override": "INTEGER NOT NULL DEFAULT 0",
+            "moderation_state": (
+                "TEXT NOT NULL CHECK(moderation_state IN "
+                "('NEUTRAL', 'WHITELIST', 'BLACKLIST')) DEFAULT 'NEUTRAL'"
+            ),
+            "moderation_note": "TEXT",
+            "moderated_at": "TEXT",
             "trades_24h": "INTEGER",
             "active_hours_24h": "INTEGER",
             "trades_7d": "INTEGER",
@@ -283,6 +301,11 @@ class TraderStore:
                 status TEXT NOT NULL CHECK(status IN ('ACTIVE', 'PAUSED')),
                 auto_discovered SMALLINT NOT NULL DEFAULT 0,
                 manual_status_override SMALLINT NOT NULL DEFAULT 0,
+                moderation_state TEXT NOT NULL
+                    CHECK(moderation_state IN ('NEUTRAL', 'WHITELIST', 'BLACKLIST'))
+                    DEFAULT 'NEUTRAL',
+                moderation_note TEXT,
+                moderated_at TIMESTAMP,
                 trades_24h INTEGER,
                 active_hours_24h INTEGER,
                 trades_7d INTEGER,
@@ -311,6 +334,15 @@ class TraderStore:
         )
         for column, ddl in [
             ("manual_status_override", "SMALLINT NOT NULL DEFAULT 0"),
+            (
+                "moderation_state",
+                (
+                    "TEXT NOT NULL CHECK(moderation_state IN "
+                    "('NEUTRAL', 'WHITELIST', 'BLACKLIST')) DEFAULT 'NEUTRAL'"
+                ),
+            ),
+            ("moderation_note", "TEXT"),
+            ("moderated_at", "TIMESTAMP"),
             ("trades_24h", "INTEGER"),
             ("active_hours_24h", "INTEGER"),
             ("trades_7d", "INTEGER"),
@@ -799,6 +831,9 @@ class TraderStore:
             status=row["status"],
             auto_discovered=bool(row["auto_discovered"]),
             manual_status_override=bool(row["manual_status_override"]),
+            moderation_state=row["moderation_state"],
+            moderation_note=row["moderation_note"],
+            moderated_at=TraderStore._format_datetime(row["moderated_at"]),
             trades_24h=row["trades_24h"],
             active_hours_24h=row["active_hours_24h"],
             trades_7d=row["trades_7d"],
@@ -858,6 +893,7 @@ class TraderStore:
             label=row["label"],
             source=row["source"],
             status=row["status"],
+            moderation_state=row["moderation_state"],
             age_days=row["age_days"],
             trades_30d=row["trades_30d"],
             active_days_30d=row["active_days_30d"],
@@ -936,23 +972,27 @@ class TraderStore:
             SELECT address
             FROM tracked_traders
             WHERE status = ?
+              AND COALESCE(moderation_state, ?) <> ?
             ORDER BY COALESCE(score, -1) DESC, updated_at DESC
             LIMIT ?
             """,
-            (STATUS_ACTIVE, limit),
+            (STATUS_ACTIVE, MODERATION_NEUTRAL, MODERATION_BLACKLIST, limit),
         ).fetchall()
         return [str(row["address"]) for row in rows]
 
     def list_active_subscription_addresses(self, *, limit: int = 200) -> list[str]:
         rows = self._execute(
             """
-            SELECT DISTINCT trader_address AS address
-            FROM subscriptions
-            WHERE status = 'ACTIVE' AND expires_at > CURRENT_TIMESTAMP
-            ORDER BY trader_address ASC
+            SELECT DISTINCT s.trader_address AS address
+            FROM subscriptions s
+            JOIN tracked_traders t ON t.address = s.trader_address
+            WHERE s.status = 'ACTIVE'
+              AND s.expires_at > CURRENT_TIMESTAMP
+              AND COALESCE(t.moderation_state, ?) <> ?
+            ORDER BY s.trader_address ASC
             LIMIT ?
             """,
-            (limit,),
+            (MODERATION_NEUTRAL, MODERATION_BLACKLIST, limit),
         ).fetchall()
         return [str(row["address"]) for row in rows]
 
@@ -999,6 +1039,8 @@ class TraderStore:
                 last_fill_time
             FROM tracked_traders
             WHERE
+                COALESCE(moderation_state, ?) <> ?
+                AND
                 COALESCE(age_days, 0) >= ?
                 AND COALESCE(trades_30d, 0) >= ?
                 AND COALESCE(win_rate_30d, 0) >= ?
@@ -1008,6 +1050,8 @@ class TraderStore:
             LIMIT ?
             """,
             (
+                MODERATION_NEUTRAL,
+                MODERATION_BLACKLIST,
                 float(min_age_days),
                 int(min_trades_30d),
                 float(min_win_rate_30d),
@@ -1156,6 +1200,7 @@ class TraderStore:
                 t.label,
                 t.source,
                 t.status,
+                t.moderation_state,
                 t.age_days,
                 t.trades_30d,
                 t.active_days_30d,
@@ -1166,10 +1211,11 @@ class TraderStore:
                 t.last_fill_time
             FROM traders_top100_live top
             JOIN tracked_traders t ON t.address = top.address
+            WHERE COALESCE(t.moderation_state, ?) <> ?
             ORDER BY top.rank_position ASC
             LIMIT ?
             """,
-            (limit,),
+            (MODERATION_NEUTRAL, MODERATION_BLACKLIST, limit),
         ).fetchall()
         return [self._row_to_live_top_trader(row) for row in rows]
 
@@ -1752,9 +1798,10 @@ class TraderStore:
         self._execute(
             """
             INSERT INTO tracked_traders(
-                address, label, source, status, auto_discovered, manual_status_override, updated_at
+                address, label, source, status, auto_discovered, manual_status_override,
+                moderation_state, updated_at
             )
-            VALUES (?, ?, 'manual', ?, 0, 1, CURRENT_TIMESTAMP)
+            VALUES (?, ?, 'manual', ?, 0, 1, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(address) DO UPDATE SET
                 label = COALESCE(excluded.label, tracked_traders.label),
                 source = tracked_traders.source,
@@ -1762,7 +1809,7 @@ class TraderStore:
                 manual_status_override = 1,
                 updated_at = CURRENT_TIMESTAMP
             """,
-            (normalized, (label or None), STATUS_ACTIVE),
+            (normalized, (label or None), STATUS_ACTIVE, MODERATION_NEUTRAL),
         )
         self._connection.commit()
 
@@ -1801,6 +1848,7 @@ class TraderStore:
             """
             INSERT INTO tracked_traders(
                 address, label, source, status, auto_discovered, manual_status_override,
+                moderation_state,
                 trades_24h, active_hours_24h, trades_7d, trades_30d, active_days_30d,
                 first_fill_time, last_fill_time, age_days,
                 volume_usd_30d, realized_pnl_30d, fees_30d, win_rate_30d, long_ratio_30d,
@@ -1808,7 +1856,7 @@ class TraderStore:
                 account_value, total_ntl_pos, total_margin_used,
                 score, stats_json, last_metrics_at, updated_at
             )
-            VALUES (?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             ON CONFLICT(address) DO UPDATE SET
                 label = COALESCE(excluded.label, tracked_traders.label),
                 source = excluded.source,
@@ -1845,6 +1893,7 @@ class TraderStore:
                 (label or None),
                 source,
                 STATUS_PAUSED,
+                MODERATION_NEUTRAL,
                 trades_24h,
                 active_hours_24h,
                 trades_7d,
@@ -1882,6 +1931,133 @@ class TraderStore:
             (status, normalized),
         )
         self._connection.commit()
+
+    def set_status_bulk(self, *, addresses: Iterable[str], status: str) -> int:
+        if status not in {STATUS_ACTIVE, STATUS_PAUSED}:
+            raise ValueError(f"Unsupported status: {status}")
+
+        normalized = [
+            self.normalize_address(address)
+            for address in addresses
+            if self.normalize_address(address)
+        ]
+        if not normalized:
+            return 0
+
+        placeholders = ",".join("?" for _ in normalized)
+        cursor = self._execute(
+            f"""
+            UPDATE tracked_traders
+            SET status = ?, manual_status_override = 1, updated_at = CURRENT_TIMESTAMP
+            WHERE address IN ({placeholders})
+            """,
+            (status, *normalized),
+        )
+        self._connection.commit()
+        return int(cursor.rowcount)
+
+    def set_moderation(
+        self,
+        *,
+        address: str,
+        moderation_state: str,
+        note: str | None = None,
+    ) -> None:
+        self.set_moderation_bulk(
+            addresses=[address],
+            moderation_state=moderation_state,
+            note=note,
+        )
+
+    def set_moderation_bulk(
+        self,
+        *,
+        addresses: Iterable[str],
+        moderation_state: str,
+        note: str | None = None,
+    ) -> int:
+        if moderation_state not in {
+            MODERATION_NEUTRAL,
+            MODERATION_WHITELIST,
+            MODERATION_BLACKLIST,
+        }:
+            raise ValueError(f"Unsupported moderation_state: {moderation_state}")
+
+        normalized = [
+            self.normalize_address(address)
+            for address in addresses
+            if self.normalize_address(address)
+        ]
+        if not normalized:
+            return 0
+
+        note_value = (note or "").strip() or None
+        placeholders = ",".join("?" for _ in normalized)
+        cursor = self._execute(
+            f"""
+            UPDATE tracked_traders
+            SET moderation_state = ?,
+                moderation_note = ?,
+                moderated_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE address IN ({placeholders})
+            """,
+            (moderation_state, note_value, *normalized),
+        )
+
+        # Blacklisted traders are forcibly paused and detached from delivery flows.
+        if moderation_state == MODERATION_BLACKLIST:
+            self._execute(
+                f"""
+                UPDATE tracked_traders
+                SET status = ?,
+                    manual_status_override = 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE address IN ({placeholders})
+                """,
+                (STATUS_PAUSED, *normalized),
+            )
+            self._execute(
+                f"""
+                UPDATE subscriptions
+                SET status = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE trader_address IN ({placeholders})
+                  AND status = ?
+                """,
+                (SUBSCRIPTION_CANCELLED, *normalized, SUBSCRIPTION_ACTIVE),
+            )
+            self._execute(
+                f"""
+                UPDATE delivery_sessions
+                SET status = ?,
+                    closed_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE trader_address IN ({placeholders})
+                  AND status = ?
+                """,
+                (SESSION_EXPIRED, *normalized, SESSION_ACTIVE),
+            )
+            self._execute(
+                f"""
+                UPDATE telegram_trader_subscriptions
+                SET status = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE trader_address IN ({placeholders})
+                """,
+                (STATUS_PAUSED, *normalized),
+            )
+            self._execute(
+                f"""
+                DELETE FROM delivery_retry_queue
+                WHERE trader_address IN ({placeholders})
+                  AND status = ?
+                """,
+                (*normalized, RETRY_PENDING),
+            )
+
+        self._connection.commit()
+        return int(cursor.rowcount)
 
     def delete(self, *, address: str) -> None:
         normalized = self.normalize_address(address)
