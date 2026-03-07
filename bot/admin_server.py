@@ -176,8 +176,8 @@ def _subscribe_button(*, trader_address: str, bot_username: str) -> str:
         return "<span style='opacity:.7'>Bot not configured</span>"
     encoded = quote(trader_address, safe="")
     return (
-        f"<a class='btn-link' href='/subscribe/{encoded}' target='_blank' rel='noopener'>"
-        "Open Trader Chat"
+        f"<a class='copy-btn' href='/subscribe/{encoded}' target='_blank' rel='noopener'>"
+        "Copy"
         "</a>"
     )
 
@@ -499,50 +499,162 @@ def _render_public_directory(
   <script type='application/ld+json'>{website_schema}</script>
   <script type='application/ld+json'>{faq_schema}</script>
   <style>
-    :root {{ --bg:#08111f; --panel:#12233d; --line:#2b3e5e; --text:#e5eefc; --muted:#9ab0d3; --accent:#6dd3ff; }}
+    :root {{
+      --bg:#06080d;
+      --panel:#0d1119;
+      --panel-soft:#121722;
+      --line:#242b38;
+      --text:#e9edf6;
+      --muted:#96a0b8;
+      --accent:#ff9f1a;
+      --accent-soft:#ffbf47;
+      --green:#1dd38a;
+      --red:#ff5f78;
+    }}
     * {{ box-sizing:border-box; }}
-    body {{ margin:0; color:var(--text); font-family:"Space Grotesk","Segoe UI",sans-serif; background:radial-gradient(circle at top left,#1a2f52 0%,var(--bg) 60%); }}
-    .wrap {{ max-width:1400px; margin:20px auto; padding:0 18px; }}
-    .card {{ background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(255,255,255,.01)); border:1px solid var(--line); border-radius:14px; padding:14px; margin-bottom:14px; }}
-    h1 {{ margin:0 0 8px; }}
-    h2 {{ margin:0 0 8px; font-size:21px; }}
-    h3 {{ margin:0 0 6px; font-size:16px; }}
+    body {{
+      margin:0;
+      color:var(--text);
+      font-family:"Space Grotesk","Segoe UI",sans-serif;
+      background-color:var(--bg);
+      background-image:
+        linear-gradient(rgba(255,159,26,.07) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,159,26,.07) 1px, transparent 1px),
+        radial-gradient(circle at 8% -20%, rgba(255,159,26,.26), transparent 34%),
+        radial-gradient(circle at 92% 0%, rgba(255,159,26,.16), transparent 32%);
+      background-size: 132px 132px, 132px 132px, 100% 100%, 100% 100%;
+    }}
+    .wrap {{ max-width:1540px; margin:22px auto; padding:0 18px; }}
+    .card {{
+      background:linear-gradient(180deg,rgba(255,255,255,.02),rgba(255,255,255,.00));
+      border:1px solid var(--line);
+      border-radius:14px;
+      padding:14px;
+      margin-bottom:14px;
+      box-shadow:0 16px 38px rgba(0,0,0,.24);
+    }}
+    .hero-card {{ background:linear-gradient(180deg,rgba(255,180,60,.07),rgba(255,255,255,.01)); }}
+    h1 {{ margin:0 0 6px; font-size:29px; letter-spacing:.2px; }}
+    h2 {{ margin:0 0 8px; font-size:20px; }}
+    h3 {{ margin:0 0 6px; font-size:15px; }}
     p {{ margin:0; color:var(--muted); }}
-    .quick-info {{ margin-top:10px; color:var(--muted); font-size:13px; line-height:1.5; }}
+    .top-tabs {{ margin-top:14px; display:flex; gap:24px; flex-wrap:wrap; }}
+    .tab {{ color:#8f98ad; font-size:20px; padding-bottom:10px; border-bottom:2px solid transparent; }}
+    .tab-active {{ color:var(--text); border-bottom-color:var(--accent); }}
+    .quick-info {{ margin-top:12px; color:var(--muted); font-size:13px; line-height:1.55; }}
     .seo-grid {{ margin-top:12px; display:grid; gap:10px; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); }}
-    .seo-box {{ border:1px solid var(--line); border-radius:10px; padding:10px; background:#0e1a30; }}
+    .seo-box {{ border:1px solid var(--line); border-radius:10px; padding:10px; background:var(--panel-soft); }}
     .seo-box ul {{ margin:6px 0 0 18px; color:var(--muted); }}
     .seo-box li {{ margin:4px 0; }}
     .hero-actions {{ margin-top:12px; display:flex; gap:10px; flex-wrap:wrap; }}
-    .hero-btn {{ display:inline-block; border-radius:10px; border:1px solid #2f6ab5; background:#1d3f6d; color:var(--text); text-decoration:none; padding:8px 12px; font-size:13px; }}
-    .hero-btn:hover {{ background:#24538f; }}
-    .hero-thanks {{ margin-top:10px; color:#b8d2f3; font-size:13px; }}
-    form {{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; }}
-    input,select {{ background:#0e1a30; border:1px solid var(--line); color:var(--text); border-radius:8px; padding:7px 9px; }}
-    button {{ background:#20477a; border:1px solid #2f6ab5; color:var(--text); border-radius:8px; padding:7px 10px; cursor:pointer; }}
-    .btn-link {{ display:inline-block; background:#1d3f6d; border:1px solid #2f6ab5; color:var(--text); border-radius:8px; padding:5px 9px; text-decoration:none; font-size:12px; }}
-    .btn-link:hover {{ background:#24538f; }}
-    .table-wrap {{ overflow-x:auto; }}
-    table {{ width:100%; border-collapse:collapse; font-size:14px; }}
-    th,td {{ padding:9px 7px; border-bottom:1px solid var(--line); text-align:left; }}
-    th {{ color:var(--muted); }}
-    code {{ color:var(--accent); }}
-    .trader-cell code {{ font-size:11px; }}
-    .trader-label {{ font-weight:700; margin-bottom:2px; }}
-    .metric-pos {{ color:#27d07d; font-weight:600; }}
-    .metric-neg {{ color:#ff6f7e; font-weight:600; }}
-    .metric-flat {{ color:var(--muted); }}
-    .muted-mini {{ color:var(--muted); font-size:11px; }}
+    .hero-btn {{
+      display:inline-block;
+      border-radius:999px;
+      border:1px solid #805215;
+      background:rgba(255,159,26,.12);
+      color:#ffc66a;
+      text-decoration:none;
+      padding:8px 13px;
+      font-size:12px;
+      font-weight:600;
+    }}
+    .hero-btn:hover {{ background:rgba(255,159,26,.2); }}
+    .hero-thanks {{ margin-top:10px; color:#d5a556; font-size:12px; }}
+    .filter-form {{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; }}
+    .filter-form input,.filter-form select {{
+      background:#0b1018;
+      border:1px solid #2f3442;
+      color:var(--text);
+      border-radius:999px;
+      padding:9px 12px;
+      font-size:12px;
+    }}
+    .filter-form button {{
+      background:rgba(255,159,26,.16);
+      border:1px solid #8a5a18;
+      color:#ffbf54;
+      border-radius:999px;
+      padding:9px 14px;
+      font-size:12px;
+      font-weight:700;
+      cursor:pointer;
+    }}
+    .filter-form button:hover {{ background:rgba(255,159,26,.25); }}
+    .btn-link {{
+      display:inline-block;
+      background:#10141d;
+      border:1px solid #3a4252;
+      color:#d6dde9;
+      border-radius:8px;
+      padding:5px 9px;
+      text-decoration:none;
+      font-size:12px;
+    }}
+    .btn-link:hover {{ background:#161c27; }}
+    .table-wrap {{ overflow-x:auto; border-radius:12px; border:1px solid #212736; }}
+    table {{ width:100%; border-collapse:collapse; font-size:14px; min-width:1180px; background:#0a0d13; }}
+    thead th {{
+      background:#10141d;
+      color:#a7afc2;
+      font-weight:600;
+      font-size:12px;
+      letter-spacing:.2px;
+      border-bottom:1px solid #242c3d;
+      padding:12px 10px;
+      text-align:left;
+      white-space:nowrap;
+    }}
+    tbody td {{
+      padding:12px 10px;
+      border-bottom:1px solid #1b2130;
+      color:#d6ddeb;
+      white-space:nowrap;
+    }}
+    tbody tr:hover {{ background:rgba(255,159,26,.06); }}
+    code {{ color:#95a4c8; }}
+    .trader-cell code {{ font-size:11px; opacity:.78; }}
+    .trader-label {{ font-weight:700; margin-bottom:3px; font-size:21px; line-height:1.05; }}
+    .metric-pos {{ color:var(--green); font-weight:700; }}
+    .metric-neg {{ color:var(--red); font-weight:700; }}
+    .metric-flat {{ color:#b9c0d1; }}
+    .muted-mini {{ color:var(--muted); font-size:11px; margin-top:3px; }}
+    .copy-btn {{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      min-width:98px;
+      padding:8px 12px;
+      border-radius:999px;
+      border:1px solid #9c650f;
+      color:#ffb23f;
+      background:rgba(255,159,26,.1);
+      text-decoration:none;
+      font-size:13px;
+      font-weight:700;
+      letter-spacing:.2px;
+    }}
+    .copy-btn:hover {{ background:rgba(255,159,26,.2); }}
     .faq-item {{ border-top:1px solid var(--line); padding:10px 0; }}
     .faq-item:first-of-type {{ border-top:none; padding-top:0; }}
     .faq-item p {{ line-height:1.5; }}
+    @media (max-width: 900px) {{
+      .tab {{ font-size:17px; }}
+      h1 {{ font-size:25px; }}
+      .card {{ padding:12px; }}
+    }}
   </style>
 </head>
 <body>
   <div class='wrap'>
-    <div class='card'>
+    <div class='card hero-card'>
       <h1>Crypto Copy Trading Signals for Futures Traders</h1>
       <p>Find active traders, filter by performance, and open Telegram copy trading feeds in one click.</p>
+      <div class='top-tabs'>
+        <span class='tab'>Leaderboard</span>
+        <span class='tab tab-active'>All Traders</span>
+        <span class='tab'>Favorites</span>
+        <span class='tab'>Subscribed</span>
+      </div>
       <div class='hero-actions'>
         <a class='hero-btn' href='{escape(PROJECT_REPO_URL)}' target='_blank' rel='noopener'>Contribute on GitHub</a>
         <a class='hero-btn' href='{escape(PROJECT_REPO_URL)}/issues/new' target='_blank' rel='noopener'>Report Issue / Idea</a>
@@ -580,7 +692,7 @@ def _render_public_directory(
     </div>
 
     <div class='card'>
-      <form method='get' action='/'>
+      <form class='filter-form' method='get' action='/'>
         <input name='q' placeholder='search label/address' value='{escape(str(request.query.get("q", "")))}' />
         <input name='min_age_days' type='number' step='1' min='0' value='{escape(str(request.query.get("min_age_days", "0")))}' placeholder='min age days' />
         <input name='min_trades_30d' type='number' step='1' min='0' value='{escape(str(request.query.get("min_trades_30d", "0")))}' placeholder='min trades 30d' />
@@ -1277,6 +1389,10 @@ async def _on_startup(app: web.Application) -> None:
     settings = app["settings"]
     timeout = aiohttp.ClientTimeout(total=settings.http_timeout_seconds)
     app["http_session"] = aiohttp.ClientSession(timeout=timeout)
+    # Warm DB bootstrap/migrations during startup, not on first user request.
+    with TraderStore(settings.database_dsn) as store:
+        store.list_catalog_traders(limit=1)
+    app["logger"].info("Admin DB bootstrap complete")
     app["logger"].info("Admin app startup complete")
 
 
