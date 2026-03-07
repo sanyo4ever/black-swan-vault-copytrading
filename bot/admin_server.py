@@ -253,7 +253,7 @@ def _subscribe_button(*, trader_address: str, bot_username: str, trader_status: 
         return "<span style='opacity:.7'>Unavailable</span>"
     encoded = quote(trader_address, safe="")
     return (
-        f"<a class='copy-btn' href='/subscribe/{encoded}' target='_blank' rel='noopener'>"
+        f"<a class='copy-btn' href='/subscribe/{encoded}/go' target='_blank' rel='noopener'>"
         "Copy"
         "</a>"
     )

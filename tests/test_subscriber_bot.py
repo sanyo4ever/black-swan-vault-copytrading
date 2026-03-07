@@ -34,7 +34,7 @@ class SubscriberBotTests(unittest.TestCase):
 
 
 class SubscriberBotFlowTests(unittest.IsolatedAsyncioTestCase):
-    async def test_strict_thread_mode_rejects_forum_unsupported_chat(self) -> None:
+    async def test_forum_unsupported_chat_falls_back_to_direct_chat_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
             trader_address = "0xabcabcabcabcabcabcabcabcabcabcabcabcabca"
@@ -69,13 +69,14 @@ class SubscriberBotFlowTests(unittest.IsolatedAsyncioTestCase):
 
             with TraderStore(db_path) as store:
                 sessions = store.list_delivery_sessions_for_chat(chat_id=777001)
-            self.assertEqual(len(sessions), 0)
+            self.assertEqual(len(sessions), 1)
+            self.assertIsNone(sessions[0].message_thread_id)
             self.assertGreaterEqual(send_mock.await_count, 1)
             texts = [
                 str(call.kwargs.get("text", ""))
                 for call in send_mock.await_args_list
             ]
-            self.assertTrue(any("Thread mode is required" in text for text in texts))
+            self.assertTrue(any("posted directly here" in text for text in texts))
 
 
 if __name__ == "__main__":
