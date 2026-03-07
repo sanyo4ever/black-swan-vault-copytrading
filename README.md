@@ -6,6 +6,16 @@ Open-source repository: [github.com/sanyo4ever/black-swan-vault-copytrading](htt
 I run a self-hosted public server at [blackswanvault.online](https://blackswanvault.online), where anyone can connect to copytrading feeds.  
 Project is donation-supported. PayPal: `sanyo4ever@gmail.com` or USDT TRC20: `TBFmAiNBK9eze43nhAkWXvir9yV6tUzpgQ`
 
+## License Model
+
+- Community/Open-Source License: **AGPL-3.0-only** (see `LICENSE`).
+- Free for community use, self-hosting, modification, and redistribution under AGPL terms.
+- If you run a modified version as a network service, AGPL requires publishing source code of that modified version.
+- Commercial/Enterprise License: available for companies that need closed-source, white-label, OEM, or AGPL-waiver terms.
+- Contact for commercial licensing/partnerships: `sanyo4ever@gmail.com`
+
+More details: `LICENSE_POLICY.md`
+
 ## What you have now
 
 - Continuous discovery worker (`discovery_worker.py`) that updates DB on schedule
