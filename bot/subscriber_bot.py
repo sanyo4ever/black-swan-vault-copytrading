@@ -77,12 +77,12 @@ async def _send_welcome(*, session: aiohttp.ClientSession, settings, chat_id: in
         chat_id=chat_id,
         text=(
             "<b>CryptoInsider Bot</b>\n\n"
-            "1) Відкрий каталог трейдерів\n"
-            "2) Натисни <b>Open Trader Chat</b>\n"
-            "3) Бот створить окремий тред і буде постити угоди туди до скасування\n\n"
-            "Команди:\n"
-            "<code>/my</code> - активні треди\n"
-            "<code>/stop 0x...</code> - зупинити трейдера і видалити тред"
+            "1) Open the traders catalog\n"
+            "2) Click <b>Open Trader Chat</b>\n"
+            "3) The bot creates a dedicated thread and posts trades there until cancellation\n\n"
+            "Commands:\n"
+            "<code>/my</code> - list active trader threads\n"
+            "<code>/stop 0x...</code> - stop trader subscription and delete thread"
         ),
     )
 
@@ -140,7 +140,7 @@ async def _handle_start_with_payload(
             session,
             bot_token=settings.telegram_bot_token,
             chat_id=chat_id,
-            text="Некоректний payload підписки.",
+            text="Invalid subscription payload.",
         )
         return
 
@@ -151,7 +151,7 @@ async def _handle_start_with_payload(
                 session,
                 bot_token=settings.telegram_bot_token,
                 chat_id=chat_id,
-                text="Трейдера не знайдено в базі.",
+                text="Trader not found in database.",
             )
             return
 
@@ -222,7 +222,7 @@ async def _handle_start_with_payload(
                     "<b>Session started ✅</b>\n"
                     f"Trader: <code>{_short(address)}</code>\n"
                     "<b>Status:</b> Active until cancellation\n\n"
-                    "Сюди будуть приходити нові угоди цього трейдера."
+                    "New trades from this trader will be posted in this thread."
                 ),
             )
         else:
@@ -235,7 +235,7 @@ async def _handle_start_with_payload(
                     f"Trader: <code>{_short(address)}</code>\n"
                     "<b>Status:</b> Active until cancellation\n\n"
                     "<b>Thread mode unavailable in this chat.</b>\n"
-                    "Угоди будуть приходити напряму в цей чат."
+                    "Trades will be delivered directly to this private chat."
                 ),
             )
 
@@ -244,10 +244,10 @@ async def _handle_start_with_payload(
             bot_token=settings.telegram_bot_token,
             chat_id=chat_id,
             text=(
-                "<b>Готово ✅</b>\n"
-                f"Підписка активна для <code>{_short(address)}</code>.\n"
-                "Діє безстроково до команди <code>/stop</code>.\n\n"
-                "Переглянути активні треди: <code>/my</code>"
+                "<b>Done ✅</b>\n"
+                f"Subscription is active for <code>{_short(address)}</code>.\n"
+                "It stays active until you send <code>/stop</code>.\n\n"
+                "View active threads: <code>/my</code>"
             ),
         )
     except Exception as exc:
@@ -267,8 +267,8 @@ async def _handle_start_with_payload(
             bot_token=settings.telegram_bot_token,
             chat_id=chat_id,
             text=(
-                "Не вдалося створити новий тред для підписки.\n"
-                "Спробуй ще раз через 10-20 секунд."
+                "Failed to create a new subscription thread.\n"
+                "Please try again in 10-20 seconds."
             ),
         )
 
@@ -309,18 +309,18 @@ async def _handle_message(
                 session,
                 bot_token=settings.telegram_bot_token,
                 chat_id=chat_id,
-                text="Активних тредів поки немає. Обери трейдера в каталозі.",
+                text="No active trader threads yet. Pick a trader in the catalog.",
             )
             return
 
-        lines = ["<b>Твої активні треди</b>"]
+        lines = ["<b>Your active trader threads</b>"]
         for item in sessions:
             topic = item.topic_name or "Trader thread"
             thread = item.message_thread_id if item.message_thread_id is not None else "-"
             lines.append(
                 f"• <code>{_short(item.trader_address)}</code> | {topic} | thread={thread} | active until cancellation"
             )
-        lines.append("\nЗупинити: <code>/stop 0x...</code>")
+        lines.append("\nStop a trader: <code>/stop 0x...</code>")
 
         await send_message(
             session,
@@ -337,7 +337,7 @@ async def _handle_message(
                 session,
                 bot_token=settings.telegram_bot_token,
                 chat_id=chat_id,
-                text="Використай: <code>/stop 0x...</code>",
+                text="Usage: <code>/stop 0x...</code>",
             )
             return
 
@@ -352,7 +352,7 @@ async def _handle_message(
                 session,
                 bot_token=settings.telegram_bot_token,
                 chat_id=chat_id,
-                text="Активної підписки на цього трейдера не знайдено.",
+                text="No active subscription found for this trader.",
             )
             return
 
@@ -376,7 +376,7 @@ async def _handle_message(
             session,
             bot_token=settings.telegram_bot_token,
             chat_id=chat_id,
-            text=f"Підписку на <code>{_short(address)}</code> зупинено{suffix}.",
+            text=f"Subscription for <code>{_short(address)}</code> has been stopped{suffix}.",
         )
         return
 
