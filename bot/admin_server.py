@@ -57,11 +57,20 @@ def _discovery_config_from_settings(settings) -> HyperliquidDiscoveryConfig:
         min_age_days=settings.discovery_min_age_days,
         min_trades_30d=settings.discovery_min_trades_30d,
         min_active_days_30d=settings.discovery_min_active_days_30d,
+        min_win_rate_30d=settings.discovery_min_win_rate_30d,
+        max_drawdown_30d_pct=settings.discovery_max_drawdown_30d_pct,
+        max_last_activity_minutes=settings.discovery_max_last_activity_minutes,
+        min_realized_pnl_30d=settings.discovery_min_realized_pnl_30d,
+        require_positive_pnl_30d=settings.discovery_require_positive_pnl_30d,
         min_trades_7d=settings.discovery_min_trades_7d,
         window_hours=settings.discovery_window_hours,
         concurrency=settings.discovery_concurrency,
         fill_cap_hint=settings.discovery_fill_cap_hint,
         age_probe_enabled=settings.discovery_age_probe_enabled,
+        seed_addresses=settings.discovery_seed_addresses,
+        nansen_api_url=settings.nansen_api_url,
+        nansen_api_key=settings.nansen_api_key,
+        nansen_candidate_limit=settings.nansen_candidate_limit,
     )
 
 

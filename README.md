@@ -20,7 +20,7 @@ More details: `LICENSE_POLICY.md`
 
 - Continuous discovery worker (`discovery_worker.py`) that updates DB on schedule
 - Universe worker (`universe_worker.py`) that builds long-lived qualified trader pool
-- Top100 worker (`top100_worker.py`) that refreshes `traders_top100_live` and `catalog_current`
+- Top100 worker (`top100_worker.py`) that refreshes `traders_top100_live`, `catalog_current`, and HOT/WARM/COLD monitoring pool
 - Auto-discovered traders are kept `ACTIVE` by default (blacklist controls delivery blocking)
 - Rich trader stats (7d/30d activity, PnL, fees, win rate, volume, age, score, margin stats)
 - Extended performance stats per trader (7d/30d ROI, PnL, Win/Lose, Profit-to-Loss, Avg PnL/trade, Max Drawdown, Sharpe, Sortino, ROI volatility)
@@ -29,7 +29,7 @@ More details: `LICENSE_POLICY.md`
 - One-click trader chat flow via Telegram bot (`/subscribe/<trader_address>`)
 - Topic-based delivery sessions per subscription (`createForumTopic`)
 - Password-protected admin panel (`/admin`) with add/delete, blacklist/whitelist, bulk moderation, and run discovery now
-- Telegram posting pipeline that sends fills to channel + subscriber topic threads
+- Telegram posting pipeline that delivers fills only for active subscriber demand (tiered polling cadence)
 
 ## Entrypoints
 
@@ -63,12 +63,21 @@ DATABASE_URL=postgresql://cryptoinsider:strong_password@127.0.0.1:5432/cryptoins
 HYPERLIQUID_INFO_URL=https://api.hyperliquid.xyz/info
 DISCOVERY_CANDIDATE_LIMIT=60
 DISCOVERY_MIN_AGE_DAYS=30
-DISCOVERY_MIN_TRADES_30D=10
-DISCOVERY_MIN_ACTIVE_DAYS_30D=4
+DISCOVERY_MIN_TRADES_30D=120
+DISCOVERY_MIN_ACTIVE_DAYS_30D=12
+DISCOVERY_MIN_WIN_RATE_30D=0.52
+DISCOVERY_MAX_DRAWDOWN_30D_PCT=25.0
+DISCOVERY_MAX_LAST_ACTIVITY_MINUTES=60
+DISCOVERY_MIN_REALIZED_PNL_30D=0.0
+DISCOVERY_REQUIRE_POSITIVE_PNL_30D=true
 DISCOVERY_MIN_TRADES_7D=1
 DISCOVERY_CONCURRENCY=6
 DISCOVERY_FILL_CAP_HINT=1900
 DISCOVERY_AGE_PROBE_ENABLED=true
+DISCOVERY_SEED_ADDRESSES=
+NANSEN_API_URL=https://api.nansen.ai
+NANSEN_API_KEY=
+NANSEN_CANDIDATE_LIMIT=60
 DISCOVERY_INTERVAL_SECONDS=900
 
 ADMIN_PANEL_USERNAME=admin
@@ -79,15 +88,28 @@ SUBSCRIPTION_LIFETIME_HOURS=0
 
 UNIVERSE_INTERVAL_SECONDS=300
 UNIVERSE_MIN_AGE_DAYS=30
-UNIVERSE_MIN_TRADES_30D=10
-UNIVERSE_MIN_WIN_RATE_30D=0.0
-UNIVERSE_MIN_REALIZED_PNL_30D=0.0
+UNIVERSE_MIN_TRADES_30D=120
+UNIVERSE_MIN_ACTIVE_DAYS_30D=12
+UNIVERSE_MIN_WIN_RATE_30D=0.52
+UNIVERSE_MAX_DRAWDOWN_30D_PCT=25.0
+UNIVERSE_MAX_LAST_ACTIVITY_MINUTES=60
+UNIVERSE_MIN_REALIZED_PNL_30D=0.000001
 UNIVERSE_MIN_SCORE=0.0
 UNIVERSE_MAX_SIZE=3000
 
 LIVE_TOP100_INTERVAL_SECONDS=60
 LIVE_TOP100_ACTIVE_WINDOW_MINUTES=60
 LIVE_TOP100_SIZE=100
+
+MONITOR_HOT_SIZE=100
+MONITOR_WARM_SIZE=400
+MONITOR_HOT_POLL_SECONDS=60
+MONITOR_WARM_POLL_SECONDS=600
+MONITOR_COLD_POLL_SECONDS=3600
+MONITOR_HOT_RECENCY_MINUTES=60
+MONITOR_WARM_RECENCY_MINUTES=360
+MONITOR_MAX_TARGETS_PER_CYCLE=120
+MONITOR_DELIVERY_ONLY_SUBSCRIBED=true
 
 LOG_LEVEL=INFO
 LOG_FORMAT=text
@@ -153,14 +175,14 @@ python subscriber_bot.py
 - `http://127.0.0.1:8080/admin` -> admin panel (HTTP Basic Auth)
 
 `/api/traders` now includes extra computed fields:
-- `roi_7d`, `roi_30d`
-- `pnl_7d`, `pnl_30d`
-- `wins_7d`, `losses_7d`, `wins_30d`, `losses_30d`
-- `profit_to_loss_ratio_7d`, `profit_to_loss_ratio_30d`
-- `weekly_trades`, `avg_pnl_per_trade_7d`, `avg_pnl_per_trade_30d`
-- `max_drawdown_7d`, `max_drawdown_30d`
-- `sharpe_7d`, `sharpe_30d`, `sortino_7d`, `sortino_30d`
-- `roi_volatility_7d`, `roi_volatility_30d`
+- `roi_1d`, `roi_7d`, `roi_30d`
+- `pnl_1d`, `pnl_7d`, `pnl_30d`
+- `wins_1d`, `wins_7d`, `wins_30d`, `losses_1d`, `losses_7d`, `losses_30d`
+- `profit_to_loss_ratio_1d`, `profit_to_loss_ratio_7d`, `profit_to_loss_ratio_30d`
+- `trades_1d`, `weekly_trades`, `avg_pnl_per_trade_1d`, `avg_pnl_per_trade_7d`, `avg_pnl_per_trade_30d`
+- `max_drawdown_1d`, `max_drawdown_7d`, `max_drawdown_30d`
+- `sharpe_1d`, `sharpe_7d`, `sharpe_30d`, `sortino_1d`, `sortino_7d`, `sortino_30d`
+- `roi_volatility_1d`, `roi_volatility_7d`, `roi_volatility_30d`
 
 ## Logging and Debugging
 
@@ -212,6 +234,12 @@ sudo journalctl -u cryptoinsider-top100.service -f
 - rolling live shortlist of active traders (`last_fill_time` within configured window)
 - maintained for shortlist/ranking use-cases
 
+### `trader_monitoring_pool`
+
+- HOT/WARM/COLD tier map with per-tier polling intervals and lookback windows
+- worker-maintained `next_poll_at` scheduling for efficient delivery monitoring
+- poster fetches only due targets (optionally only active subscribers)
+
 ### `catalog_current`
 
 - denormalized full trader catalog for subscriber page and API
@@ -231,5 +259,5 @@ sudo journalctl -u cryptoinsider-top100.service -f
 - `catalog_current` powers full trader directory and `/api/traders`.
 - Discovery keeps all tracked traders active in DB; moderation (`BLACKLIST`) controls blocking from delivery/monitoring.
 - Blacklisted traders are removed from active delivery/monitoring flows until moderation changes.
-- Telegram source monitors addresses from active sessions + active trader set.
+- Telegram source monitors due tier targets and (by default) only active-subscriber demand.
 - New subscription creates a new topic thread and runs until cancellation.

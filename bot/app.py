@@ -457,7 +457,9 @@ async def _run_cycle(*, settings, http_session, dedup_store, logger) -> int:
         if dedup_store.seen(dedup_key):
             continue
 
-        channel_target_count = 1 if settings.telegram_channel_id else 0
+        channel_target_count = 0
+        if settings.telegram_channel_id and not settings.monitor_delivery_only_subscribed:
+            channel_target_count = 1
         delivery_targets = []
         if signal.trader_address:
             delivery_targets = subscriber_map.get(signal.trader_address, [])
@@ -472,7 +474,7 @@ async def _run_cycle(*, settings, http_session, dedup_store, logger) -> int:
         try:
             text = format_signal(signal)
 
-            if settings.telegram_channel_id:
+            if settings.telegram_channel_id and not settings.monitor_delivery_only_subscribed:
                 status = await _send_live_target(
                     settings=settings,
                     http_session=http_session,

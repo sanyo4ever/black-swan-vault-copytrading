@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -28,6 +29,10 @@ SESSION_ERROR = "ERROR"
 RETRY_PENDING = "PENDING"
 RETRY_SENT = "SENT"
 RETRY_DEAD = "DEAD"
+TIER_HOT = "HOT"
+TIER_WARM = "WARM"
+TIER_COLD = "COLD"
+TIER_PRIORITY = {TIER_HOT: 0, TIER_WARM: 1, TIER_COLD: 2}
 PERMANENT_SUBSCRIPTION_EXPIRES_AT = "9999-12-31 23:59:59"
 
 
@@ -166,6 +171,14 @@ class DeliveryRetryJob:
     attempt_count: int
     next_attempt_at: str
     last_error: str | None
+
+
+@dataclass(frozen=True)
+class MonitoringTarget:
+    address: str
+    tier: str
+    poll_interval_seconds: int
+    lookback_minutes: int
 
 
 class TraderStore:
@@ -646,6 +659,35 @@ class TraderStore:
         )
         self._execute(
             """
+            CREATE TABLE IF NOT EXISTS trader_monitoring_pool (
+                address TEXT PRIMARY KEY,
+                tier TEXT NOT NULL CHECK(tier IN ('HOT', 'WARM', 'COLD')),
+                rank_position INTEGER NOT NULL,
+                rank_score REAL NOT NULL DEFAULT 0,
+                poll_interval_seconds INTEGER NOT NULL DEFAULT 60,
+                lookback_minutes INTEGER NOT NULL DEFAULT 30,
+                next_poll_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_polled_at TEXT,
+                refreshed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(address) REFERENCES tracked_traders(address) ON DELETE CASCADE
+            )
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_monitoring_pool_tier_next
+            ON trader_monitoring_pool(tier, next_poll_at)
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_monitoring_pool_next_poll
+            ON trader_monitoring_pool(next_poll_at)
+            """
+        )
+        self._execute(
+            """
             CREATE TABLE IF NOT EXISTS catalog_current (
                 address TEXT PRIMARY KEY,
                 label TEXT,
@@ -1004,6 +1046,35 @@ class TraderStore:
         )
         self._execute(
             """
+            CREATE TABLE IF NOT EXISTS trader_monitoring_pool (
+                address TEXT PRIMARY KEY,
+                tier TEXT NOT NULL CHECK(tier IN ('HOT', 'WARM', 'COLD')),
+                rank_position INTEGER NOT NULL,
+                rank_score DOUBLE PRECISION NOT NULL DEFAULT 0,
+                poll_interval_seconds INTEGER NOT NULL DEFAULT 60,
+                lookback_minutes INTEGER NOT NULL DEFAULT 30,
+                next_poll_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_polled_at TIMESTAMP,
+                refreshed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(address) REFERENCES tracked_traders(address) ON DELETE CASCADE
+            )
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_monitoring_pool_tier_next
+            ON trader_monitoring_pool(tier, next_poll_at)
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_monitoring_pool_next_poll
+            ON trader_monitoring_pool(next_poll_at)
+            """
+        )
+        self._execute(
+            """
             CREATE TABLE IF NOT EXISTS catalog_current (
                 address TEXT PRIMARY KEY,
                 label TEXT,
@@ -1350,6 +1421,15 @@ class TraderStore:
             last_error=(str(row["last_error"]) if row["last_error"] else None),
         )
 
+    @staticmethod
+    def _row_to_monitoring_target(row: Mapping[str, Any]) -> MonitoringTarget:
+        return MonitoringTarget(
+            address=str(row["address"]),
+            tier=str(row["tier"]),
+            poll_interval_seconds=int(row["poll_interval_seconds"] or 60),
+            lookback_minutes=int(row["lookback_minutes"] or 30),
+        )
+
     def list_traders(self, *, limit: int = 500) -> list[TrackedTrader]:
         rows = self._execute(
             """
@@ -1410,18 +1490,109 @@ class TraderStore:
                 break
         return dedup
 
+    def list_due_monitoring_targets(
+        self,
+        *,
+        limit: int = 200,
+        only_subscribed: bool = True,
+    ) -> list[MonitoringTarget]:
+        where = [
+            "mp.next_poll_at <= CURRENT_TIMESTAMP",
+            "COALESCE(t.moderation_state, ?) <> ?",
+        ]
+        params: list[Any] = [MODERATION_NEUTRAL, MODERATION_BLACKLIST]
+        if only_subscribed:
+            where.append(
+                """
+                EXISTS (
+                    SELECT 1
+                    FROM subscriptions s
+                    WHERE s.trader_address = mp.address
+                      AND s.status = 'ACTIVE'
+                      AND s.expires_at > CURRENT_TIMESTAMP
+                )
+                """
+            )
+        rows = self._execute(
+            f"""
+            SELECT
+                mp.address,
+                mp.tier,
+                mp.poll_interval_seconds,
+                mp.lookback_minutes
+            FROM trader_monitoring_pool mp
+            JOIN tracked_traders t ON t.address = mp.address
+            WHERE {' AND '.join(where)}
+            ORDER BY
+                CASE mp.tier
+                    WHEN '{TIER_HOT}' THEN 0
+                    WHEN '{TIER_WARM}' THEN 1
+                    ELSE 2
+                END ASC,
+                mp.next_poll_at ASC,
+                mp.rank_position ASC
+            LIMIT ?
+            """,
+            (*params, int(limit)),
+        ).fetchall()
+        return [self._row_to_monitoring_target(row) for row in rows]
+
+    def mark_monitoring_targets_polled(self, *, targets: list[MonitoringTarget]) -> None:
+        if not targets:
+            return
+        now = datetime.now(tz=UTC)
+        last_polled = now.strftime("%Y-%m-%d %H:%M:%S")
+        prepared: list[tuple[str, str, str]] = []
+        seen: set[str] = set()
+        for item in targets:
+            address = self.normalize_address(item.address)
+            if not address or address in seen:
+                continue
+            seen.add(address)
+            next_poll = (now + timedelta(seconds=max(1, int(item.poll_interval_seconds)))).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            prepared.append((last_polled, next_poll, address))
+        if not prepared:
+            return
+        self._executemany(
+            """
+            UPDATE trader_monitoring_pool
+            SET last_polled_at = ?,
+                next_poll_at = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE address = ?
+            """,
+            prepared,
+        )
+        self._connection.commit()
+
     def refresh_traders_universe_from_tracked(
         self,
         *,
         min_age_days: int,
         min_trades_30d: int,
+        min_active_days_30d: int = 0,
         min_win_rate_30d: float,
+        max_drawdown_30d_pct: float = 1_000_000_000_000.0,
+        max_last_activity_minutes: int = 60,
         min_realized_pnl_30d: float,
         min_score: float,
         max_size: int = 3000,
     ) -> int:
+        if self._driver == "postgres":
+            drawdown_expr = (
+                "NULLIF((stats_json::jsonb -> 'metrics_30d' ->> 'max_drawdown_pct'), '')"
+                "::double precision"
+            )
+        else:
+            drawdown_expr = "CAST(json_extract(stats_json, '$.metrics_30d.max_drawdown_pct') AS REAL)"
+        cutoff_ms = int(datetime.now(tz=UTC).timestamp() * 1000) - (
+            max(1, int(max_last_activity_minutes)) * 60 * 1000
+        )
+
         rows = self._execute(
-            """
+            f"""
             SELECT
                 address,
                 label,
@@ -1440,8 +1611,11 @@ class TraderStore:
                 AND
                 COALESCE(age_days, 0) >= ?
                 AND COALESCE(trades_30d, 0) >= ?
+                AND COALESCE(active_days_30d, 0) >= ?
                 AND COALESCE(win_rate_30d, 0) >= ?
-                AND COALESCE(realized_pnl_30d, -1000000000) >= ?
+                AND COALESCE(realized_pnl_30d, -1000000000) > ?
+                AND COALESCE(last_fill_time, 0) >= ?
+                AND COALESCE({drawdown_expr}, 1000000000) <= ?
                 AND COALESCE(score, -1000000000) >= ?
             ORDER BY COALESCE(score, -1000000000) DESC, COALESCE(last_fill_time, 0) DESC
             LIMIT ?
@@ -1451,8 +1625,11 @@ class TraderStore:
                 MODERATION_BLACKLIST,
                 float(min_age_days),
                 int(min_trades_30d),
+                int(min_active_days_30d),
                 float(min_win_rate_30d),
                 float(min_realized_pnl_30d),
+                int(cutoff_ms),
+                float(max_drawdown_30d_pct),
                 float(min_score),
                 int(max_size),
             ),
@@ -1585,6 +1762,149 @@ class TraderStore:
             raise
 
         return len(ranked)
+
+    def refresh_monitoring_pool(
+        self,
+        *,
+        hot_size: int = 100,
+        warm_size: int = 400,
+        hot_poll_seconds: int = 60,
+        warm_poll_seconds: int = 600,
+        cold_poll_seconds: int = 3600,
+        hot_recency_minutes: int = 60,
+        warm_recency_minutes: int = 360,
+    ) -> dict[str, int]:
+        now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
+        rows = self._execute(
+            """
+            SELECT
+                u.address,
+                u.score,
+                u.last_fill_time,
+                t.trades_24h,
+                t.trades_7d
+            FROM traders_universe u
+            JOIN tracked_traders t ON t.address = u.address
+            WHERE COALESCE(t.moderation_state, ?) <> ?
+            """,
+            (MODERATION_NEUTRAL, MODERATION_BLACKLIST),
+        ).fetchall()
+
+        ranked: list[tuple[str, float, int, int, int]] = []
+        for row in rows:
+            address = self.normalize_address(str(row["address"]))
+            if not address:
+                continue
+            last_fill_time = int(row["last_fill_time"] or 0)
+            score = float(row["score"] or 0.0)
+            trades_24h = int(row["trades_24h"] or 0)
+            trades_7d = int(row["trades_7d"] or 0)
+
+            age_minutes = (
+                max(0.0, (now_ms - last_fill_time) / 60000.0)
+                if last_fill_time > 0
+                else float("inf")
+            )
+            recency_score = (
+                max(0.0, 1.0 - (age_minutes / max(1, warm_recency_minutes)))
+                if age_minutes != float("inf")
+                else 0.0
+            )
+            quality_score = min(1.0, max(0.0, score) / 100.0)
+            activity_score = min(1.0, trades_24h / 24.0) * 0.55 + min(1.0, trades_7d / 84.0) * 0.45
+            rank_score = ((quality_score * 0.60) + (recency_score * 0.25) + (activity_score * 0.15)) * 100.0
+            ranked.append((address, round(rank_score, 6), last_fill_time, trades_24h, trades_7d))
+
+        ranked.sort(key=lambda item: (item[1], item[2]), reverse=True)
+
+        hot_count = 0
+        warm_count = 0
+        payload: list[tuple[Any, ...]] = []
+        for rank_position, item in enumerate(ranked, start=1):
+            address, rank_score, last_fill_time, _trades_24h, _trades_7d = item
+            age_minutes = (
+                max(0.0, (now_ms - last_fill_time) / 60000.0)
+                if last_fill_time > 0
+                else float("inf")
+            )
+
+            if age_minutes <= max(1, hot_recency_minutes) and hot_count < max(1, hot_size):
+                tier = TIER_HOT
+                poll_interval_seconds = max(10, int(hot_poll_seconds))
+                hot_count += 1
+            elif age_minutes <= max(1, warm_recency_minutes) and warm_count < max(0, warm_size):
+                tier = TIER_WARM
+                poll_interval_seconds = max(30, int(warm_poll_seconds))
+                warm_count += 1
+            else:
+                tier = TIER_COLD
+                poll_interval_seconds = max(60, int(cold_poll_seconds))
+
+            lookback_minutes = max(30, int(math.ceil(poll_interval_seconds / 60.0) * 6))
+            payload.append(
+                (
+                    address,
+                    tier,
+                    rank_position,
+                    rank_score,
+                    poll_interval_seconds,
+                    lookback_minutes,
+                )
+            )
+
+        keep = [item[0] for item in payload]
+        try:
+            if payload:
+                self._executemany(
+                    """
+                    INSERT INTO trader_monitoring_pool(
+                        address,
+                        tier,
+                        rank_position,
+                        rank_score,
+                        poll_interval_seconds,
+                        lookback_minutes,
+                        next_poll_at,
+                        refreshed_at,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    ON CONFLICT(address) DO UPDATE SET
+                        tier = excluded.tier,
+                        rank_position = excluded.rank_position,
+                        rank_score = excluded.rank_score,
+                        poll_interval_seconds = excluded.poll_interval_seconds,
+                        lookback_minutes = excluded.lookback_minutes,
+                        next_poll_at = (
+                            CASE
+                                WHEN trader_monitoring_pool.tier <> excluded.tier THEN CURRENT_TIMESTAMP
+                                ELSE trader_monitoring_pool.next_poll_at
+                            END
+                        ),
+                        refreshed_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    payload,
+                )
+            if keep:
+                placeholders = ",".join("?" for _ in keep)
+                self._execute(
+                    f"DELETE FROM trader_monitoring_pool WHERE address NOT IN ({placeholders})",
+                    keep,
+                )
+            else:
+                self._execute("DELETE FROM trader_monitoring_pool")
+            self._connection.commit()
+        except Exception:
+            self._connection.rollback()
+            raise
+
+        return {
+            "total": len(payload),
+            "hot": hot_count,
+            "warm": warm_count,
+            "cold": max(0, len(payload) - hot_count - warm_count),
+        }
 
     def refresh_catalog_current(self, *, activity_window_minutes: int = 60) -> int:
         now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)

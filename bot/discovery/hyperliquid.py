@@ -22,13 +22,22 @@ class HyperliquidDiscoveryConfig:
     info_url: str = "https://api.hyperliquid.xyz/info"
     candidate_limit: int = 60
     min_age_days: int = 30
-    min_trades_30d: int = 10
-    min_active_days_30d: int = 4
+    min_trades_30d: int = 120
+    min_active_days_30d: int = 12
+    min_win_rate_30d: float = 0.52
+    max_drawdown_30d_pct: float = 25.0
+    max_last_activity_minutes: int = 60
+    min_realized_pnl_30d: float = 0.0
+    require_positive_pnl_30d: bool = True
     min_trades_7d: int = 1
     window_hours: int = 24
     concurrency: int = 6
     fill_cap_hint: int = 1900
     age_probe_enabled: bool = True
+    seed_addresses: tuple[str, ...] = ()
+    nansen_api_url: str = "https://api.nansen.ai"
+    nansen_api_key: str = ""
+    nansen_candidate_limit: int = 60
 
 
 class HyperliquidDiscoveryService:
@@ -60,14 +69,28 @@ class HyperliquidDiscoveryService:
                 "vault_tvl": float(candidate.get("vault_tvl") or 0.0),
             }
 
-        tracked = self._store.list_traders(limit=5000)
+        for seed in self._config.seed_addresses:
+            normalized_seed = str(seed).strip().lower()
+            if not normalized_seed.startswith("0x") or len(normalized_seed) < 10:
+                continue
+            merged.setdefault(
+                normalized_seed,
+                {
+                    "address": normalized_seed,
+                    "label": None,
+                    "source": "manual_seed",
+                    "vault_tvl": 0.0,
+                },
+            )
+
+        tracked = self._store.list_traders(limit=max(self._config.candidate_limit * 4, 200))
         tracked_added = 0
         for trader in tracked:
-            if not str(trader.source).startswith("hyperliquid"):
-                continue
             address = str(trader.address).strip().lower()
             if not address or address in merged:
                 continue
+            if len(merged) >= self._config.candidate_limit:
+                break
             merged[address] = {
                 "address": address,
                 "label": trader.label,
@@ -81,7 +104,12 @@ class HyperliquidDiscoveryService:
                 tracked_added,
                 len(merged),
             )
-        return list(merged.values())
+        ranked = sorted(
+            merged.values(),
+            key=lambda item: float(item.get("vault_tvl") or 0.0),
+            reverse=True,
+        )
+        return ranked[: self._config.candidate_limit]
 
     async def _info(self, payload: dict[str, Any]) -> Any:
         attempts = 5
@@ -158,6 +186,10 @@ class HyperliquidDiscoveryService:
         mean = sum(values) / len(values)
         variance = sum((value - mean) ** 2 for value in values) / len(values)
         return math.sqrt(max(0.0, variance))
+
+    @staticmethod
+    def _clamp(value: float, low: float, high: float) -> float:
+        return max(low, min(high, value))
 
     def _compute_period_stats(
         self,
@@ -278,7 +310,7 @@ class HyperliquidDiscoveryService:
             return None
         return min(times)
 
-    async def _fetch_candidates(self) -> list[dict[str, Any]]:
+    async def _fetch_hyperliquid_candidates(self) -> list[dict[str, Any]]:
         try:
             data = await self._info({"type": "vaultSummaries"})
         except Exception:
@@ -315,6 +347,250 @@ class HyperliquidDiscoveryService:
         self._logger.info("Vault candidates empty, fallback to recent trade candidates")
         fallback = await self._fetch_recent_trade_candidates()
         return self._merge_with_existing_tracked(fallback)
+
+    def _extract_nansen_candidate(self, item: dict[str, Any]) -> dict[str, Any] | None:
+        def _pick_address(payload: dict[str, Any]) -> str:
+            candidate = ""
+            for key in (
+                "walletAddress",
+                "wallet",
+                "address",
+                "traderAddress",
+                "user",
+                "owner",
+                "wallet_address",
+                "trader_address",
+            ):
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    candidate = value.strip()
+                    break
+            if not candidate:
+                trader_obj = payload.get("trader")
+                if isinstance(trader_obj, dict):
+                    nested = trader_obj.get("address")
+                    if isinstance(nested, str) and nested.strip():
+                        candidate = nested.strip()
+            return candidate.lower()
+
+        address = _pick_address(item)
+        if not address.startswith("0x") or len(address) < 10:
+            return None
+
+        label: str | None = None
+        for key in ("label", "name", "traderName", "walletLabel"):
+            raw_label = item.get(key)
+            if isinstance(raw_label, str) and raw_label.strip():
+                label = raw_label.strip()
+                break
+
+        score_hint = 0.0
+        for key in ("notionalUsd", "volumeUsd", "valueUsd", "sizeUsd", "pnlUsd"):
+            raw_value = item.get(key)
+            if raw_value is None:
+                continue
+            score_hint = max(score_hint, abs(self._to_float(raw_value)))
+
+        return {
+            "address": address,
+            "label": label,
+            "source": "nansen_smart_money_perps",
+            "vault_tvl": score_hint,
+        }
+
+    async def _fetch_nansen_candidates(self) -> list[dict[str, Any]]:
+        api_key = str(self._config.nansen_api_key or "").strip()
+        if not api_key:
+            return []
+
+        base_url = str(self._config.nansen_api_url or "").rstrip("/")
+        if not base_url:
+            return []
+        endpoint = f"{base_url}/smart-money/perp-trades"
+
+        headers = {"api-key": api_key}
+        params = {
+            "limit": max(1, int(self._config.nansen_candidate_limit)),
+            "label": "Smart HL Perps Trader",
+        }
+        try:
+            async with self._http_session.get(
+                endpoint,
+                headers=headers,
+                params=params,
+            ) as response:
+                response.raise_for_status()
+                payload = await response.json(content_type=None)
+        except Exception as exc:
+            self._logger.warning("Nansen ingest failed: %s", exc)
+            return []
+
+        if isinstance(payload, list):
+            items = payload
+        elif isinstance(payload, dict):
+            raw_items = payload.get("data")
+            if not isinstance(raw_items, list):
+                raw_items = payload.get("results")
+            items = raw_items if isinstance(raw_items, list) else []
+        else:
+            items = []
+
+        prepared: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            candidate = self._extract_nansen_candidate(item)
+            if candidate is None:
+                continue
+            prepared.append(candidate)
+
+        dedup: dict[str, dict[str, Any]] = {}
+        for item in prepared:
+            address = item["address"]
+            existing = dedup.get(address)
+            if existing is None or float(item["vault_tvl"]) > float(existing["vault_tvl"]):
+                dedup[address] = item
+
+        ranked = sorted(
+            dedup.values(),
+            key=lambda item: float(item.get("vault_tvl") or 0.0),
+            reverse=True,
+        )[: max(1, int(self._config.nansen_candidate_limit))]
+        if ranked:
+            self._logger.info("Nansen candidates prepared count=%s", len(ranked))
+        return ranked
+
+    async def _fetch_userfills_activity_candidates(self) -> list[dict[str, Any]]:
+        seed_addresses = self._store.list_monitored_addresses(
+            limit=max(50, self._config.candidate_limit)
+        )
+        if not seed_addresses:
+            return []
+
+        now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
+        start_ms = now_ms - (max(1, self._config.window_hours) * MS_HOUR)
+        sem = asyncio.Semaphore(max(1, self._config.concurrency))
+
+        async def scan(address: str) -> dict[str, Any] | None:
+            async with sem:
+                fills = await self._info(
+                    {
+                        "type": "userFillsByTime",
+                        "user": address,
+                        "startTime": start_ms,
+                    }
+                )
+            if not isinstance(fills, list):
+                return None
+
+            trade_count = 0
+            last_time = 0
+            volume = 0.0
+            for item in fills:
+                if not isinstance(item, dict):
+                    continue
+                ts = self._to_int(item.get("time"))
+                if ts <= 0:
+                    continue
+                px = self._to_float(item.get("px"))
+                sz = self._to_float(item.get("sz"))
+                trade_count += 1
+                if ts > last_time:
+                    last_time = ts
+                if px > 0 and sz > 0:
+                    volume += abs(px * sz)
+            if trade_count <= 0 or last_time <= 0:
+                return None
+            return {
+                "address": address,
+                "label": None,
+                "source": "hyperliquid_userfills_activity",
+                "vault_tvl": volume,
+                "_trade_count": trade_count,
+                "_last_time": last_time,
+            }
+
+        scanned = await asyncio.gather(*(scan(address) for address in seed_addresses), return_exceptions=True)
+        prepared: list[dict[str, Any]] = []
+        for item in scanned:
+            if isinstance(item, Exception):
+                self._logger.warning("UserFills candidate scan failed: %s", item)
+                continue
+            if isinstance(item, dict):
+                prepared.append(item)
+
+        ranked = sorted(
+            prepared,
+            key=lambda item: (
+                int(item.get("_trade_count") or 0),
+                float(item.get("vault_tvl") or 0.0),
+                int(item.get("_last_time") or 0),
+            ),
+            reverse=True,
+        )
+        candidates = [
+            {
+                "address": item["address"],
+                "label": item.get("label"),
+                "source": "hyperliquid_userfills_activity",
+                "vault_tvl": float(item.get("vault_tvl") or 0.0),
+            }
+            for item in ranked[: self._config.candidate_limit]
+        ]
+        if candidates:
+            self._logger.info("UserFills activity candidates prepared count=%s", len(candidates))
+        return candidates
+
+    async def _fetch_candidates(self) -> list[dict[str, Any]]:
+        hyperliquid_candidates = await self._fetch_hyperliquid_candidates()
+        userfills_candidates = await self._fetch_userfills_activity_candidates()
+        nansen_candidates = await self._fetch_nansen_candidates()
+
+        merged_raw: list[dict[str, Any]] = []
+        merged_raw.extend(hyperliquid_candidates)
+        merged_raw.extend(userfills_candidates)
+        merged_raw.extend(nansen_candidates)
+        if not merged_raw:
+            return []
+
+        dedup: dict[str, dict[str, Any]] = {}
+        for item in merged_raw:
+            address = str(item.get("address", "")).strip().lower()
+            if not address:
+                continue
+            source = str(item.get("source", "")).strip() or "unknown"
+            label = item.get("label")
+            vault_tvl = float(item.get("vault_tvl") or 0.0)
+            existing = dedup.get(address)
+            if existing is None:
+                dedup[address] = {
+                    "address": address,
+                    "label": label,
+                    "source": source,
+                    "vault_tvl": vault_tvl,
+                }
+                continue
+            # Keep strongest score-hint; preserve Nansen source if present.
+            if vault_tvl > float(existing.get("vault_tvl") or 0.0):
+                existing["vault_tvl"] = vault_tvl
+            if not existing.get("label") and label:
+                existing["label"] = label
+            if existing.get("source") != "nansen_smart_money_perps" and source == "nansen_smart_money_perps":
+                existing["source"] = source
+
+        ranked = sorted(
+            dedup.values(),
+            key=lambda item: float(item.get("vault_tvl") or 0.0),
+            reverse=True,
+        )[: self._config.candidate_limit]
+        self._logger.info(
+            "Combined candidates prepared count=%s (hyperliquid=%s userfills=%s nansen=%s)",
+            len(ranked),
+            len(hyperliquid_candidates),
+            len(userfills_candidates),
+            len(nansen_candidates),
+        )
+        return self._merge_with_existing_tracked(ranked)
 
     async def _fetch_recent_trade_candidates(self) -> list[dict[str, Any]]:
         meta = await self._info({"type": "meta"})
@@ -515,23 +791,54 @@ class HyperliquidDiscoveryService:
             else None
         )
 
-        consistency_component = min(1.0, active_days_30d / 30.0) * 25.0
-        frequency_component = min(1.0, trades_30d / 120.0) * 20.0
-        win_component = ((win_rate_30d if win_rate_30d is not None else 0.5) * 15.0)
-        pnl_component = max(-10.0, min(20.0, realized_pnl_30d / 1000.0))
-        age_component = min(1.0, (age_days or 0.0) / 180.0) * 10.0
-        volume_component = min(1.0, volume_usd_30d / 2_000_000.0) * 20.0
-        fee_penalty = min(8.0, fees_30d / 5000.0)
-        score = max(
-            0.0,
-            consistency_component
-            + frequency_component
-            + win_component
-            + pnl_component
-            + age_component
-            + volume_component
-            - fee_penalty,
+        roi_30d = float(period_30d["roi_pct"]) if period_30d["roi_pct"] is not None else 0.0
+        sharpe_30d = float(period_30d["sharpe"]) if period_30d["sharpe"] is not None else 0.0
+        sortino_30d = float(period_30d["sortino"]) if period_30d["sortino"] is not None else 0.0
+        drawdown_30d = (
+            float(period_30d["max_drawdown_pct"])
+            if period_30d["max_drawdown_pct"] is not None
+            else None
         )
+        volatility_30d = (
+            float(period_30d["roi_volatility_pct"])
+            if period_30d["roi_volatility_pct"] is not None
+            else None
+        )
+
+        roi_score = self._clamp(roi_30d, -50.0, 200.0) / 200.0
+        sharpe_score = self._clamp(sharpe_30d, -2.0, 5.0) / 5.0
+        sortino_score = self._clamp(sortino_30d, -2.0, 7.0) / 7.0
+        win_score = self._clamp(float(win_rate_30d or 0.0), 0.0, 1.0)
+        activity_score = (
+            min(1.0, trades_30d / 180.0) * 0.6
+            + min(1.0, active_days_30d / 30.0) * 0.4
+        )
+
+        drawdown_penalty = (
+            min(1.0, max(0.0, float(drawdown_30d)) / 35.0)
+            if drawdown_30d is not None
+            else 1.0
+        )
+        volatility_penalty = (
+            min(1.0, max(0.0, float(volatility_30d)) / 12.0)
+            if volatility_30d is not None
+            else 1.0
+        )
+        fee_penalty = min(1.0, fees_30d / 10_000.0)
+
+        weighted_base = (
+            (roi_score * 0.28)
+            + (sharpe_score * 0.18)
+            + (sortino_score * 0.16)
+            + (win_score * 0.20)
+            + (activity_score * 0.18)
+        )
+        weighted_penalty = (
+            (drawdown_penalty * 0.18)
+            + (volatility_penalty * 0.10)
+            + (fee_penalty * 0.04)
+        )
+        score = max(0.0, (weighted_base - weighted_penalty) * 100.0)
 
         stats_payload = {
             "vault_tvl": candidate["vault_tvl"],
@@ -595,13 +902,16 @@ class HyperliquidDiscoveryService:
             "age_probe_used": age_probe_used,
             "ledger_first_activity_time": ledger_first_activity_time,
             "score_components": {
-                "consistency": round(consistency_component, 4),
-                "frequency": round(frequency_component, 4),
-                "win": round(win_component, 4),
-                "pnl": round(pnl_component, 4),
-                "age": round(age_component, 4),
-                "volume": round(volume_component, 4),
-                "fee_penalty": round(fee_penalty, 4),
+                "roi_score": round(roi_score, 6),
+                "sharpe_score": round(sharpe_score, 6),
+                "sortino_score": round(sortino_score, 6),
+                "win_rate_score": round(win_score, 6),
+                "activity_score": round(activity_score, 6),
+                "drawdown_penalty": round(drawdown_penalty, 6),
+                "volatility_penalty": round(volatility_penalty, 6),
+                "fee_penalty": round(fee_penalty, 6),
+                "weighted_base": round(weighted_base, 6),
+                "weighted_penalty": round(weighted_penalty, 6),
             },
             "has_month_history": bool(age_days is not None and age_days >= self._config.min_age_days),
         }
@@ -622,6 +932,11 @@ class HyperliquidDiscoveryService:
             "realized_pnl_30d": realized_pnl_30d,
             "fees_30d": fees_30d,
             "win_rate_30d": win_rate_30d,
+            "max_drawdown_30d": drawdown_30d,
+            "roi_volatility_30d": volatility_30d,
+            "roi_30d": roi_30d,
+            "sharpe_30d": sharpe_30d,
+            "sortino_30d": sortino_30d,
             "long_ratio_30d": long_ratio_30d,
             "avg_notional_30d": avg_notional_30d,
             "max_notional_30d": max_notional_30d,
@@ -678,7 +993,14 @@ class HyperliquidDiscoveryService:
             skipped_trades_30d = 0
             skipped_active_days = 0
             skipped_trades_7d = 0
+            skipped_recent = 0
+            skipped_win_rate = 0
+            skipped_drawdown = 0
+            skipped_pnl = 0
             qualified_by_source: dict[str, set[str]] = {}
+            recent_cutoff_ms = now_ms - (
+                max(1, int(self._config.max_last_activity_minutes)) * 60 * 1000
+            )
             for item in metrics:
                 if not item:
                     continue
@@ -695,6 +1017,25 @@ class HyperliquidDiscoveryService:
                     continue
                 if item["trades_7d"] < self._config.min_trades_7d:
                     skipped_trades_7d += 1
+                    continue
+                if int(item.get("last_fill_time") or 0) < recent_cutoff_ms:
+                    skipped_recent += 1
+                    continue
+                win_rate_30d = item.get("win_rate_30d")
+                if win_rate_30d is None or float(win_rate_30d) < self._config.min_win_rate_30d:
+                    skipped_win_rate += 1
+                    continue
+                drawdown_30d = item.get("max_drawdown_30d")
+                if drawdown_30d is None or float(drawdown_30d) > self._config.max_drawdown_30d_pct:
+                    skipped_drawdown += 1
+                    continue
+                realized_pnl_30d = float(item.get("realized_pnl_30d") or 0.0)
+                if self._config.require_positive_pnl_30d:
+                    if realized_pnl_30d <= self._config.min_realized_pnl_30d:
+                        skipped_pnl += 1
+                        continue
+                elif realized_pnl_30d < self._config.min_realized_pnl_30d:
+                    skipped_pnl += 1
                     continue
 
                 qualified += 1
@@ -740,7 +1081,7 @@ class HyperliquidDiscoveryService:
                     keep_addresses=qualified_by_source.get(source, set()),
                 )
             self._logger.info(
-                "Discovery filtering summary qualified=%s upserted=%s pruned=%s skipped_age=%s skipped_trades30=%s skipped_active_days=%s skipped_trades7=%s",
+                "Discovery filtering summary qualified=%s upserted=%s pruned=%s skipped_age=%s skipped_trades30=%s skipped_active_days=%s skipped_trades7=%s skipped_recent=%s skipped_win_rate=%s skipped_drawdown=%s skipped_pnl=%s",
                 qualified,
                 upserted,
                 pruned,
@@ -748,6 +1089,10 @@ class HyperliquidDiscoveryService:
                 skipped_trades_30d,
                 skipped_active_days,
                 skipped_trades_7d,
+                skipped_recent,
+                skipped_win_rate,
+                skipped_drawdown,
+                skipped_pnl,
             )
 
             self._store.log_discovery_run(

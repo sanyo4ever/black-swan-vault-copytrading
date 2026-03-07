@@ -12,6 +12,8 @@ from bot.trader_store import (
     MODERATION_WHITELIST,
     PERMANENT_SUBSCRIPTION_EXPIRES_AT,
     STATUS_ACTIVE,
+    TIER_HOT,
+    TIER_WARM,
     TraderStore,
 )
 
@@ -165,11 +167,11 @@ class TraderStoreTests(unittest.TestCase):
                 avg_notional_30d=3125.0,
                 max_notional_30d=18000.0,
                 account_value=200000.0,
-                total_ntl_pos=50000.0,
-                total_margin_used=12000.0,
-                score=34.5,
-                stats_json="{}",
-            )
+                    total_ntl_pos=50000.0,
+                    total_margin_used=12000.0,
+                    score=34.5,
+                    stats_json='{"metrics_30d":{"max_drawdown_pct":8.5}}',
+                )
 
             universe_count = store.refresh_traders_universe_from_tracked(
                 min_age_days=30,
@@ -490,6 +492,96 @@ class TraderStoreTests(unittest.TestCase):
             )
             self.assertGreaterEqual(len(filtered), 1)
             self.assertTrue(any(item.address == addresses[0] for item in filtered))
+
+    def test_monitoring_pool_due_targets_and_poll_mark(self) -> None:
+        now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
+        addresses = [
+            "0x8888888888888888888888888888888888888881",
+            "0x8888888888888888888888888888888888888882",
+            "0x8888888888888888888888888888888888888883",
+        ]
+        with TraderStore(self.db_path) as store:
+            for idx, address in enumerate(addresses):
+                store.upsert_discovered(
+                    address=address,
+                    label=f"M{idx + 1}",
+                    source="hyperliquid_recent_trades",
+                    trades_24h=20 - (idx * 5),
+                    active_hours_24h=6,
+                    trades_7d=120 - (idx * 30),
+                    trades_30d=220 - (idx * 40),
+                    active_days_30d=20 - idx,
+                    first_fill_time=now_ms - (90 * 86_400_000),
+                    last_fill_time=now_ms - (idx * 90 * 60_000),
+                    age_days=90.0,
+                    volume_usd_30d=400000.0,
+                    realized_pnl_30d=5000.0,
+                    fees_30d=400.0,
+                    win_rate_30d=0.65,
+                    long_ratio_30d=0.5,
+                    avg_notional_30d=2000.0,
+                    max_notional_30d=10000.0,
+                    account_value=150000.0,
+                    total_ntl_pos=35000.0,
+                    total_margin_used=9000.0,
+                    score=80.0 - (idx * 10),
+                    stats_json='{"metrics_30d":{"max_drawdown_pct":10.0}}',
+                )
+
+            store.refresh_traders_universe_from_tracked(
+                min_age_days=30,
+                min_trades_30d=120,
+                min_active_days_30d=10,
+                min_win_rate_30d=0.52,
+                max_drawdown_30d_pct=25.0,
+                max_last_activity_minutes=720,
+                min_realized_pnl_30d=0.0,
+                min_score=0.0,
+                max_size=100,
+            )
+            stats = store.refresh_monitoring_pool(
+                hot_size=1,
+                warm_size=1,
+                hot_poll_seconds=60,
+                warm_poll_seconds=600,
+                cold_poll_seconds=3600,
+                hot_recency_minutes=60,
+                warm_recency_minutes=360,
+            )
+            self.assertEqual(stats["total"], 3)
+            self.assertEqual(stats["hot"], 1)
+            self.assertEqual(stats["warm"], 1)
+
+            store.create_subscription_with_session(
+                chat_id=123,
+                trader_address=addresses[0],
+                message_thread_id=10,
+                topic_name="A",
+                lifetime_hours=0,
+            )
+            store.create_subscription_with_session(
+                chat_id=123,
+                trader_address=addresses[1],
+                message_thread_id=11,
+                topic_name="B",
+                lifetime_hours=0,
+            )
+
+            due = store.list_due_monitoring_targets(limit=10, only_subscribed=True)
+            self.assertGreaterEqual(len(due), 2)
+            due_addresses = {item.address for item in due}
+            self.assertIn(addresses[0], due_addresses)
+            self.assertIn(addresses[1], due_addresses)
+            self.assertNotIn(addresses[2], due_addresses)
+            due_tiers = {item.tier for item in due}
+            self.assertTrue(TIER_HOT in due_tiers or TIER_WARM in due_tiers)
+
+            first = [item for item in due if item.address == addresses[0]]
+            self.assertTrue(first)
+            store.mark_monitoring_targets_polled(targets=[first[0]])
+
+            due_after = store.list_due_monitoring_targets(limit=10, only_subscribed=True)
+            self.assertNotIn(addresses[0], {item.address for item in due_after})
 
 
 if __name__ == "__main__":

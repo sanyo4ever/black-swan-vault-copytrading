@@ -5,7 +5,7 @@ from typing import Any
 
 from bot.models import TradeSignal
 from bot.sources.base import Source
-from bot.trader_store import TraderStore
+from bot.trader_store import MonitoringTarget, TraderStore, TIER_HOT
 
 
 class HyperliquidFuturesSource(Source):
@@ -60,25 +60,57 @@ class HyperliquidFuturesSource(Source):
         trader_limit = int(self.config.get("trader_limit", 20))
         max_fills_per_trader = int(self.config.get("max_fills_per_trader", 5))
         lookback_minutes = int(self.config.get("lookback_minutes", 90))
-
-        start_ms = int((datetime.now(tz=UTC).timestamp() - (lookback_minutes * 60)) * 1000)
+        delivery_only_subscribed = bool(self.config.get("delivery_only_subscribed", True))
 
         with TraderStore(self._database_dsn) as store:
-            traders = store.list_monitored_addresses(limit=trader_limit)
+            targets = store.list_due_monitoring_targets(
+                limit=trader_limit,
+                only_subscribed=delivery_only_subscribed,
+            )
+            targets_from_pool = True
+            if not targets:
+                fallback_addresses = (
+                    store.list_active_subscription_addresses(limit=trader_limit)
+                    if delivery_only_subscribed
+                    else store.list_monitored_addresses(limit=trader_limit)
+                )
+                targets = [
+                    MonitoringTarget(
+                        address=address,
+                        tier=TIER_HOT,
+                        poll_interval_seconds=max(60, lookback_minutes * 60),
+                        lookback_minutes=lookback_minutes,
+                    )
+                    for address in fallback_addresses
+                ]
+                targets_from_pool = False
+            if not targets:
+                return []
 
             signals: list[TradeSignal] = []
             last_fill_updates: list[tuple[str, int]] = []
+            polled_targets = []
             seen_ids: set[str] = set()
 
-            for trader in traders:
-                fills = await self._info(
-                    {
-                        "type": "userFillsByTime",
-                        "user": trader,
-                        "startTime": start_ms,
-                    }
-                )
+            now_ts = datetime.now(tz=UTC).timestamp()
+            for target in targets:
+                trader = target.address
+                dynamic_lookback = max(lookback_minutes, int(target.lookback_minutes or lookback_minutes))
+                start_ms = int((now_ts - (dynamic_lookback * 60)) * 1000)
+
+                try:
+                    fills = await self._info(
+                        {
+                            "type": "userFillsByTime",
+                            "user": trader,
+                            "startTime": start_ms,
+                        }
+                    )
+                except Exception:
+                    polled_targets.append(target)
+                    continue
                 if not isinstance(fills, list):
+                    polled_targets.append(target)
                     continue
 
                 newest_fill = None
@@ -132,8 +164,11 @@ class HyperliquidFuturesSource(Source):
 
                 if newest_fill:
                     last_fill_updates.append((trader, newest_fill))
+                polled_targets.append(target)
 
             if last_fill_updates:
                 store.touch_last_fill_times(last_fill_updates)
+            if polled_targets and targets_from_pool:
+                store.mark_monitoring_targets_polled(targets=polled_targets)
 
         return signals

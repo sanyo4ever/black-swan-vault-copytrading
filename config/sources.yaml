@@ -5,9 +5,10 @@ sources:
     type: hyperliquid_futures
     name: Hyperliquid Futures
     enabled: true
-    trader_limit: 20
+    trader_limit: 120
     max_fills_per_trader: 5
     lookback_minutes: 90
+    delivery_only_subscribed: true
 
   - id: elite_rss_signals
     type: rss

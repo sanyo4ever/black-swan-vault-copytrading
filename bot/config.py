@@ -24,11 +24,20 @@ class Settings:
     discovery_min_age_days: int
     discovery_min_trades_30d: int
     discovery_min_active_days_30d: int
+    discovery_min_win_rate_30d: float
+    discovery_max_drawdown_30d_pct: float
+    discovery_max_last_activity_minutes: int
+    discovery_min_realized_pnl_30d: float
+    discovery_require_positive_pnl_30d: bool
     discovery_min_trades_7d: int
     discovery_window_hours: int
     discovery_concurrency: int
     discovery_fill_cap_hint: int
     discovery_age_probe_enabled: bool
+    discovery_seed_addresses: tuple[str, ...]
+    nansen_api_url: str
+    nansen_api_key: str
+    nansen_candidate_limit: int
     discovery_interval_seconds: int
     admin_panel_username: str
     admin_panel_password: str
@@ -36,13 +45,25 @@ class Settings:
     universe_interval_seconds: int
     universe_min_age_days: int
     universe_min_trades_30d: int
+    universe_min_active_days_30d: int
     universe_min_win_rate_30d: float
+    universe_max_drawdown_30d_pct: float
+    universe_max_last_activity_minutes: int
     universe_min_realized_pnl_30d: float
     universe_min_score: float
     universe_max_size: int
     live_top100_interval_seconds: int
     live_top100_active_window_minutes: int
     live_top100_size: int
+    monitor_hot_size: int
+    monitor_warm_size: int
+    monitor_hot_poll_seconds: int
+    monitor_warm_poll_seconds: int
+    monitor_cold_poll_seconds: int
+    monitor_hot_recency_minutes: int
+    monitor_warm_recency_minutes: int
+    monitor_max_targets_per_cycle: int
+    monitor_delivery_only_subscribed: bool
     log_level: str
     log_format: str
     log_directory: str
@@ -77,6 +98,15 @@ def _get_log_format() -> str:
     if raw in {"text", "json"}:
         return raw
     return "text"
+
+
+def _get_csv_env(name: str) -> tuple[str, ...]:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return ()
+    values = [item.strip() for item in raw.split(",")]
+    normalized = [item for item in values if item]
+    return tuple(normalized)
 
 
 def load_settings(
@@ -115,23 +145,48 @@ def load_settings(
         hyperliquid_info_url=os.getenv("HYPERLIQUID_INFO_URL", "https://api.hyperliquid.xyz/info"),
         discovery_candidate_limit=int(os.getenv("DISCOVERY_CANDIDATE_LIMIT", "60")),
         discovery_min_age_days=int(os.getenv("DISCOVERY_MIN_AGE_DAYS", "30")),
-        discovery_min_trades_30d=int(os.getenv("DISCOVERY_MIN_TRADES_30D", "10")),
-        discovery_min_active_days_30d=int(os.getenv("DISCOVERY_MIN_ACTIVE_DAYS_30D", "4")),
+        discovery_min_trades_30d=int(os.getenv("DISCOVERY_MIN_TRADES_30D", "120")),
+        discovery_min_active_days_30d=int(os.getenv("DISCOVERY_MIN_ACTIVE_DAYS_30D", "12")),
+        discovery_min_win_rate_30d=float(os.getenv("DISCOVERY_MIN_WIN_RATE_30D", "0.52")),
+        discovery_max_drawdown_30d_pct=float(
+            os.getenv("DISCOVERY_MAX_DRAWDOWN_30D_PCT", "25.0")
+        ),
+        discovery_max_last_activity_minutes=int(
+            os.getenv("DISCOVERY_MAX_LAST_ACTIVITY_MINUTES", "60")
+        ),
+        discovery_min_realized_pnl_30d=float(
+            os.getenv("DISCOVERY_MIN_REALIZED_PNL_30D", "0.0")
+        ),
+        discovery_require_positive_pnl_30d=_get_bool_env(
+            "DISCOVERY_REQUIRE_POSITIVE_PNL_30D",
+            True,
+        ),
         discovery_min_trades_7d=int(os.getenv("DISCOVERY_MIN_TRADES_7D", "1")),
         discovery_window_hours=int(os.getenv("DISCOVERY_WINDOW_HOURS", "24")),
         discovery_concurrency=int(os.getenv("DISCOVERY_CONCURRENCY", "6")),
         discovery_fill_cap_hint=int(os.getenv("DISCOVERY_FILL_CAP_HINT", "1900")),
         discovery_age_probe_enabled=_get_bool_env("DISCOVERY_AGE_PROBE_ENABLED", True),
+        discovery_seed_addresses=_get_csv_env("DISCOVERY_SEED_ADDRESSES"),
+        nansen_api_url=os.getenv("NANSEN_API_URL", "https://api.nansen.ai"),
+        nansen_api_key=os.getenv("NANSEN_API_KEY", "").strip(),
+        nansen_candidate_limit=int(os.getenv("NANSEN_CANDIDATE_LIMIT", "60")),
         discovery_interval_seconds=int(os.getenv("DISCOVERY_INTERVAL_SECONDS", "900")),
         admin_panel_username=admin_panel_username,
         admin_panel_password=admin_panel_password,
         subscription_lifetime_hours=int(os.getenv("SUBSCRIPTION_LIFETIME_HOURS", "0")),
         universe_interval_seconds=int(os.getenv("UNIVERSE_INTERVAL_SECONDS", "300")),
         universe_min_age_days=int(os.getenv("UNIVERSE_MIN_AGE_DAYS", "30")),
-        universe_min_trades_30d=int(os.getenv("UNIVERSE_MIN_TRADES_30D", "10")),
-        universe_min_win_rate_30d=float(os.getenv("UNIVERSE_MIN_WIN_RATE_30D", "0.0")),
+        universe_min_trades_30d=int(os.getenv("UNIVERSE_MIN_TRADES_30D", "120")),
+        universe_min_active_days_30d=int(os.getenv("UNIVERSE_MIN_ACTIVE_DAYS_30D", "12")),
+        universe_min_win_rate_30d=float(os.getenv("UNIVERSE_MIN_WIN_RATE_30D", "0.52")),
+        universe_max_drawdown_30d_pct=float(
+            os.getenv("UNIVERSE_MAX_DRAWDOWN_30D_PCT", "25.0")
+        ),
+        universe_max_last_activity_minutes=int(
+            os.getenv("UNIVERSE_MAX_LAST_ACTIVITY_MINUTES", "60")
+        ),
         universe_min_realized_pnl_30d=float(
-            os.getenv("UNIVERSE_MIN_REALIZED_PNL_30D", "0.0")
+            os.getenv("UNIVERSE_MIN_REALIZED_PNL_30D", "0.000001")
         ),
         universe_min_score=float(os.getenv("UNIVERSE_MIN_SCORE", "0.0")),
         universe_max_size=int(os.getenv("UNIVERSE_MAX_SIZE", "3000")),
@@ -140,6 +195,18 @@ def load_settings(
             os.getenv("LIVE_TOP100_ACTIVE_WINDOW_MINUTES", "60")
         ),
         live_top100_size=int(os.getenv("LIVE_TOP100_SIZE", "100")),
+        monitor_hot_size=int(os.getenv("MONITOR_HOT_SIZE", "100")),
+        monitor_warm_size=int(os.getenv("MONITOR_WARM_SIZE", "400")),
+        monitor_hot_poll_seconds=int(os.getenv("MONITOR_HOT_POLL_SECONDS", "60")),
+        monitor_warm_poll_seconds=int(os.getenv("MONITOR_WARM_POLL_SECONDS", "600")),
+        monitor_cold_poll_seconds=int(os.getenv("MONITOR_COLD_POLL_SECONDS", "3600")),
+        monitor_hot_recency_minutes=int(os.getenv("MONITOR_HOT_RECENCY_MINUTES", "60")),
+        monitor_warm_recency_minutes=int(os.getenv("MONITOR_WARM_RECENCY_MINUTES", "360")),
+        monitor_max_targets_per_cycle=int(os.getenv("MONITOR_MAX_TARGETS_PER_CYCLE", "120")),
+        monitor_delivery_only_subscribed=_get_bool_env(
+            "MONITOR_DELIVERY_ONLY_SUBSCRIBED",
+            True,
+        ),
         log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
         log_format=_get_log_format(),
         log_directory=os.getenv("LOG_DIRECTORY", "").strip(),

@@ -32,10 +32,12 @@ async def _run() -> None:
     logger = logging.getLogger("cryptoinsider.top100-worker")
     interval_seconds = args.interval_seconds or settings.live_top100_interval_seconds
     logger.info(
-        "Service started interval_seconds=%s active_window_minutes=%s top_size=%s",
+        "Service started interval_seconds=%s active_window_minutes=%s top_size=%s hot_size=%s warm_size=%s",
         interval_seconds,
         settings.live_top100_active_window_minutes,
         settings.live_top100_size,
+        settings.monitor_hot_size,
+        settings.monitor_warm_size,
     )
 
     cycle = 0
@@ -52,10 +54,23 @@ async def _run() -> None:
                         max_rows=settings.live_top100_size,
                         active_window_minutes=settings.live_top100_active_window_minutes,
                     )
+                    monitoring_stats = store.refresh_monitoring_pool(
+                        hot_size=settings.monitor_hot_size,
+                        warm_size=settings.monitor_warm_size,
+                        hot_poll_seconds=settings.monitor_hot_poll_seconds,
+                        warm_poll_seconds=settings.monitor_warm_poll_seconds,
+                        cold_poll_seconds=settings.monitor_cold_poll_seconds,
+                        hot_recency_minutes=settings.monitor_hot_recency_minutes,
+                        warm_recency_minutes=settings.monitor_warm_recency_minutes,
+                    )
                 logger.info(
-                    "Catalog refresh complete: size=%s | Top100 refresh complete: size=%s",
+                    "Catalog refresh complete: size=%s | Top100 refresh complete: size=%s | Monitoring pool total=%s hot=%s warm=%s cold=%s",
                     catalog_size,
                     count,
+                    monitoring_stats.get("total", 0),
+                    monitoring_stats.get("hot", 0),
+                    monitoring_stats.get("warm", 0),
+                    monitoring_stats.get("cold", 0),
                 )
             except Exception as exc:
                 logger.exception("Top100 cycle failed: %s", exc)

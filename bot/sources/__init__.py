@@ -12,8 +12,14 @@ def build_source(source_cfg: dict, *, http_session, settings):
     if source_type == "json_api":
         return JsonApiSource(source_cfg, http_session=http_session)
     if source_type == "hyperliquid_futures":
+        merged_cfg = dict(source_cfg)
+        merged_cfg.setdefault("trader_limit", settings.monitor_max_targets_per_cycle)
+        merged_cfg.setdefault(
+            "delivery_only_subscribed",
+            settings.monitor_delivery_only_subscribed,
+        )
         return HyperliquidFuturesSource(
-            source_cfg,
+            merged_cfg,
             http_session=http_session,
             database_dsn=settings.database_dsn,
             info_url=settings.hyperliquid_info_url,

@@ -32,10 +32,14 @@ async def _run() -> None:
     logger = logging.getLogger("cryptoinsider.universe-worker")
     interval_seconds = args.interval_seconds or settings.universe_interval_seconds
     logger.info(
-        "Service started interval_seconds=%s min_age_days=%s min_trades_30d=%s",
+        "Service started interval_seconds=%s min_age_days=%s min_trades_30d=%s min_active_days_30d=%s min_win_rate_30d=%s max_drawdown_30d_pct=%s max_last_activity_minutes=%s",
         interval_seconds,
         settings.universe_min_age_days,
         settings.universe_min_trades_30d,
+        settings.universe_min_active_days_30d,
+        settings.universe_min_win_rate_30d,
+        settings.universe_max_drawdown_30d_pct,
+        settings.universe_max_last_activity_minutes,
     )
 
     cycle = 0
@@ -48,7 +52,10 @@ async def _run() -> None:
                     universe_size = store.refresh_traders_universe_from_tracked(
                         min_age_days=settings.universe_min_age_days,
                         min_trades_30d=settings.universe_min_trades_30d,
+                        min_active_days_30d=settings.universe_min_active_days_30d,
                         min_win_rate_30d=settings.universe_min_win_rate_30d,
+                        max_drawdown_30d_pct=settings.universe_max_drawdown_30d_pct,
+                        max_last_activity_minutes=settings.universe_max_last_activity_minutes,
                         min_realized_pnl_30d=settings.universe_min_realized_pnl_30d,
                         min_score=settings.universe_min_score,
                         max_size=settings.universe_max_size,
