@@ -402,6 +402,43 @@ def _render_public_directory(
             "</div>"
         )
 
+    filter_values = {
+        "q": str(request.query.get("q", "")).strip(),
+        "min_age_days": str(request.query.get("min_age_days", "")).strip(),
+        "min_trades_30d": str(request.query.get("min_trades_30d", "")).strip(),
+        "min_active_days_30d": str(request.query.get("min_active_days_30d", "")).strip(),
+        "min_win_rate_30d": str(request.query.get("min_win_rate_30d", "")).strip(),
+        "min_realized_pnl_30d": str(request.query.get("min_realized_pnl_30d", "")).strip(),
+        "min_score": str(request.query.get("min_score", "")).strip(),
+        "min_activity_score": str(request.query.get("min_activity_score", "")).strip(),
+        "active_within_minutes": str(request.query.get("active_within_minutes", "")).strip(),
+    }
+    sort_selected = _normalize_catalog_sort(request.query.get("sort"))
+    sort_options = [
+        ("activity_desc", "Activity score"),
+        ("recent_desc", "Recent trade time"),
+        ("score_desc", "Quality score"),
+        ("pnl_desc", "PnL 30d"),
+        ("win_desc", "Win rate 30d"),
+        ("trades_desc", "Trades 30d"),
+        ("age_desc", "Age (days)"),
+    ]
+    sort_options_html = "".join(
+        (
+            f"<option value='{value}'{' selected' if sort_selected == value else ''}>"
+            f"{escape(label)}</option>"
+        )
+        for value, label in sort_options
+    )
+    active_filter_count = sum(1 for value in filter_values.values() if value)
+    if sort_selected != "activity_desc":
+        active_filter_count += 1
+    filter_state_label = (
+        f"{active_filter_count} active filter{'s' if active_filter_count != 1 else ''}"
+        if active_filter_count
+        else "No active filters"
+    )
+
     origin = _request_origin(request)
     canonical_url = f"{origin}/"
     current_url = f"{origin}{request.path_qs}"
@@ -608,16 +645,50 @@ def _render_public_directory(
     }}
     .hero-btn:hover {{ background:rgba(255,159,26,.2); }}
     .hero-thanks {{ margin-top:10px; color:#d5a556; font-size:12px; }}
-    .filter-form {{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; }}
-    .filter-form input,.filter-form select {{
+    .filters-panel {{ display:grid; gap:12px; }}
+    .filters-head {{
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      gap:10px;
+      flex-wrap:wrap;
+    }}
+    .filters-title {{ margin:0; font-size:16px; font-weight:700; }}
+    .filters-state {{
+      border:1px solid #3f3a27;
+      border-radius:999px;
+      padding:5px 10px;
+      color:#ffc66a;
+      background:rgba(255,159,26,.1);
+      font-size:12px;
+      font-weight:600;
+    }}
+    .filters-note {{ color:var(--muted); font-size:12px; line-height:1.45; }}
+    .filter-form {{ display:grid; gap:10px; }}
+    .filter-grid {{
+      display:grid;
+      gap:10px;
+      grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+    }}
+    .filter-item {{ display:grid; gap:6px; }}
+    .filter-item label {{
+      color:#aab3c7;
+      font-size:12px;
+      letter-spacing:.15px;
+      font-weight:600;
+    }}
+    .filter-item input,.filter-item select {{
+      width:100%;
       background:#0b1018;
       border:1px solid #2f3442;
       color:var(--text);
-      border-radius:999px;
+      border-radius:12px;
       padding:9px 12px;
-      font-size:12px;
+      font-size:13px;
     }}
-    .filter-form button {{
+    .filter-item input::placeholder {{ color:#6f7c99; }}
+    .filter-actions {{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }}
+    .filter-apply {{
       background:rgba(255,159,26,.16);
       border:1px solid #8a5a18;
       color:#ffbf54;
@@ -627,7 +698,18 @@ def _render_public_directory(
       font-weight:700;
       cursor:pointer;
     }}
-    .filter-form button:hover {{ background:rgba(255,159,26,.25); }}
+    .filter-apply:hover {{ background:rgba(255,159,26,.25); }}
+    .filter-reset {{
+      display:inline-block;
+      text-decoration:none;
+      border:1px solid #3a4252;
+      color:#d6dde9;
+      border-radius:999px;
+      padding:8px 13px;
+      font-size:12px;
+      background:#10141d;
+    }}
+    .filter-reset:hover {{ background:#161c27; }}
     .btn-link {{
       display:inline-block;
       background:#10141d;
@@ -752,27 +834,65 @@ def _render_public_directory(
     </div>
 
     <div class='card'>
-      <form class='filter-form' method='get' action='/'>
-        <input name='q' placeholder='search label/address' value='{escape(str(request.query.get("q", "")))}' />
-        <input name='min_age_days' type='number' step='1' min='0' value='{escape(str(request.query.get("min_age_days", "0")))}' placeholder='min age days' />
-        <input name='min_trades_30d' type='number' step='1' min='0' value='{escape(str(request.query.get("min_trades_30d", "0")))}' placeholder='min trades 30d' />
-        <input name='min_active_days_30d' type='number' step='1' min='0' value='{escape(str(request.query.get("min_active_days_30d", "0")))}' placeholder='min active days 30d' />
-        <input name='min_win_rate_30d' type='number' step='0.1' min='0' max='100' value='{escape(str(request.query.get("min_win_rate_30d", "0")))}' placeholder='min winrate %' />
-        <input name='min_realized_pnl_30d' type='number' step='0.01' value='{escape(str(request.query.get("min_realized_pnl_30d", "-1000000000")))}' placeholder='min pnl 30d' />
-        <input name='min_score' type='number' step='0.01' value='{escape(str(request.query.get("min_score", "0")))}' placeholder='min score' />
-        <input name='min_activity_score' type='number' step='0.01' value='{escape(str(request.query.get("min_activity_score", "0")))}' placeholder='min activity score' />
-        <input name='active_within_minutes' type='number' step='1' min='0' value='{escape(str(request.query.get("active_within_minutes", "0")))}' placeholder='active within minutes' />
-        <select name='sort'>
-          <option value='activity_desc'>activity desc</option>
-          <option value='recent_desc'>recent desc</option>
-          <option value='score_desc'>score desc</option>
-          <option value='pnl_desc'>pnl desc</option>
-          <option value='win_desc'>win rate desc</option>
-          <option value='trades_desc'>trades desc</option>
-          <option value='age_desc'>age desc</option>
-        </select>
-        <button type='submit'>Apply Filters</button>
-      </form>
+      <div class='filters-panel'>
+        <div class='filters-head'>
+          <h2 class='filters-title'>Trader Filters</h2>
+          <span class='filters-state'>{escape(filter_state_label)}</span>
+        </div>
+        <p class='filters-note'>
+          Leave any field empty to ignore that filter. Numeric values are minimum thresholds.
+        </p>
+        <form class='filter-form' method='get' action='/'>
+          <div class='filter-grid'>
+            <div class='filter-item'>
+              <label for='f-q'>Search</label>
+              <input id='f-q' name='q' value='{escape(filter_values["q"])}' placeholder='Label, wallet, or source' />
+            </div>
+            <div class='filter-item'>
+              <label for='f-age'>Min Age (days)</label>
+              <input id='f-age' name='min_age_days' type='number' step='1' min='0' value='{escape(filter_values["min_age_days"])}' placeholder='e.g. 30' />
+            </div>
+            <div class='filter-item'>
+              <label for='f-trades30'>Min Trades (30d)</label>
+              <input id='f-trades30' name='min_trades_30d' type='number' step='1' min='0' value='{escape(filter_values["min_trades_30d"])}' placeholder='e.g. 120' />
+            </div>
+            <div class='filter-item'>
+              <label for='f-active-days'>Min Active Days (30d)</label>
+              <input id='f-active-days' name='min_active_days_30d' type='number' step='1' min='0' value='{escape(filter_values["min_active_days_30d"])}' placeholder='e.g. 12' />
+            </div>
+            <div class='filter-item'>
+              <label for='f-winrate'>Min Win Rate (30d, %)</label>
+              <input id='f-winrate' name='min_win_rate_30d' type='number' step='0.1' min='0' max='100' value='{escape(filter_values["min_win_rate_30d"])}' placeholder='e.g. 55' />
+            </div>
+            <div class='filter-item'>
+              <label for='f-pnl'>Min Realized PnL (30d, USDT)</label>
+              <input id='f-pnl' name='min_realized_pnl_30d' type='number' step='0.01' value='{escape(filter_values["min_realized_pnl_30d"])}' placeholder='e.g. 500' />
+            </div>
+            <div class='filter-item'>
+              <label for='f-score'>Min Quality Score</label>
+              <input id='f-score' name='min_score' type='number' step='0.01' value='{escape(filter_values["min_score"])}' placeholder='e.g. 2.5' />
+            </div>
+            <div class='filter-item'>
+              <label for='f-activity'>Min Activity Score</label>
+              <input id='f-activity' name='min_activity_score' type='number' step='0.01' value='{escape(filter_values["min_activity_score"])}' placeholder='e.g. 1.2' />
+            </div>
+            <div class='filter-item'>
+              <label for='f-recent'>Active Within (minutes)</label>
+              <input id='f-recent' name='active_within_minutes' type='number' step='1' min='0' value='{escape(filter_values["active_within_minutes"])}' placeholder='e.g. 60' />
+            </div>
+            <div class='filter-item'>
+              <label for='f-sort'>Sort By</label>
+              <select id='f-sort' name='sort'>
+                {sort_options_html}
+              </select>
+            </div>
+          </div>
+          <div class='filter-actions'>
+            <button class='filter-apply' type='submit'>Apply Filters</button>
+            <a class='filter-reset' href='/'>Reset</a>
+          </div>
+        </form>
+      </div>
     </div>
 
     <div class='card'>
@@ -1097,27 +1217,46 @@ async def subscriber_directory(request: web.Request) -> web.Response:
         value = request.query.get(name)
         if value is None or str(value).strip() == "":
             return default
-        return _to_float(value, default if default is not None else 0.0)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
 
     def _opt_int(name: str, default: int | None = None) -> int | None:
         value = request.query.get(name)
         if value is None or str(value).strip() == "":
             return default
-        return _to_int(value, default if default is not None else 0)
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    min_age_days = _opt_float("min_age_days")
+    min_trades_30d = _opt_int("min_trades_30d")
+    min_active_days_30d = _opt_int("min_active_days_30d")
+    min_win_rate_30d_pct = _opt_float("min_win_rate_30d")
+    min_realized_pnl_30d = _opt_float("min_realized_pnl_30d")
+    min_score = _opt_float("min_score")
+    min_activity_score = _opt_float("min_activity_score")
+    active_within_minutes = _opt_int("active_within_minutes")
 
     with TraderStore(settings.database_dsn) as store:
         traders = store.list_catalog_traders(
             limit=limit + 1,
             q=str(request.query.get("q", "")),
             status=str(request.query.get("status", "ALL")).upper(),
-            min_age_days=_opt_float("min_age_days", 0.0),
-            min_trades_30d=_opt_int("min_trades_30d", 0),
-            min_active_days_30d=_opt_int("min_active_days_30d", 0),
-            min_win_rate_30d=(_opt_float("min_win_rate_30d", 0.0) or 0.0) / 100.0,
-            min_realized_pnl_30d=_opt_float("min_realized_pnl_30d", -10**9),
-            min_score=_opt_float("min_score", 0.0),
-            min_activity_score=_opt_float("min_activity_score", 0.0),
-            active_within_minutes=_opt_int("active_within_minutes", 0),
+            min_age_days=min_age_days,
+            min_trades_30d=min_trades_30d,
+            min_active_days_30d=min_active_days_30d,
+            min_win_rate_30d=(
+                (min_win_rate_30d_pct / 100.0)
+                if min_win_rate_30d_pct is not None
+                else None
+            ),
+            min_realized_pnl_30d=min_realized_pnl_30d,
+            min_score=min_score,
+            min_activity_score=min_activity_score,
+            active_within_minutes=active_within_minutes,
             sort_by=sort_by,
             cursor_value=cursor[0] if cursor else None,
             cursor_address=cursor[1] if cursor else None,
