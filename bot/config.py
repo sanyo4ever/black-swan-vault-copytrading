@@ -64,6 +64,14 @@ class Settings:
     monitor_warm_recency_minutes: int
     monitor_max_targets_per_cycle: int
     monitor_delivery_only_subscribed: bool
+    delivery_monitor_base_poll_seconds: int
+    delivery_monitor_min_poll_seconds: int
+    delivery_monitor_max_poll_seconds: int
+    delivery_monitor_priority_recency_minutes: int
+    delivery_monitor_safety_lookback_seconds: int
+    delivery_monitor_bootstrap_lookback_minutes: int
+    delivery_monitor_max_traders_per_cycle: int
+    delivery_monitor_http_concurrency: int
     log_level: str
     log_format: str
     log_directory: str
@@ -206,6 +214,30 @@ def load_settings(
         monitor_delivery_only_subscribed=_get_bool_env(
             "MONITOR_DELIVERY_ONLY_SUBSCRIBED",
             True,
+        ),
+        delivery_monitor_base_poll_seconds=int(
+            os.getenv("DELIVERY_MONITOR_BASE_POLL_SECONDS", "60")
+        ),
+        delivery_monitor_min_poll_seconds=int(
+            os.getenv("DELIVERY_MONITOR_MIN_POLL_SECONDS", "20")
+        ),
+        delivery_monitor_max_poll_seconds=int(
+            os.getenv("DELIVERY_MONITOR_MAX_POLL_SECONDS", "180")
+        ),
+        delivery_monitor_priority_recency_minutes=int(
+            os.getenv("DELIVERY_MONITOR_PRIORITY_RECENCY_MINUTES", "120")
+        ),
+        delivery_monitor_safety_lookback_seconds=int(
+            os.getenv("DELIVERY_MONITOR_SAFETY_LOOKBACK_SECONDS", "90")
+        ),
+        delivery_monitor_bootstrap_lookback_minutes=int(
+            os.getenv("DELIVERY_MONITOR_BOOTSTRAP_LOOKBACK_MINUTES", "180")
+        ),
+        delivery_monitor_max_traders_per_cycle=int(
+            os.getenv("DELIVERY_MONITOR_MAX_TRADERS_PER_CYCLE", "120")
+        ),
+        delivery_monitor_http_concurrency=int(
+            os.getenv("DELIVERY_MONITOR_HTTP_CONCURRENCY", "8")
         ),
         log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
         log_format=_get_log_format(),

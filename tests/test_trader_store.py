@@ -583,6 +583,127 @@ class TraderStoreTests(unittest.TestCase):
             due_after = store.list_due_monitoring_targets(limit=10, only_subscribed=True)
             self.assertNotIn(addresses[0], {item.address for item in due_after})
 
+    def test_delivery_monitor_state_refresh_and_polling(self) -> None:
+        now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
+        active = "0x9999999999999999999999999999999999999991"
+        passive = "0x9999999999999999999999999999999999999992"
+        with TraderStore(self.db_path) as store:
+            store.upsert_discovered(
+                address=active,
+                label="Active",
+                source="hyperliquid_recent_trades",
+                trades_24h=25,
+                active_hours_24h=8,
+                trades_7d=140,
+                trades_30d=260,
+                active_days_30d=23,
+                first_fill_time=now_ms - (120 * 86_400_000),
+                last_fill_time=now_ms - (5 * 60_000),
+                age_days=120.0,
+                volume_usd_30d=550000.0,
+                realized_pnl_30d=12000.0,
+                fees_30d=900.0,
+                win_rate_30d=0.66,
+                long_ratio_30d=0.52,
+                avg_notional_30d=2300.0,
+                max_notional_30d=15000.0,
+                account_value=240000.0,
+                total_ntl_pos=45000.0,
+                total_margin_used=12000.0,
+                score=78.0,
+                stats_json='{"metrics_30d":{"max_drawdown_pct":9.0}}',
+            )
+            store.upsert_discovered(
+                address=passive,
+                label="Passive",
+                source="hyperliquid_recent_trades",
+                trades_24h=4,
+                active_hours_24h=2,
+                trades_7d=30,
+                trades_30d=130,
+                active_days_30d=13,
+                first_fill_time=now_ms - (90 * 86_400_000),
+                last_fill_time=now_ms - (240 * 60_000),
+                age_days=90.0,
+                volume_usd_30d=130000.0,
+                realized_pnl_30d=2500.0,
+                fees_30d=350.0,
+                win_rate_30d=0.55,
+                long_ratio_30d=0.47,
+                avg_notional_30d=1500.0,
+                max_notional_30d=9000.0,
+                account_value=90000.0,
+                total_ntl_pos=18000.0,
+                total_margin_used=5000.0,
+                score=42.0,
+                stats_json='{"metrics_30d":{"max_drawdown_pct":12.0}}',
+            )
+
+            store.create_subscription_with_session(
+                chat_id=101,
+                trader_address=active,
+                message_thread_id=31,
+                topic_name="A",
+                lifetime_hours=0,
+            )
+            store.create_subscription_with_session(
+                chat_id=102,
+                trader_address=active,
+                message_thread_id=32,
+                topic_name="A2",
+                lifetime_hours=0,
+            )
+            store.create_subscription_with_session(
+                chat_id=103,
+                trader_address=passive,
+                message_thread_id=33,
+                topic_name="P",
+                lifetime_hours=0,
+            )
+
+            stats = store.refresh_delivery_monitor_state(
+                base_poll_seconds=60,
+                min_poll_seconds=20,
+                max_poll_seconds=180,
+                priority_recency_minutes=120,
+                safety_lookback_seconds=90,
+                bootstrap_lookback_minutes=180,
+                max_targets_per_cycle=10,
+            )
+            self.assertEqual(stats["total"], 2)
+            self.assertEqual(stats["over_capacity"], 0)
+
+            due = store.list_due_delivery_monitor_targets(limit=10)
+            self.assertEqual(len(due), 2)
+            active_target = [item for item in due if item.address == active][0]
+            passive_target = [item for item in due if item.address == passive][0]
+            self.assertGreater(active_target.priority_score, passive_target.priority_score)
+            self.assertGreaterEqual(active_target.subscriber_count, 2)
+
+            store.mark_delivery_monitor_polled(
+                address=active,
+                next_poll_seconds=120,
+                newest_fill_time=now_ms + 1000,
+                had_new_fill=True,
+                error=None,
+            )
+            due_after = store.list_due_delivery_monitor_targets(limit=10)
+            self.assertNotIn(active, {item.address for item in due_after})
+
+            row = store._connection.execute(
+                """
+                SELECT last_seen_fill_time, idle_cycles, consecutive_errors
+                FROM delivery_monitor_state
+                WHERE address = ?
+                """,
+                (active,),
+            ).fetchone()
+            self.assertIsNotNone(row)
+            assert row is not None
+            self.assertEqual(int(row[0]), now_ms + 1000)
+            self.assertEqual(int(row[1]), 0)
+            self.assertEqual(int(row[2]), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

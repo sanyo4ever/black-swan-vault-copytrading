@@ -53,6 +53,22 @@ Most copytrading tools are closed, expensive, or difficult to self-host. Black S
   - COLD (slow)
 - Demand-only delivery mode:
   - scans and posts signals only for traders with active subscriptions
+  - adaptive polling scheduler keeps API load bounded while prioritizing demanded traders
+
+## Subscriber Delivery Architecture
+
+The signal pipeline is optimized for active subscriptions first:
+
+- `delivery_monitor_state` is refreshed from active `subscriptions + delivery_sessions`
+- each trader gets adaptive `poll_interval_seconds` based on:
+  - active subscriber count
+  - recency of latest known activity
+  - quality score
+- poster scans only due targets (`next_poll_at <= now`) with strict cycle limits
+- each trader keeps a watermark (`last_seen_fill_time`) to fetch incrementally and avoid heavy back-scans
+- on errors, poll interval backs off automatically; on new fills, polling tightens
+
+This gives low latency for requested traders while preventing uncontrolled CPU/API load growth.
 
 ## Architecture (high level)
 
@@ -104,6 +120,17 @@ python main.py
 python subscriber_bot.py
 ```
 
+Delivery-monitor tuning (optional `.env`):
+
+```env
+DELIVERY_MONITOR_BASE_POLL_SECONDS=60
+DELIVERY_MONITOR_MIN_POLL_SECONDS=20
+DELIVERY_MONITOR_MAX_POLL_SECONDS=180
+DELIVERY_MONITOR_PRIORITY_RECENCY_MINUTES=120
+DELIVERY_MONITOR_MAX_TRADERS_PER_CYCLE=120
+DELIVERY_MONITOR_HTTP_CONCURRENCY=8
+```
+
 ## Public and Admin URLs
 
 - `/` -> public trader catalog
@@ -119,6 +146,7 @@ Core tables:
 - `traders_universe`: filtered qualified pool
 - `traders_top100_live`: rolling active shortlist
 - `trader_monitoring_pool`: HOT/WARM/COLD due-scan scheduling
+- `delivery_monitor_state`: subscription-driven adaptive scheduler + per-trader watermark state
 - `catalog_current`: denormalized public catalog view
 - `subscriptions`, `delivery_sessions`: Telegram delivery lifecycle
 - `discovery_runs`: discovery run observability

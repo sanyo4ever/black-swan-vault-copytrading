@@ -181,6 +181,19 @@ class MonitoringTarget:
     lookback_minutes: int
 
 
+@dataclass(frozen=True)
+class DeliveryMonitorTarget:
+    address: str
+    subscriber_count: int
+    priority_score: float
+    poll_interval_seconds: int
+    safety_lookback_seconds: int
+    bootstrap_lookback_minutes: int
+    last_seen_fill_time: int | None
+    idle_cycles: int
+    consecutive_errors: int
+
+
 class TraderStore:
     _bootstrap_lock = Lock()
     _bootstrapped_databases: set[str] = set()
@@ -688,6 +701,39 @@ class TraderStore:
         )
         self._execute(
             """
+            CREATE TABLE IF NOT EXISTS delivery_monitor_state (
+                address TEXT PRIMARY KEY,
+                subscriber_count INTEGER NOT NULL DEFAULT 0,
+                priority_score REAL NOT NULL DEFAULT 0,
+                poll_interval_seconds INTEGER NOT NULL DEFAULT 60,
+                safety_lookback_seconds INTEGER NOT NULL DEFAULT 90,
+                bootstrap_lookback_minutes INTEGER NOT NULL DEFAULT 180,
+                last_seen_fill_time INTEGER,
+                last_polled_at TEXT,
+                next_poll_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                idle_cycles INTEGER NOT NULL DEFAULT 0,
+                consecutive_errors INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                refreshed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(address) REFERENCES tracked_traders(address) ON DELETE CASCADE
+            )
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_delivery_monitor_state_due
+            ON delivery_monitor_state(next_poll_at, priority_score DESC)
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_delivery_monitor_state_priority
+            ON delivery_monitor_state(priority_score DESC, subscriber_count DESC)
+            """
+        )
+        self._execute(
+            """
             CREATE TABLE IF NOT EXISTS catalog_current (
                 address TEXT PRIMARY KEY,
                 label TEXT,
@@ -1075,6 +1121,39 @@ class TraderStore:
         )
         self._execute(
             """
+            CREATE TABLE IF NOT EXISTS delivery_monitor_state (
+                address TEXT PRIMARY KEY,
+                subscriber_count INTEGER NOT NULL DEFAULT 0,
+                priority_score DOUBLE PRECISION NOT NULL DEFAULT 0,
+                poll_interval_seconds INTEGER NOT NULL DEFAULT 60,
+                safety_lookback_seconds INTEGER NOT NULL DEFAULT 90,
+                bootstrap_lookback_minutes INTEGER NOT NULL DEFAULT 180,
+                last_seen_fill_time BIGINT,
+                last_polled_at TIMESTAMP,
+                next_poll_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                idle_cycles INTEGER NOT NULL DEFAULT 0,
+                consecutive_errors INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                refreshed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(address) REFERENCES tracked_traders(address) ON DELETE CASCADE
+            )
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_delivery_monitor_state_due
+            ON delivery_monitor_state(next_poll_at, priority_score DESC)
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_delivery_monitor_state_priority
+            ON delivery_monitor_state(priority_score DESC, subscriber_count DESC)
+            """
+        )
+        self._execute(
+            """
             CREATE TABLE IF NOT EXISTS catalog_current (
                 address TEXT PRIMARY KEY,
                 label TEXT,
@@ -1430,6 +1509,24 @@ class TraderStore:
             lookback_minutes=int(row["lookback_minutes"] or 30),
         )
 
+    @staticmethod
+    def _row_to_delivery_monitor_target(row: Mapping[str, Any]) -> DeliveryMonitorTarget:
+        return DeliveryMonitorTarget(
+            address=str(row["address"]),
+            subscriber_count=int(row["subscriber_count"] or 0),
+            priority_score=float(row["priority_score"] or 0.0),
+            poll_interval_seconds=int(row["poll_interval_seconds"] or 60),
+            safety_lookback_seconds=int(row["safety_lookback_seconds"] or 90),
+            bootstrap_lookback_minutes=int(row["bootstrap_lookback_minutes"] or 180),
+            last_seen_fill_time=(
+                int(row["last_seen_fill_time"])
+                if row["last_seen_fill_time"] is not None
+                else None
+            ),
+            idle_cycles=int(row["idle_cycles"] or 0),
+            consecutive_errors=int(row["consecutive_errors"] or 0),
+        )
+
     def list_traders(self, *, limit: int = 500) -> list[TrackedTrader]:
         rows = self._execute(
             """
@@ -1564,6 +1661,237 @@ class TraderStore:
             WHERE address = ?
             """,
             prepared,
+        )
+        self._connection.commit()
+
+    def refresh_delivery_monitor_state(
+        self,
+        *,
+        base_poll_seconds: int = 60,
+        min_poll_seconds: int = 20,
+        max_poll_seconds: int = 180,
+        priority_recency_minutes: int = 120,
+        safety_lookback_seconds: int = 90,
+        bootstrap_lookback_minutes: int = 180,
+        max_targets_per_cycle: int = 120,
+    ) -> dict[str, int]:
+        rows = self._execute(
+            """
+            SELECT
+                ds.trader_address AS address,
+                COUNT(*) AS subscriber_count,
+                MAX(COALESCE(t.last_fill_time, 0)) AS last_fill_time,
+                MAX(COALESCE(t.score, 0)) AS score
+            FROM delivery_sessions ds
+            JOIN subscriptions s ON s.id = ds.subscription_id
+            JOIN tracked_traders t ON t.address = ds.trader_address
+            WHERE ds.status = 'ACTIVE'
+              AND s.status = 'ACTIVE'
+              AND s.expires_at > CURRENT_TIMESTAMP
+              AND COALESCE(t.moderation_state, ?) <> ?
+            GROUP BY ds.trader_address
+            """,
+            (MODERATION_NEUTRAL, MODERATION_BLACKLIST),
+        ).fetchall()
+
+        now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
+        payload: list[tuple[Any, ...]] = []
+        active_addresses: list[str] = []
+        high_demand = 0
+        for row in rows:
+            address = self.normalize_address(str(row["address"]))
+            if not address:
+                continue
+            subscriber_count = max(1, int(row["subscriber_count"] or 0))
+            if subscriber_count >= 3:
+                high_demand += 1
+            score = float(row["score"] or 0.0)
+            last_fill_time = int(row["last_fill_time"] or 0)
+            if last_fill_time > 0:
+                age_minutes = max(0.0, (now_ms - last_fill_time) / 60000.0)
+            else:
+                age_minutes = float("inf")
+
+            demand_score = min(1.0, math.log1p(subscriber_count) / math.log(25.0))
+            recency_score = (
+                max(0.0, 1.0 - (age_minutes / max(1, priority_recency_minutes)))
+                if age_minutes != float("inf")
+                else 0.0
+            )
+            quality_score = min(1.0, max(0.0, score) / 100.0)
+            priority_score = (
+                (demand_score * 0.55) + (recency_score * 0.30) + (quality_score * 0.15)
+            ) * 100.0
+
+            demand_factor = 1.0 - min(0.45, demand_score * 0.45)
+            if age_minutes <= 30:
+                recency_factor = 0.75
+            elif age_minutes <= 60:
+                recency_factor = 0.85
+            elif age_minutes <= max(1, priority_recency_minutes):
+                recency_factor = 1.0
+            else:
+                recency_factor = 1.2
+
+            poll_interval_seconds = int(round(base_poll_seconds * demand_factor * recency_factor))
+            poll_interval_seconds = max(min_poll_seconds, min(max_poll_seconds, poll_interval_seconds))
+
+            active_addresses.append(address)
+            payload.append(
+                (
+                    address,
+                    subscriber_count,
+                    round(priority_score, 6),
+                    poll_interval_seconds,
+                    max(15, int(safety_lookback_seconds)),
+                    max(5, int(bootstrap_lookback_minutes)),
+                )
+            )
+
+        try:
+            if payload:
+                self._executemany(
+                    """
+                    INSERT INTO delivery_monitor_state(
+                        address,
+                        subscriber_count,
+                        priority_score,
+                        poll_interval_seconds,
+                        safety_lookback_seconds,
+                        bootstrap_lookback_minutes,
+                        next_poll_at,
+                        refreshed_at,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    ON CONFLICT(address) DO UPDATE SET
+                        subscriber_count = excluded.subscriber_count,
+                        priority_score = excluded.priority_score,
+                        poll_interval_seconds = excluded.poll_interval_seconds,
+                        safety_lookback_seconds = excluded.safety_lookback_seconds,
+                        bootstrap_lookback_minutes = excluded.bootstrap_lookback_minutes,
+                        next_poll_at = (
+                            CASE
+                                WHEN delivery_monitor_state.next_poll_at < CURRENT_TIMESTAMP
+                                THEN CURRENT_TIMESTAMP
+                                ELSE delivery_monitor_state.next_poll_at
+                            END
+                        ),
+                        refreshed_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    payload,
+                )
+            if active_addresses:
+                placeholders = ",".join("?" for _ in active_addresses)
+                self._execute(
+                    f"DELETE FROM delivery_monitor_state WHERE address NOT IN ({placeholders})",
+                    active_addresses,
+                )
+            else:
+                self._execute("DELETE FROM delivery_monitor_state")
+            self._connection.commit()
+        except Exception:
+            self._connection.rollback()
+            raise
+
+        total = len(payload)
+        return {
+            "total": total,
+            "high_demand": high_demand,
+            "over_capacity": max(0, total - max(1, int(max_targets_per_cycle))),
+        }
+
+    def list_due_delivery_monitor_targets(self, *, limit: int = 200) -> list[DeliveryMonitorTarget]:
+        rows = self._execute(
+            """
+            SELECT
+                dms.address,
+                dms.subscriber_count,
+                dms.priority_score,
+                dms.poll_interval_seconds,
+                dms.safety_lookback_seconds,
+                dms.bootstrap_lookback_minutes,
+                dms.last_seen_fill_time,
+                dms.idle_cycles,
+                dms.consecutive_errors
+            FROM delivery_monitor_state dms
+            JOIN tracked_traders t ON t.address = dms.address
+            WHERE dms.subscriber_count > 0
+              AND dms.next_poll_at <= CURRENT_TIMESTAMP
+              AND COALESCE(t.moderation_state, ?) <> ?
+            ORDER BY dms.priority_score DESC, dms.next_poll_at ASC, dms.address ASC
+            LIMIT ?
+            """,
+            (MODERATION_NEUTRAL, MODERATION_BLACKLIST, int(limit)),
+        ).fetchall()
+        return [self._row_to_delivery_monitor_target(row) for row in rows]
+
+    def mark_delivery_monitor_polled(
+        self,
+        *,
+        address: str,
+        next_poll_seconds: int,
+        newest_fill_time: int | None = None,
+        had_new_fill: bool = False,
+        error: str | None = None,
+    ) -> None:
+        normalized = self.normalize_address(address)
+        if not normalized:
+            return
+        row = self._execute(
+            """
+            SELECT last_seen_fill_time, idle_cycles, consecutive_errors
+            FROM delivery_monitor_state
+            WHERE address = ?
+            """,
+            (normalized,),
+        ).fetchone()
+        if row is None:
+            return
+
+        previous_last_seen = int(row["last_seen_fill_time"] or 0)
+        incoming_last_seen = int(newest_fill_time or 0)
+        last_seen_fill_time = max(previous_last_seen, incoming_last_seen)
+        if last_seen_fill_time <= 0 and not error:
+            last_seen_fill_time = int(datetime.now(tz=UTC).timestamp() * 1000)
+
+        if had_new_fill:
+            idle_cycles = 0
+        else:
+            idle_cycles = min(100, int(row["idle_cycles"] or 0) + 1)
+
+        if error:
+            consecutive_errors = min(100, int(row["consecutive_errors"] or 0) + 1)
+            last_error = str(error)[:1000]
+        else:
+            consecutive_errors = 0
+            last_error = None
+
+        next_poll_at = (
+            datetime.now(tz=UTC) + timedelta(seconds=max(5, int(next_poll_seconds)))
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        self._execute(
+            """
+            UPDATE delivery_monitor_state
+            SET
+                last_seen_fill_time = ?,
+                last_polled_at = CURRENT_TIMESTAMP,
+                next_poll_at = ?,
+                idle_cycles = ?,
+                consecutive_errors = ?,
+                last_error = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE address = ?
+            """,
+            (
+                (last_seen_fill_time if last_seen_fill_time > 0 else None),
+                next_poll_at,
+                idle_cycles,
+                consecutive_errors,
+                last_error,
+                normalized,
+            ),
         )
         self._connection.commit()
 

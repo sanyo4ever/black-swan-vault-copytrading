@@ -18,6 +18,38 @@ def build_source(source_cfg: dict, *, http_session, settings):
             "delivery_only_subscribed",
             settings.monitor_delivery_only_subscribed,
         )
+        merged_cfg.setdefault(
+            "max_traders_per_cycle",
+            settings.delivery_monitor_max_traders_per_cycle,
+        )
+        merged_cfg.setdefault(
+            "base_poll_seconds",
+            settings.delivery_monitor_base_poll_seconds,
+        )
+        merged_cfg.setdefault(
+            "min_poll_seconds",
+            settings.delivery_monitor_min_poll_seconds,
+        )
+        merged_cfg.setdefault(
+            "max_poll_seconds",
+            settings.delivery_monitor_max_poll_seconds,
+        )
+        merged_cfg.setdefault(
+            "priority_recency_minutes",
+            settings.delivery_monitor_priority_recency_minutes,
+        )
+        merged_cfg.setdefault(
+            "safety_lookback_seconds",
+            settings.delivery_monitor_safety_lookback_seconds,
+        )
+        merged_cfg.setdefault(
+            "bootstrap_lookback_minutes",
+            settings.delivery_monitor_bootstrap_lookback_minutes,
+        )
+        merged_cfg.setdefault(
+            "http_concurrency",
+            settings.delivery_monitor_http_concurrency,
+        )
         return HyperliquidFuturesSource(
             merged_cfg,
             http_session=http_session,
