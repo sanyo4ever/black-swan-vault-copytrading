@@ -282,10 +282,11 @@ class HyperliquidDiscoveryService:
         fills_capped = len(normalized) >= max(1, self._config.fill_cap_hint)
         age_probe_used = False
         ledger_first_activity_time = None
+        probe_age_threshold_days = 30.0
         if (
             self._config.age_probe_enabled
             and fills_capped
-            and (age_days is None or age_days < self._config.min_age_days)
+            and (age_days is None or age_days < probe_age_threshold_days)
         ):
             ledger_first_activity_time = await self._probe_account_first_activity_time(
                 candidate["address"]
