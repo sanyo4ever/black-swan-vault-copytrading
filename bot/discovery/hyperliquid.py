@@ -40,9 +40,40 @@ class HyperliquidDiscoveryService:
         self._config = config
 
     async def _info(self, payload: dict[str, Any]) -> Any:
-        async with self._http_session.post(self._config.info_url, json=payload) as response:
-            response.raise_for_status()
-            return await response.json(content_type=None)
+        attempts = 5
+        backoff = 1.0
+        last_error: Exception | None = None
+
+        for attempt in range(attempts):
+            try:
+                async with self._http_session.post(self._config.info_url, json=payload) as response:
+                    if response.status == 429 and attempt < attempts - 1:
+                        retry_after_raw = response.headers.get("Retry-After", "").strip()
+                        retry_after = float(retry_after_raw) if retry_after_raw else 0.0
+                        await asyncio.sleep(max(backoff, retry_after))
+                        backoff = min(backoff * 2, 12.0)
+                        continue
+
+                    response.raise_for_status()
+                    return await response.json(content_type=None)
+            except aiohttp.ClientResponseError as exc:
+                last_error = exc
+                if exc.status in {429, 500, 502, 503, 504} and attempt < attempts - 1:
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 12.0)
+                    continue
+                raise
+            except aiohttp.ClientError as exc:
+                last_error = exc
+                if attempt < attempts - 1:
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 12.0)
+                    continue
+                raise
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Unexpected _info() failure without error")
 
     @staticmethod
     def _to_float(raw: Any) -> float:
@@ -59,7 +90,10 @@ class HyperliquidDiscoveryService:
             return 0
 
     async def _fetch_candidates(self) -> list[dict[str, Any]]:
-        data = await self._info({"type": "vaultSummaries"})
+        try:
+            data = await self._info({"type": "vaultSummaries"})
+        except Exception:
+            data = []
         if not isinstance(data, list):
             data = []
 
@@ -109,7 +143,7 @@ class HyperliquidDiscoveryService:
         if not coins:
             return []
 
-        coin_limit = min(max(self._config.candidate_limit * 2, 40), len(coins))
+        coin_limit = min(max(self._config.candidate_limit, 15), len(coins))
         selected = coins[:coin_limit]
         stats: dict[str, dict[str, float]] = {}
         sem = asyncio.Semaphore(max(1, self._config.concurrency))
