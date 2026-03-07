@@ -54,11 +54,11 @@ def load_suspects(conn: psycopg.Connection, *, limit: int) -> list[SuspectTrader
         FROM tracked_traders
         WHERE
             lower(source) IN ('test', 'manual_test', 'e2e_test', 'qa_test')
-            OR source ILIKE 'test:%'
-            OR source ILIKE '%_test'
-            OR label LIKE '[TEST] %'
-            OR label ILIKE 'test %'
-            OR label ILIKE '% [test]%'
+            OR source ILIKE 'test:%%'
+            OR source ILIKE '%%_test'
+            OR label LIKE '[TEST] %%'
+            OR label ILIKE 'test %%'
+            OR label ILIKE '%% [test]%%'
             OR address ~ '^0x([0-9A-Fa-f])\\1{39}$'
             OR lower(address) IN (
                 '0x0000000000000000000000000000000000000000',
