@@ -61,7 +61,7 @@ class HyperliquidDiscoveryService:
     async def _fetch_candidates(self) -> list[dict[str, Any]]:
         data = await self._info({"type": "vaultSummaries"})
         if not isinstance(data, list):
-            return []
+            data = []
 
         prepared: list[dict[str, Any]] = []
         for item in data:
@@ -84,7 +84,90 @@ class HyperliquidDiscoveryService:
         dedup: dict[str, dict[str, Any]] = {}
         for item in prepared:
             dedup[item["address"]] = item
-        return list(dedup.values())[: self._config.candidate_limit]
+        vault_candidates = list(dedup.values())[: self._config.candidate_limit]
+        if vault_candidates:
+            return vault_candidates
+
+        return await self._fetch_recent_trade_candidates()
+
+    async def _fetch_recent_trade_candidates(self) -> list[dict[str, Any]]:
+        meta = await self._info({"type": "meta"})
+        if not isinstance(meta, dict):
+            return []
+
+        universe = meta.get("universe")
+        if not isinstance(universe, list):
+            return []
+
+        coins: list[str] = []
+        for item in universe:
+            if not isinstance(item, dict):
+                continue
+            coin = str(item.get("name", "")).strip()
+            if coin:
+                coins.append(coin)
+        if not coins:
+            return []
+
+        coin_limit = min(max(self._config.candidate_limit * 2, 40), len(coins))
+        selected = coins[:coin_limit]
+        stats: dict[str, dict[str, float]] = {}
+        sem = asyncio.Semaphore(max(1, self._config.concurrency))
+
+        async def scan_coin(coin: str) -> None:
+            async with sem:
+                trades = await self._info({"type": "recentTrades", "coin": coin})
+            if not isinstance(trades, list):
+                return
+
+            for trade in trades:
+                if not isinstance(trade, dict):
+                    continue
+                users = trade.get("users")
+                if not isinstance(users, list):
+                    continue
+
+                px = self._to_float(trade.get("px"))
+                sz = self._to_float(trade.get("sz"))
+                notional = abs(px * sz) if px > 0 and sz > 0 else 0.0
+                ts = self._to_int(trade.get("time"))
+
+                for user in users:
+                    address = str(user).strip().lower()
+                    if not address.startswith("0x") or len(address) < 10:
+                        continue
+                    item = stats.setdefault(
+                        address,
+                        {"trade_count": 0.0, "volume": 0.0, "last_time": 0.0},
+                    )
+                    item["trade_count"] += 1.0
+                    item["volume"] += notional
+                    if ts > item["last_time"]:
+                        item["last_time"] = float(ts)
+
+        await asyncio.gather(*(scan_coin(coin) for coin in selected), return_exceptions=True)
+
+        ranked = sorted(
+            stats.items(),
+            key=lambda kv: (
+                kv[1]["trade_count"],
+                kv[1]["volume"],
+                kv[1]["last_time"],
+            ),
+            reverse=True,
+        )
+
+        candidates: list[dict[str, Any]] = []
+        for address, item in ranked[: self._config.candidate_limit]:
+            candidates.append(
+                {
+                    "address": address,
+                    "label": None,
+                    "source": "hyperliquid_recent_trades",
+                    "vault_tvl": item["volume"],
+                }
+            )
+        return candidates
 
     async def _fetch_metrics(self, candidate: dict[str, Any], *, now_ms: int) -> dict[str, Any]:
         start_60d = now_ms - (60 * MS_DAY)
@@ -279,7 +362,7 @@ class HyperliquidDiscoveryService:
 
             qualified = 0
             upserted = 0
-            qualified_addresses: list[str] = []
+            qualified_by_source: dict[str, set[str]] = {}
             for item in metrics:
                 if not item:
                     continue
@@ -321,12 +404,21 @@ class HyperliquidDiscoveryService:
                     stats_json=item["stats_json"],
                 )
                 upserted += 1
-                qualified_addresses.append(item["address"])
+                source = str(item["source"]).strip()
+                if source:
+                    qualified_by_source.setdefault(source, set()).add(item["address"])
 
-            pruned = self._store.prune_auto_discovered(
-                source="hyperliquid_vault_leader",
-                keep_addresses=qualified_addresses,
-            )
+            pruned = 0
+            candidate_sources = {
+                str(candidate.get("source", "")).strip()
+                for candidate in candidates
+                if str(candidate.get("source", "")).strip()
+            }
+            for source in sorted(candidate_sources):
+                pruned += self._store.prune_auto_discovered(
+                    source=source,
+                    keep_addresses=qualified_by_source.get(source, set()),
+                )
 
             self._store.log_discovery_run(
                 source=discovery_source,
