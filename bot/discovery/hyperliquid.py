@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import math
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -1025,13 +1026,28 @@ class HyperliquidDiscoveryService:
 
             now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
             sem = asyncio.Semaphore(self._config.concurrency)
+            fetch_failures = 0
+            fetch_failure_reasons: Counter[str] = Counter()
+            fetch_failure_samples: list[str] = []
 
             async def gather_metrics(candidate: dict[str, Any]) -> dict[str, Any] | None:
+                nonlocal fetch_failures
                 async with sem:
                     try:
                         return await self._fetch_metrics(candidate, now_ms=now_ms)
                     except Exception as exc:
-                        self._logger.warning(
+                        fetch_failures += 1
+                        reason_parts = [exc.__class__.__name__]
+                        status = getattr(exc, "status", None)
+                        if status is not None:
+                            reason_parts.append(f"status={status}")
+                        reason = " ".join(reason_parts)
+                        fetch_failure_reasons[reason] += 1
+                        if len(fetch_failure_samples) < 5:
+                            fetch_failure_samples.append(
+                                f"{candidate.get('address')}:{reason}"
+                            )
+                        self._logger.debug(
                             "Failed to fetch metrics for candidate=%s source=%s error=%s",
                             candidate.get("address"),
                             candidate.get("source"),
@@ -1040,6 +1056,15 @@ class HyperliquidDiscoveryService:
                         return None
 
             metrics = await asyncio.gather(*(gather_metrics(c) for c in candidates))
+            if fetch_failures > 0:
+                self._logger.log(
+                    logging.WARNING if fetch_failures >= max(10, len(candidates) // 3) else logging.INFO,
+                    "Metrics fetch failures count=%s candidates=%s reasons=%s samples=%s",
+                    fetch_failures,
+                    len(candidates),
+                    dict(fetch_failure_reasons),
+                    fetch_failure_samples,
+                )
 
             qualified = 0
             upserted = 0
