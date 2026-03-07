@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import aiohttp
 
 
@@ -11,8 +13,9 @@ async def send_message(
     session: aiohttp.ClientSession,
     *,
     bot_token: str,
-    chat_id: str,
+    chat_id: str | int,
     text: str,
+    reply_markup: dict[str, Any] | None = None,
 ) -> None:
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = {
@@ -21,6 +24,8 @@ async def send_message(
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
 
     async with session.post(url, json=payload) as response:
         data = await response.json(content_type=None)
@@ -28,3 +33,30 @@ async def send_message(
             raise TelegramClientError(
                 f"Telegram API error ({response.status}): {data}"
             )
+
+
+async def get_updates(
+    session: aiohttp.ClientSession,
+    *,
+    bot_token: str,
+    offset: int | None = None,
+    timeout: int = 30,
+) -> list[dict[str, Any]]:
+    url = f"https://api.telegram.org/bot{bot_token}/getUpdates"
+    payload: dict[str, Any] = {
+        "timeout": timeout,
+        "allowed_updates": ["message"],
+    }
+    if offset is not None:
+        payload["offset"] = offset
+
+    async with session.post(url, json=payload) as response:
+        data = await response.json(content_type=None)
+        if response.status >= 400 or not data.get("ok", False):
+            raise TelegramClientError(
+                f"Telegram API error ({response.status}): {data}"
+            )
+        result = data.get("result")
+        if not isinstance(result, list):
+            return []
+        return [item for item in result if isinstance(item, dict)]

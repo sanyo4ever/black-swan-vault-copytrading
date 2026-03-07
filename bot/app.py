@@ -12,6 +12,7 @@ from bot.dedup import DedupStore
 from bot.formatter import format_signal
 from bot.sources import build_source
 from bot.telegram_client import send_message
+from bot.trader_store import TraderStore
 
 
 def _setup_logging() -> None:
@@ -57,6 +58,9 @@ async def _run_cycle(*, settings, http_session, dedup_store, logger) -> int:
         logger.info("No signals fetched this cycle")
         return 0
 
+    with TraderStore(settings.database_path) as store:
+        subscriber_map = store.list_active_subscriber_chat_ids_by_trader()
+
     published = 0
     for signal in sorted(all_signals, key=_sort_key):
         if published >= settings.max_signals_per_cycle:
@@ -66,18 +70,53 @@ async def _run_cycle(*, settings, http_session, dedup_store, logger) -> int:
         if dedup_store.seen(dedup_key):
             continue
 
+        targets: list[str] = []
+        if settings.telegram_channel_id:
+            targets.append(settings.telegram_channel_id)
+        if signal.trader_address:
+            targets.extend(subscriber_map.get(signal.trader_address, []))
+        unique_targets = list(dict.fromkeys(targets))
+        if not unique_targets:
+            logger.info("No targets for signal %s; skipping", dedup_key)
+            continue
+
+        delivered = 0
+        failed = 0
         try:
-            await send_message(
-                http_session,
-                bot_token=settings.telegram_bot_token,
-                chat_id=settings.telegram_channel_id,
-                text=format_signal(signal),
-            )
-            dedup_store.remember(dedup_key)
-            published += 1
-            logger.info("Published signal %s", dedup_key)
+            text = format_signal(signal)
+            for chat_id in unique_targets:
+                try:
+                    await send_message(
+                        http_session,
+                        bot_token=settings.telegram_bot_token,
+                        chat_id=chat_id,
+                        text=text,
+                    )
+                    delivered += 1
+                except Exception as exc:
+                    failed += 1
+                    logger.exception(
+                        "Failed to send signal %s to chat %s: %s",
+                        dedup_key,
+                        chat_id,
+                        exc,
+                    )
         except Exception as exc:
             logger.exception("Failed to publish signal %s: %s", dedup_key, exc)
+            continue
+
+        if delivered <= 0:
+            logger.warning("Signal %s had no successful deliveries", dedup_key)
+            continue
+
+        dedup_store.remember(dedup_key)
+        published += 1
+        logger.info(
+            "Published signal %s to %s target(s), failed=%s",
+            dedup_key,
+            delivered,
+            failed,
+        )
 
     logger.info("Cycle complete. Published %s signal(s)", published)
     return published

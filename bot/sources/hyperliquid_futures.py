@@ -114,6 +114,7 @@ class HyperliquidFuturesSource(Source):
                             source_id=self.id,
                             source_name=self.name,
                             external_id=external_id,
+                            trader_address=trader,
                             symbol=f"{str(fill.get('coin', '')).strip()}-PERP",
                             side=self._build_side(fill),
                             entry=str(fill.get("px", "")).strip() or None,

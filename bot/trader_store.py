@@ -56,6 +56,16 @@ class DiscoveryRun:
     error_message: str | None
 
 
+@dataclass(frozen=True)
+class ChatSubscription:
+    chat_id: str
+    trader_address: str
+    trader_label: str | None
+    status: str
+    created_at: str
+    updated_at: str
+
+
 class TraderStore:
     def __init__(self, db_path: Path) -> None:
         db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -185,6 +195,32 @@ class TraderStore:
             ON subscription_requests(trader_address, created_at DESC)
             """
         )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS telegram_trader_subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id TEXT NOT NULL,
+                trader_address TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('ACTIVE', 'PAUSED')) DEFAULT 'ACTIVE',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(chat_id, trader_address),
+                FOREIGN KEY(trader_address) REFERENCES tracked_traders(address) ON DELETE CASCADE
+            )
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_telegram_subscriptions_trader_status
+            ON telegram_trader_subscriptions(trader_address, status)
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_telegram_subscriptions_chat_status
+            ON telegram_trader_subscriptions(chat_id, status)
+            """
+        )
         self._connection.commit()
 
     @staticmethod
@@ -239,6 +275,17 @@ class TraderStore:
             error_message=row["error_message"],
         )
 
+    @staticmethod
+    def _row_to_chat_subscription(row: sqlite3.Row) -> ChatSubscription:
+        return ChatSubscription(
+            chat_id=str(row["chat_id"]),
+            trader_address=row["trader_address"],
+            trader_label=row["trader_label"],
+            status=row["status"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
     def list_traders(self, *, limit: int = 500) -> list[TrackedTrader]:
         rows = self._connection.execute(
             """
@@ -281,6 +328,74 @@ class TraderStore:
         if row is None:
             return None
         return self._row_to_model(row)
+
+    def subscribe_chat_to_trader(self, *, chat_id: str | int, trader_address: str) -> None:
+        normalized = self.normalize_address(trader_address)
+        if not normalized:
+            raise ValueError("Trader address must not be empty")
+        if self.get_trader(address=normalized) is None:
+            raise ValueError("Trader does not exist")
+
+        self._connection.execute(
+            """
+            INSERT INTO telegram_trader_subscriptions(chat_id, trader_address, status, updated_at)
+            VALUES (?, ?, 'ACTIVE', CURRENT_TIMESTAMP)
+            ON CONFLICT(chat_id, trader_address) DO UPDATE SET
+                status = 'ACTIVE',
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (str(chat_id), normalized),
+        )
+        self._connection.commit()
+
+    def unsubscribe_chat_from_trader(self, *, chat_id: str | int, trader_address: str) -> int:
+        normalized = self.normalize_address(trader_address)
+        cursor = self._connection.execute(
+            """
+            DELETE FROM telegram_trader_subscriptions
+            WHERE chat_id = ? AND trader_address = ?
+            """,
+            (str(chat_id), normalized),
+        )
+        self._connection.commit()
+        return cursor.rowcount
+
+    def list_subscriptions_for_chat(self, *, chat_id: str | int) -> list[ChatSubscription]:
+        rows = self._connection.execute(
+            """
+            SELECT
+                sub.chat_id,
+                sub.trader_address,
+                sub.status,
+                sub.created_at,
+                sub.updated_at,
+                t.label AS trader_label
+            FROM telegram_trader_subscriptions sub
+            JOIN tracked_traders t ON t.address = sub.trader_address
+            WHERE sub.chat_id = ?
+            ORDER BY
+                CASE sub.status WHEN 'ACTIVE' THEN 0 ELSE 1 END,
+                t.label ASC,
+                sub.trader_address ASC
+            """,
+            (str(chat_id),),
+        ).fetchall()
+        return [self._row_to_chat_subscription(row) for row in rows]
+
+    def list_active_subscriber_chat_ids_by_trader(self) -> dict[str, list[str]]:
+        rows = self._connection.execute(
+            """
+            SELECT trader_address, chat_id
+            FROM telegram_trader_subscriptions
+            WHERE status = 'ACTIVE'
+            ORDER BY trader_address ASC, chat_id ASC
+            """
+        ).fetchall()
+        mapping: dict[str, list[str]] = {}
+        for row in rows:
+            address = str(row["trader_address"])
+            mapping.setdefault(address, []).append(str(row["chat_id"]))
+        return mapping
 
     def add_manual(self, *, address: str, label: str | None = None) -> None:
         normalized = self.normalize_address(address)

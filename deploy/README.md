@@ -24,6 +24,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now cryptoinsider-admin.service
 sudo systemctl enable --now cryptoinsider-discovery.service
 sudo systemctl enable --now cryptoinsider-poster.service
+sudo systemctl enable --now cryptoinsider-subscriberbot.service
 ```
 
 ## 4. Check status
@@ -31,6 +32,7 @@ sudo systemctl enable --now cryptoinsider-poster.service
 sudo systemctl status cryptoinsider-admin.service
 sudo systemctl status cryptoinsider-discovery.service
 sudo systemctl status cryptoinsider-poster.service
+sudo systemctl status cryptoinsider-subscriberbot.service
 ```
 
 ## 5. Logs
@@ -38,6 +40,7 @@ sudo systemctl status cryptoinsider-poster.service
 sudo journalctl -u cryptoinsider-admin.service -f
 sudo journalctl -u cryptoinsider-discovery.service -f
 sudo journalctl -u cryptoinsider-poster.service -f
+sudo journalctl -u cryptoinsider-subscriberbot.service -f
 ```
 
 ## 6. Nginx reverse proxy

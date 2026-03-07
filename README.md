@@ -8,8 +8,9 @@ Service stack for discovering futures traders, storing rich metrics, and publish
 - Auto-discovered traders are added as `PAUSED` by default
 - Rich trader stats (7d/30d activity, PnL, fees, win rate, volume, age, score, margin stats)
 - Public subscriber directory page with filters (`/`)
+- One-click trader chat flow via Telegram bot (`/subscribe/<trader_address>`)
 - Password-protected admin panel (`/admin`) for add/delete/pause/resume + run discovery now
-- Telegram posting pipeline that sends fills only for `ACTIVE` traders
+- Telegram posting pipeline that sends fills for `ACTIVE` traders to channel + subscribed users
 
 ## Entrypoints
 
@@ -17,6 +18,7 @@ Service stack for discovering futures traders, storing rich metrics, and publish
 - `python discover.py` -> one discovery cycle
 - `python discovery_worker.py` -> continuous discovery service
 - `python admin.py --host 127.0.0.1 --port 8080` -> web server
+- `python subscriber_bot.py` -> Telegram command bot for user subscriptions
 
 ## Setup
 
@@ -68,6 +70,12 @@ source .venv/bin/activate
 python main.py
 ```
 
+4. Start subscriber bot:
+```bash
+source .venv/bin/activate
+python subscriber_bot.py
+```
+
 ## Pages
 
 - `http://127.0.0.1:8080/` -> public subscriber directory with filters
@@ -95,8 +103,14 @@ python main.py
 
 - run metadata: `source`, `status`, `candidates`, `qualified`, `upserted`, `error_message`, `finished_at`
 
+### `telegram_trader_subscriptions`
+
+- links a private Telegram chat (`chat_id`) to selected `trader_address`
+- supports one-click subscribe via bot deep-link payload `sub_<trader_address>`
+
 ## Important behavior
 
 - Discovery can update stats for a trader, but does not auto-enable posting.
 - Traders stay `PAUSED` until you manually click `Resume` in admin.
 - Telegram source posts only `ACTIVE` traders.
+- Subscriber receives only trades from traders they selected in bot.

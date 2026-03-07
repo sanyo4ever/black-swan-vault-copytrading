@@ -56,7 +56,7 @@ def _subscribe_button(*, trader_address: str, bot_username: str) -> str:
     encoded = quote(trader_address, safe="")
     return (
         f"<a class='btn-link' href='/subscribe/{encoded}' target='_blank' rel='noopener'>"
-        "Subscribe $1/day"
+        "Open Trader Chat"
         "</a>"
     )
 
@@ -195,7 +195,7 @@ def _render_public_directory(
   <div class='wrap'>
     <div class='card'>
       <h1>Futures Trader Directory</h1>
-      <p>Filter traders and choose who you want to follow. Data refreshes automatically.</p>
+      <p>Choose a trader and open a personal Telegram chat in one click.</p>
     </div>
 
     <div class='card'>

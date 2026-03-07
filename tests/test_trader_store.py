@@ -56,6 +56,29 @@ class TraderStoreTests(unittest.TestCase):
         self.assertEqual(row[1], "10.0.0.1")
         self.assertEqual(row[2], "pytest-agent")
 
+    def test_telegram_subscriptions_lifecycle(self) -> None:
+        with TraderStore(self.db_path) as store:
+            store.add_manual(address="0xcccccccccccccccccccccccccccccccccccccccc", label="C")
+            store.subscribe_chat_to_trader(
+                chat_id=123456,
+                trader_address="0xcccccccccccccccccccccccccccccccccccccccc",
+            )
+
+            subs = store.list_subscriptions_for_chat(chat_id=123456)
+            self.assertEqual(len(subs), 1)
+            self.assertEqual(subs[0].trader_address, "0xcccccccccccccccccccccccccccccccccccccccc")
+            self.assertEqual(subs[0].status, STATUS_ACTIVE)
+
+            mapping = store.list_active_subscriber_chat_ids_by_trader()
+            self.assertEqual(mapping["0xcccccccccccccccccccccccccccccccccccccccc"], ["123456"])
+
+            removed = store.unsubscribe_chat_from_trader(
+                chat_id=123456,
+                trader_address="0xcccccccccccccccccccccccccccccccccccccccc",
+            )
+            self.assertEqual(removed, 1)
+            self.assertEqual(store.list_subscriptions_for_chat(chat_id=123456), [])
+
 
 if __name__ == "__main__":
     unittest.main()

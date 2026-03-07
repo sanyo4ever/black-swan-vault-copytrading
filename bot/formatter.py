@@ -13,8 +13,12 @@ def _line(label: str, value: str | None) -> str:
 
 def format_signal(signal: TradeSignal) -> str:
     header = f"<b>{escape(signal.source_name)}</b>"
+    trader_line = None
+    if signal.trader_address:
+        trader_line = f"{signal.trader_address[:6]}...{signal.trader_address[-4:]}"
 
     body_parts = [
+        _line("Trader", trader_line),
         _line("Symbol", signal.symbol),
         _line("Side", signal.side),
         _line("Entry", signal.entry),

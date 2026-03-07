@@ -10,6 +10,7 @@ class TradeSignal:
     source_id: str
     source_name: str
     external_id: str
+    trader_address: str | None = None
     symbol: str | None = None
     side: str | None = None
     entry: str | None = None
