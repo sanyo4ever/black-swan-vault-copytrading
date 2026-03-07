@@ -50,7 +50,19 @@ sudo systemctl status cryptoinsider-poster.service
 sudo systemctl status cryptoinsider-subscriberbot.service
 ```
 
-## 5. Logs
+## 5. Run tests on server (required)
+Always run repository tests directly on the server after deploy/restart:
+
+```bash
+cd /opt/cryptoinsider/app
+/opt/cryptoinsider/app/.venv/bin/python -m unittest -q \
+  tests/test_config.py \
+  tests/test_telegram_client.py \
+  tests/test_subscriber_bot.py \
+  tests/test_trader_store.py
+```
+
+## 6. Logs
 ```bash
 sudo journalctl -u cryptoinsider-admin.service -f
 sudo journalctl -u cryptoinsider-discovery.service -f
@@ -67,7 +79,7 @@ sudo ls -lah /opt/cryptoinsider/app/data/logs
 sudo tail -f /opt/cryptoinsider/app/data/logs/cryptoinsider_subscriber_bot.log
 ```
 
-## 6. Nginx reverse proxy
+## 7. Nginx reverse proxy
 ```bash
 sudo cp deploy/nginx/cryptoinsider.conf /etc/nginx/sites-available/cryptoinsider.conf
 sudo ln -s /etc/nginx/sites-available/cryptoinsider.conf /etc/nginx/sites-enabled/cryptoinsider.conf
@@ -75,7 +87,7 @@ sudo nginx -t
 sudo systemctl reload nginx
 ```
 
-## 7. Next production step
+## 8. Next production step
 If you have old SQLite data, migrate once:
 ```bash
 cd /opt/cryptoinsider/app
