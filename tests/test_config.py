@@ -78,6 +78,8 @@ class ConfigTests(unittest.TestCase):
                 os.environ["LOG_FILE_MAX_BYTES"] = "2048"
                 os.environ["LOG_FILE_BACKUP_COUNT"] = "7"
                 os.environ["LOG_TELEGRAM_HTTP"] = "true"
+                os.environ["DELIVERY_SEND_CONCURRENCY"] = "17"
+                os.environ["DELIVERY_CHAT_MIN_INTERVAL_MS"] = "333"
 
                 settings = load_settings()
                 self.assertEqual(settings.log_level, "DEBUG")
@@ -86,6 +88,8 @@ class ConfigTests(unittest.TestCase):
                 self.assertEqual(settings.log_file_max_bytes, 2048)
                 self.assertEqual(settings.log_file_backup_count, 7)
                 self.assertTrue(settings.log_telegram_http)
+                self.assertEqual(settings.delivery_send_concurrency, 17)
+                self.assertEqual(settings.delivery_chat_min_interval_ms, 333)
             finally:
                 os.environ.clear()
                 os.environ.update(old)

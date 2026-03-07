@@ -10,13 +10,13 @@ import aiohttp
 
 from bot.config import ConfigError, load_settings, load_sources_config
 from bot.dedup import DedupStore
+from bot.delivery_dispatcher import DeliveryDispatcher, DeliveryDispatcherConfig
 from bot.formatter import format_signal
 from bot.logging_setup import bind_log_context, build_logging_options, new_trace_id, setup_logging
 from bot.sources import build_source
 from bot.telegram_client import (
     TelegramClientError,
     delete_forum_topic,
-    send_message,
     set_telegram_http_logging,
 )
 from bot.trader_store import TraderStore
@@ -166,6 +166,7 @@ async def _send_live_target(
     *,
     settings,
     http_session,
+    dispatcher: DeliveryDispatcher,
     logger: logging.Logger,
     dedup_key: str,
     message_text: str,
@@ -174,9 +175,8 @@ async def _send_live_target(
     message_thread_id: int | None = None,
 ) -> str:
     try:
-        await send_message(
+        await dispatcher.send(
             http_session,
-            bot_token=settings.telegram_bot_token,
             chat_id=chat_id,
             text=message_text,
             message_thread_id=message_thread_id,
@@ -308,7 +308,14 @@ def _handle_retry_delivery_failure(
     return "dead"
 
 
-async def _process_retry_queue(*, settings, http_session, dedup_store, logger) -> int:
+async def _process_retry_queue(
+    *,
+    settings,
+    http_session,
+    dedup_store,
+    dispatcher: DeliveryDispatcher,
+    logger,
+) -> int:
     with TraderStore(settings.database_dsn) as store:
         jobs = store.list_due_delivery_retries(limit=RETRY_BATCH_LIMIT)
 
@@ -320,9 +327,8 @@ async def _process_retry_queue(*, settings, http_session, dedup_store, logger) -
     dead = 0
     for job in jobs:
         try:
-            await send_message(
+            await dispatcher.send(
                 http_session,
-                bot_token=settings.telegram_bot_token,
                 chat_id=job.chat_id,
                 text=job.message_text,
                 message_thread_id=job.message_thread_id,
@@ -425,7 +431,14 @@ async def _cleanup_expired_sessions(*, settings, http_session, logger) -> int:
     return cleanup_ok
 
 
-async def _run_cycle(*, settings, http_session, dedup_store, logger) -> int:
+async def _run_cycle(
+    *,
+    settings,
+    http_session,
+    dedup_store,
+    dispatcher: DeliveryDispatcher,
+    logger,
+) -> int:
     source_configs = load_sources_config(settings.sources_config_path)
     sources = [
         build_source(cfg, http_session=http_session, settings=settings)
@@ -473,40 +486,45 @@ async def _run_cycle(*, settings, http_session, dedup_store, logger) -> int:
         queued = 0
         try:
             text = format_signal(signal)
-
+            delivery_tasks: list[asyncio.Task[str]] = []
             if settings.telegram_channel_id and not settings.monitor_delivery_only_subscribed:
-                status = await _send_live_target(
-                    settings=settings,
-                    http_session=http_session,
-                    logger=logger,
-                    dedup_key=dedup_key,
-                    message_text=text,
-                    chat_id=settings.telegram_channel_id,
-                    trader_address=signal.trader_address,
+                delivery_tasks.append(
+                    asyncio.create_task(
+                        _send_live_target(
+                            settings=settings,
+                            http_session=http_session,
+                            dispatcher=dispatcher,
+                            logger=logger,
+                            dedup_key=dedup_key,
+                            message_text=text,
+                            chat_id=settings.telegram_channel_id,
+                            trader_address=signal.trader_address,
+                        )
+                    )
                 )
-                if status == "sent":
-                    delivered += 1
-                else:
-                    failed += 1
-                    if status == "queued":
-                        queued += 1
-
             seen_sub_targets: set[tuple[str, int | None]] = set()
             for target in delivery_targets:
                 target_key = (target.chat_id, target.message_thread_id)
                 if target_key in seen_sub_targets:
                     continue
                 seen_sub_targets.add(target_key)
-                status = await _send_live_target(
-                    settings=settings,
-                    http_session=http_session,
-                    logger=logger,
-                    dedup_key=dedup_key,
-                    message_text=text,
-                    chat_id=target.chat_id,
-                    trader_address=target.trader_address,
-                    message_thread_id=target.message_thread_id,
+                delivery_tasks.append(
+                    asyncio.create_task(
+                        _send_live_target(
+                            settings=settings,
+                            http_session=http_session,
+                            dispatcher=dispatcher,
+                            logger=logger,
+                            dedup_key=dedup_key,
+                            message_text=text,
+                            chat_id=target.chat_id,
+                            trader_address=target.trader_address,
+                            message_thread_id=target.message_thread_id,
+                        )
+                    )
                 )
+            results = await asyncio.gather(*delivery_tasks)
+            for status in results:
                 if status == "sent":
                     delivered += 1
                 else:
@@ -557,6 +575,13 @@ async def _run() -> None:
 
     timeout = aiohttp.ClientTimeout(total=settings.http_timeout_seconds)
     dedup_store = DedupStore(settings.database_dsn)
+    dispatcher = DeliveryDispatcher(
+        config=DeliveryDispatcherConfig(
+            bot_token=settings.telegram_bot_token,
+            send_concurrency=settings.delivery_send_concurrency,
+            chat_min_interval_ms=settings.delivery_chat_min_interval_ms,
+        )
+    )
     cycle = 0
 
     try:
@@ -574,18 +599,21 @@ async def _run() -> None:
                         settings=settings,
                         http_session=http_session,
                         dedup_store=dedup_store,
+                        dispatcher=dispatcher,
                         logger=logger,
                     )
                     await _run_cycle(
                         settings=settings,
                         http_session=http_session,
                         dedup_store=dedup_store,
+                        dispatcher=dispatcher,
                         logger=logger,
                     )
                     await _process_retry_queue(
                         settings=settings,
                         http_session=http_session,
                         dedup_store=dedup_store,
+                        dispatcher=dispatcher,
                         logger=logger,
                     )
                     elapsed_ms = int((time.monotonic() - cycle_started) * 1000)

@@ -75,6 +75,8 @@ class Settings:
     delivery_monitor_bootstrap_lookback_minutes: int
     delivery_monitor_max_traders_per_cycle: int
     delivery_monitor_http_concurrency: int
+    delivery_send_concurrency: int
+    delivery_chat_min_interval_ms: int
     log_level: str
     log_format: str
     log_directory: str
@@ -244,6 +246,10 @@ def load_settings(
         ),
         delivery_monitor_http_concurrency=int(
             os.getenv("DELIVERY_MONITOR_HTTP_CONCURRENCY", "8")
+        ),
+        delivery_send_concurrency=int(os.getenv("DELIVERY_SEND_CONCURRENCY", "12")),
+        delivery_chat_min_interval_ms=int(
+            os.getenv("DELIVERY_CHAT_MIN_INTERVAL_MS", "250")
         ),
         log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
         log_format=_get_log_format(),
