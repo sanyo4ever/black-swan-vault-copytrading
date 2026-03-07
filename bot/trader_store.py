@@ -1736,15 +1736,76 @@ class TraderStore:
         cursor_value: float | int | None = None,
         cursor_address: str | None = None,
     ) -> list[CatalogTrader]:
+        def _json_metric_raw(*, period: str, key: str) -> str:
+            period_norm = period if period in {"1d", "7d", "30d"} else "7d"
+            if self._driver == "postgres":
+                return (
+                    f"NULLIF((stats_json::jsonb -> 'metrics_{period_norm}' ->> '{key}'), '')"
+                    "::double precision"
+                )
+            return f"CAST(json_extract(stats_json, '$.metrics_{period_norm}.{key}') AS REAL)"
+
+        def _null_last_expr(
+            *,
+            raw_expr: str,
+            direction: str,
+            low_sentinel: float | int = -1000000000,
+            high_sentinel: float | int = 1000000000,
+        ) -> str:
+            if direction == "ASC":
+                return f"COALESCE({raw_expr}, {high_sentinel})"
+            return f"COALESCE({raw_expr}, {low_sentinel})"
+
         sort_map: dict[str, tuple[str, str]] = {
             "activity_desc": ("COALESCE(activity_score, -1000000000)", "DESC"),
+            "activity_asc": ("COALESCE(activity_score, 1000000000)", "ASC"),
             "score_desc": ("COALESCE(score, -1000000000)", "DESC"),
-            "pnl_desc": ("COALESCE(realized_pnl_30d, -1000000000)", "DESC"),
-            "win_desc": ("COALESCE(win_rate_30d, -1)", "DESC"),
-            "trades_desc": ("COALESCE(trades_30d, -1)", "DESC"),
-            "recent_desc": ("COALESCE(last_fill_time, 0)", "DESC"),
+            "score_asc": ("COALESCE(score, 1000000000)", "ASC"),
+            "recent_desc": ("COALESCE(last_fill_time, -1)", "DESC"),
+            "recent_asc": ("COALESCE(last_fill_time, 9223372036854775807)", "ASC"),
             "age_desc": ("COALESCE(age_days, -1)", "DESC"),
+            "age_asc": ("COALESCE(age_days, 1000000000)", "ASC"),
         }
+
+        metric_keys = {
+            "roi": "roi_pct",
+            "drawdown": "max_drawdown_pct",
+            "pnl": "realized_pnl",
+            "win": "win_rate",
+            "pl": "profit_to_loss_ratio",
+            "sharpe": "sharpe",
+        }
+        for period in ("1d", "7d", "30d"):
+            for metric_alias, metric_key in metric_keys.items():
+                raw_expr = _json_metric_raw(period=period, key=metric_key)
+                sort_map[f"{metric_alias}_{period}_desc"] = (
+                    _null_last_expr(raw_expr=raw_expr, direction="DESC"),
+                    "DESC",
+                )
+                sort_map[f"{metric_alias}_{period}_asc"] = (
+                    _null_last_expr(raw_expr=raw_expr, direction="ASC"),
+                    "ASC",
+                )
+
+            trade_expr = {
+                "1d": "trades_24h",
+                "7d": "trades_7d",
+                "30d": "trades_30d",
+            }[period]
+            sort_map[f"trades_{period}_desc"] = (
+                _null_last_expr(raw_expr=trade_expr, direction="DESC", low_sentinel=-1),
+                "DESC",
+            )
+            sort_map[f"trades_{period}_asc"] = (
+                _null_last_expr(raw_expr=trade_expr, direction="ASC", high_sentinel=1000000000),
+                "ASC",
+            )
+
+        # Backward compatibility for existing links/API consumers.
+        sort_map["pnl_desc"] = sort_map["pnl_30d_desc"]
+        sort_map["win_desc"] = sort_map["win_30d_desc"]
+        sort_map["trades_desc"] = sort_map["trades_30d_desc"]
+
         sort_expr, direction = sort_map.get(sort_by, sort_map["activity_desc"])
 
         where: list[str] = []

@@ -139,6 +139,9 @@ def _extract_stat_metrics(stats_json: str | None) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
 
+    metrics_1d = payload.get("metrics_1d")
+    if not isinstance(metrics_1d, dict):
+        metrics_1d = {}
     metrics_7d = payload.get("metrics_7d")
     if not isinstance(metrics_7d, dict):
         metrics_7d = {}
@@ -146,31 +149,88 @@ def _extract_stat_metrics(stats_json: str | None) -> dict[str, Any]:
     if not isinstance(metrics_30d, dict):
         metrics_30d = {}
 
+    def _period_trades(metrics: dict[str, Any]) -> Any:
+        return metrics.get("trade_count", metrics.get("weekly_trades"))
+
     return {
+        "roi_1d": metrics_1d.get("roi_pct"),
         "roi_7d": metrics_7d.get("roi_pct"),
         "roi_30d": metrics_30d.get("roi_pct"),
+        "pnl_1d": metrics_1d.get("realized_pnl"),
         "pnl_7d": metrics_7d.get("realized_pnl"),
         "pnl_30d": metrics_30d.get("realized_pnl"),
+        "win_rate_1d": metrics_1d.get("win_rate"),
         "win_rate_7d": metrics_7d.get("win_rate"),
         "win_rate_30d": metrics_30d.get("win_rate"),
+        "wins_1d": metrics_1d.get("wins"),
         "wins_7d": metrics_7d.get("wins"),
-        "losses_7d": metrics_7d.get("losses"),
         "wins_30d": metrics_30d.get("wins"),
+        "losses_1d": metrics_1d.get("losses"),
+        "losses_7d": metrics_7d.get("losses"),
         "losses_30d": metrics_30d.get("losses"),
+        "profit_to_loss_ratio_1d": metrics_1d.get("profit_to_loss_ratio"),
         "profit_to_loss_ratio_7d": metrics_7d.get("profit_to_loss_ratio"),
         "profit_to_loss_ratio_30d": metrics_30d.get("profit_to_loss_ratio"),
-        "weekly_trades": metrics_7d.get("weekly_trades"),
+        "trades_1d": _period_trades(metrics_1d),
+        "trades_7d": _period_trades(metrics_7d),
+        "trades_30d": _period_trades(metrics_30d),
+        "weekly_trades": metrics_7d.get("weekly_trades", _period_trades(metrics_7d)),
+        "avg_pnl_per_trade_1d": metrics_1d.get("avg_pnl_per_trade"),
         "avg_pnl_per_trade_7d": metrics_7d.get("avg_pnl_per_trade"),
         "avg_pnl_per_trade_30d": metrics_30d.get("avg_pnl_per_trade"),
+        "max_drawdown_1d": metrics_1d.get("max_drawdown_pct"),
         "max_drawdown_7d": metrics_7d.get("max_drawdown_pct"),
         "max_drawdown_30d": metrics_30d.get("max_drawdown_pct"),
+        "sharpe_1d": metrics_1d.get("sharpe"),
         "sharpe_7d": metrics_7d.get("sharpe"),
         "sharpe_30d": metrics_30d.get("sharpe"),
+        "sortino_1d": metrics_1d.get("sortino"),
         "sortino_7d": metrics_7d.get("sortino"),
         "sortino_30d": metrics_30d.get("sortino"),
+        "roi_volatility_1d": metrics_1d.get("roi_volatility_pct"),
         "roi_volatility_7d": metrics_7d.get("roi_volatility_pct"),
         "roi_volatility_30d": metrics_30d.get("roi_volatility_pct"),
     }
+
+
+def _period_trade_count(trader: CatalogTrader, *, period: str, metrics: dict[str, Any]) -> Any:
+    period_norm = _normalize_catalog_period(period)
+    if period_norm == "1d":
+        return metrics.get("trades_1d", trader.trades_24h)
+    if period_norm == "7d":
+        return metrics.get("trades_7d", trader.trades_7d)
+    return metrics.get("trades_30d", trader.trades_30d)
+
+
+def _catalog_sort_value(*, trader: CatalogTrader, sort_by: str) -> float | int:
+    field, _direction, metric_period = _catalog_sort_parts(sort_by)
+    metrics = _extract_stat_metrics(trader.stats_json)
+
+    if field == "activity":
+        return float(trader.activity_score or -10**9)
+    if field == "recent":
+        return int(trader.last_fill_time or 0)
+    if field == "score":
+        return float(trader.score or -10**9)
+    if field == "age":
+        return float(trader.age_days or -1.0)
+
+    period_norm = _normalize_catalog_period(metric_period)
+    if field == "trades":
+        return int(_period_trade_count(trader, period=period_norm, metrics=metrics) or -1)
+
+    metric_key_map = {
+        "roi": f"roi_{period_norm}",
+        "drawdown": f"max_drawdown_{period_norm}",
+        "pnl": f"pnl_{period_norm}",
+        "win": f"win_rate_{period_norm}",
+        "pl": f"profit_to_loss_ratio_{period_norm}",
+        "sharpe": f"sharpe_{period_norm}",
+    }
+    metric_key = metric_key_map.get(field)
+    if metric_key:
+        return float(metrics.get(metric_key) or -10**9)
+    return float(trader.activity_score or -10**9)
 
 
 def _subscribe_button(*, trader_address: str, bot_username: str) -> str:
@@ -288,22 +348,76 @@ async def _admin_auth_middleware(request: web.Request, handler):
     return await handler(request)
 
 
-_CATALOG_SORTS = {
-    "activity_desc",
-    "recent_desc",
-    "score_desc",
-    "pnl_desc",
-    "win_desc",
-    "trades_desc",
-    "age_desc",
-}
+_CATALOG_PERIODS = {"1d", "7d", "30d"}
+_CATALOG_PERIOD_METRIC_FIELDS = {"roi", "drawdown", "pnl", "win", "pl", "sharpe", "trades"}
+_CATALOG_STATIC_FIELDS = {"activity", "recent", "score", "age"}
+_CATALOG_DIRECTIONS = {"asc", "desc"}
+_CATALOG_DEFAULT_PERIOD = "7d"
+_CATALOG_DEFAULT_SORT = "activity_desc"
 
 
-def _normalize_catalog_sort(raw: Any) -> str:
+def _normalize_catalog_period(raw: Any) -> str:
     value = str(raw or "").strip().lower()
-    if value in _CATALOG_SORTS:
+    if value in _CATALOG_PERIODS:
         return value
-    return "activity_desc"
+    return _CATALOG_DEFAULT_PERIOD
+
+
+def _catalog_sort_key(*, field: str, direction: str, period: str) -> str:
+    direction_norm = "asc" if str(direction).strip().lower() == "asc" else "desc"
+    period_norm = _normalize_catalog_period(period)
+    if field in _CATALOG_PERIOD_METRIC_FIELDS:
+        return f"{field}_{period_norm}_{direction_norm}"
+    if field in _CATALOG_STATIC_FIELDS:
+        return f"{field}_{direction_norm}"
+    return _CATALOG_DEFAULT_SORT
+
+
+def _catalog_sort_parts(sort_key: str) -> tuple[str, str, str | None]:
+    value = str(sort_key or "").strip().lower()
+    static_match = re.fullmatch(r"(activity|recent|score|age)_(asc|desc)", value)
+    if static_match:
+        return static_match.group(1), static_match.group(2), None
+
+    metric_match = re.fullmatch(
+        r"(roi|drawdown|pnl|win|pl|sharpe|trades)_(1d|7d|30d)_(asc|desc)",
+        value,
+    )
+    if metric_match:
+        return metric_match.group(1), metric_match.group(3), metric_match.group(2)
+
+    return "activity", "desc", None
+
+
+def _normalize_catalog_sort(raw: Any, *, period: str) -> str:
+    period_norm = _normalize_catalog_period(period)
+    value = str(raw or "").strip().lower()
+    if not value:
+        return _CATALOG_DEFAULT_SORT
+
+    legacy_map = {
+        "activity_desc": "activity_desc",
+        "recent_desc": "recent_desc",
+        "score_desc": "score_desc",
+        "age_desc": "age_desc",
+        "pnl_desc": _catalog_sort_key(field="pnl", direction="desc", period=period_norm),
+        "win_desc": _catalog_sort_key(field="win", direction="desc", period=period_norm),
+        "trades_desc": _catalog_sort_key(field="trades", direction="desc", period=period_norm),
+    }
+    mapped = legacy_map.get(value)
+    if mapped:
+        return mapped
+
+    field, direction, _metric_period = _catalog_sort_parts(value)
+    if field in _CATALOG_PERIOD_METRIC_FIELDS:
+        return _catalog_sort_key(
+            field=field,
+            direction=direction,
+            period=period_norm,
+        )
+    if field in _CATALOG_STATIC_FIELDS and direction in _CATALOG_DIRECTIONS:
+        return _catalog_sort_key(field=field, direction=direction, period=period_norm)
+    return _CATALOG_DEFAULT_SORT
 
 
 def _encode_cursor(*, sort_by: str, value: float | int, address: str) -> str:
@@ -346,17 +460,59 @@ def _render_public_directory(
     bot_username: str,
     next_cursor: str | None,
 ) -> str:
+    selected_period = _normalize_catalog_period(request.query.get("period"))
+    sort_selected = _normalize_catalog_sort(
+        request.query.get("sort"),
+        period=selected_period,
+    )
+
+    def _sort_link(*, field: str, direction: str) -> str:
+        params = {key: value for key, value in request.query.items() if key != "cursor"}
+        params["period"] = selected_period
+        params["sort"] = _catalog_sort_key(
+            field=field,
+            direction=direction,
+            period=selected_period,
+        )
+        return "/?" + urlencode(params)
+
+    def _sortable_th(*, label: str, field: str) -> str:
+        asc_key = _catalog_sort_key(field=field, direction="asc", period=selected_period)
+        desc_key = _catalog_sort_key(field=field, direction="desc", period=selected_period)
+        asc_active = " active" if sort_selected == asc_key else ""
+        desc_active = " active" if sort_selected == desc_key else ""
+        asc_url = _sort_link(field=field, direction="asc")
+        desc_url = _sort_link(field=field, direction="desc")
+        return (
+            "<th>"
+            "<div class='th-sort'>"
+            f"<span>{escape(label)}</span>"
+            "<span class='th-arrows'>"
+            f"<a class='th-arrow{asc_active}' href='{escape(asc_url)}' title='Sort ascending'>&#9650;</a>"
+            f"<a class='th-arrow{desc_active}' href='{escape(desc_url)}' title='Sort descending'>&#9660;</a>"
+            "</span>"
+            "</div>"
+            "</th>"
+        )
+
+    period_title = selected_period
+    trades_column_label = f"Trades {period_title}"
     rows = []
     for index, trader in enumerate(traders, start=1):
         metrics = _extract_stat_metrics(trader.stats_json)
-        drawdown_7d = metrics.get("max_drawdown_7d")
-        drawdown_value = -float(drawdown_7d) if drawdown_7d is not None else None
-        win_rate_7d = _fmt_percent(metrics.get("win_rate_7d"), digits=2, ratio=True)
-        pl_ratio_7d_raw = metrics.get("profit_to_loss_ratio_7d")
-        pl_ratio_7d = (
-            f"{float(pl_ratio_7d_raw):.2f} : 1"
-            if pl_ratio_7d_raw is not None
+        drawdown_raw = metrics.get(f"max_drawdown_{selected_period}")
+        drawdown_value = -float(drawdown_raw) if drawdown_raw is not None else None
+        win_rate = _fmt_percent(metrics.get(f"win_rate_{selected_period}"), digits=2, ratio=True)
+        pl_ratio_raw = metrics.get(f"profit_to_loss_ratio_{selected_period}")
+        pl_ratio = (
+            f"{float(pl_ratio_raw):.2f} : 1"
+            if pl_ratio_raw is not None
             else "-"
+        )
+        trades_in_period = _period_trade_count(
+            trader,
+            period=selected_period,
+            metrics=metrics,
         )
         last_traded_at = _fmt_utc_timestamp_ms(trader.last_fill_time)
         minutes_since = _minutes_since(trader.last_fill_time)
@@ -369,14 +525,13 @@ def _render_public_directory(
             f"<div class='trader-label'>{escape(trader_label)}</div>"
             f"<code>{escape(trader.address)}</code>"
             "</td>"
-            f"<td>{_fmt_signed(metrics.get('roi_7d'), digits=2, suffix='%')}</td>"
+            f"<td>{_fmt_signed(metrics.get(f'roi_{selected_period}'), digits=2, suffix='%')}</td>"
             f"<td>{_fmt_signed(drawdown_value, digits=2, suffix='%')}</td>"
-            f"<td>{_fmt_signed(metrics.get('pnl_7d'), digits=2)}</td>"
-            f"<td>{win_rate_7d}</td>"
-            f"<td>{pl_ratio_7d}</td>"
-            f"<td>{_fmt_signed(metrics.get('sharpe_7d'), digits=2)}</td>"
-            f"<td>{_fmt(metrics.get('weekly_trades'), 0)}</td>"
-            f"<td>{_fmt(trader.trades_30d, 0)}</td>"
+            f"<td>{_fmt_signed(metrics.get(f'pnl_{selected_period}'), digits=2)}</td>"
+            f"<td>{win_rate}</td>"
+            f"<td>{pl_ratio}</td>"
+            f"<td>{_fmt_signed(metrics.get(f'sharpe_{selected_period}'), digits=2)}</td>"
+            f"<td>{_fmt(trades_in_period, 0)}</td>"
             "<td>"
             f"<div>{escape(last_traded_at)}</div>"
             f"<div class='muted-mini'>{escape(freshness)}</div>"
@@ -388,7 +543,20 @@ def _render_public_directory(
     table_rows = (
         "\n".join(rows)
         if rows
-        else "<tr><td colspan='12'>No traders match your filters.</td></tr>"
+        else "<tr><td colspan='11'>No traders match your filters.</td></tr>"
+    )
+    table_headers = (
+        "<th>#</th>"
+        "<th>Trader</th>"
+        f"{_sortable_th(label=f'{period_title} ROI', field='roi')}"
+        f"{_sortable_th(label=f'{period_title} Drawdown', field='drawdown')}"
+        f"{_sortable_th(label=f'{period_title} PnL', field='pnl')}"
+        f"{_sortable_th(label=f'{period_title} Win Rate', field='win')}"
+        f"{_sortable_th(label=f'{period_title} Profit-to-Loss', field='pl')}"
+        f"{_sortable_th(label=f'{period_title} Sharpe', field='sharpe')}"
+        f"{_sortable_th(label=trades_column_label, field='trades')}"
+        f"{_sortable_th(label='Last Traded At', field='recent')}"
+        "<th>Action</th>"
     )
     refreshed_at = traders[0].refreshed_at if traders else "-"
     pager = ""
@@ -412,26 +580,21 @@ def _render_public_directory(
         "min_score": str(request.query.get("min_score", "")).strip(),
         "min_activity_score": str(request.query.get("min_activity_score", "")).strip(),
         "active_within_minutes": str(request.query.get("active_within_minutes", "")).strip(),
+        "period": selected_period,
     }
-    sort_selected = _normalize_catalog_sort(request.query.get("sort"))
-    sort_options = [
-        ("activity_desc", "Activity score"),
-        ("recent_desc", "Recent trade time"),
-        ("score_desc", "Quality score"),
-        ("pnl_desc", "PnL 30d"),
-        ("win_desc", "Win rate 30d"),
-        ("trades_desc", "Trades 30d"),
-        ("age_desc", "Age (days)"),
-    ]
-    sort_options_html = "".join(
+    period_options_html = "".join(
         (
-            f"<option value='{value}'{' selected' if sort_selected == value else ''}>"
+            f"<option value='{value}'{' selected' if selected_period == value else ''}>"
             f"{escape(label)}</option>"
         )
-        for value, label in sort_options
+        for value, label in (("1d", "1 day"), ("7d", "7 days"), ("30d", "30 days"))
     )
-    active_filter_count = sum(1 for value in filter_values.values() if value)
-    if sort_selected != "activity_desc":
+    active_filter_count = sum(
+        1 for key, value in filter_values.items() if key != "period" and value
+    )
+    if selected_period != _CATALOG_DEFAULT_PERIOD:
+        active_filter_count += 1
+    if sort_selected != _CATALOG_DEFAULT_SORT:
         active_filter_count += 1
     filter_state_label = (
         f"{active_filter_count} active filter{'s' if active_filter_count != 1 else ''}"
@@ -734,6 +897,27 @@ def _render_public_directory(
       text-align:left;
       white-space:nowrap;
     }}
+    .th-sort {{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:8px;
+    }}
+    .th-arrows {{
+      display:inline-flex;
+      flex-direction:column;
+      align-items:center;
+      gap:1px;
+      line-height:1;
+    }}
+    .th-arrow {{
+      color:#6d7894;
+      text-decoration:none;
+      font-size:10px;
+      padding:0 2px;
+    }}
+    .th-arrow:hover {{ color:#c9d4ee; }}
+    .th-arrow.active {{ color:#ffbf54; }}
     tbody td {{
       padding:12px 10px;
       border-bottom:1px solid #1b2130;
@@ -808,6 +992,7 @@ def _render_public_directory(
         <strong>How it works:</strong> Discovery workers collect and score futures traders continuously.<br/>
         Catalog refresh: <strong>{escape(refreshed_at)}</strong>.<br/>
         Table shows objective strategy metrics only (ROI, Drawdown, PnL, Win Rate, P/L Ratio, Sharpe, trade activity).<br/>
+        Use the <strong>Range</strong> filter to switch table metrics between 1d, 7d, and 30d windows.<br/>
         Click <strong>Copy</strong> to receive free crypto signals from your selected trader in Telegram.<br/>
         Open-source repository: <a href='{escape(PROJECT_REPO_URL)}' target='_blank' rel='noopener'>GitHub</a>.<br/>
         Project is donation-supported: PayPal <code>{escape(PAYPAL_DONATION_EMAIL)}</code> or USDT TRC20 <code>{escape(USDT_TRC20_DONATION_ADDRESS)}</code>.<br/>
@@ -849,6 +1034,12 @@ def _render_public_directory(
               <input id='f-q' name='q' value='{escape(filter_values["q"])}' placeholder='Label, wallet, or source' />
             </div>
             <div class='filter-item'>
+              <label for='f-period'>Range</label>
+              <select id='f-period' name='period'>
+                {period_options_html}
+              </select>
+            </div>
+            <div class='filter-item'>
               <label for='f-age'>Min Age (days)</label>
               <input id='f-age' name='min_age_days' type='number' step='1' min='0' value='{escape(filter_values["min_age_days"])}' placeholder='e.g. 30' />
             </div>
@@ -880,13 +1071,8 @@ def _render_public_directory(
               <label for='f-recent'>Active Within (minutes)</label>
               <input id='f-recent' name='active_within_minutes' type='number' step='1' min='0' value='{escape(filter_values["active_within_minutes"])}' placeholder='e.g. 60' />
             </div>
-            <div class='filter-item'>
-              <label for='f-sort'>Sort By</label>
-              <select id='f-sort' name='sort'>
-                {sort_options_html}
-              </select>
-            </div>
           </div>
+          <input type='hidden' name='sort' value='{escape(sort_selected)}' />
           <div class='filter-actions'>
             <button class='filter-apply' type='submit'>Apply Filters</button>
             <a class='filter-reset' href='/'>Reset</a>
@@ -900,18 +1086,7 @@ def _render_public_directory(
       <table>
         <thead>
           <tr>
-            <th>#</th>
-            <th>Trader</th>
-            <th>7d ROI</th>
-            <th>7d Drawdown</th>
-            <th>7d PnL</th>
-            <th>7d Win Rate</th>
-            <th>7d Profit-to-Loss</th>
-            <th>7d Sharpe</th>
-            <th>Trades 7d</th>
-            <th>Trades 30d</th>
-            <th>Last Traded At</th>
-            <th>Action</th>
+            {table_headers}
           </tr>
         </thead>
         <tbody>
@@ -1208,7 +1383,8 @@ def _render_subscribe_landing(
 
 async def subscriber_directory(request: web.Request) -> web.Response:
     settings = request.app["settings"]
-    sort_by = _normalize_catalog_sort(request.query.get("sort"))
+    selected_period = _normalize_catalog_period(request.query.get("period"))
+    sort_by = _normalize_catalog_sort(request.query.get("sort"), period=selected_period)
     limit = max(1, min(200, _to_int(request.query.get("limit"), settings.live_top100_size)))
     cursor_raw = str(request.query.get("cursor", "")).strip()
     cursor = _decode_cursor(cursor_raw, expected_sort=sort_by) if cursor_raw else None
@@ -1266,18 +1442,9 @@ async def subscriber_directory(request: web.Request) -> web.Response:
     if len(traders) > limit:
         visible = traders[:limit]
         last = visible[-1]
-        sort_value_map: dict[str, float | int] = {
-            "activity_desc": float(last.activity_score or -10**9),
-            "recent_desc": int(last.last_fill_time or 0),
-            "score_desc": float(last.score or -10**9),
-            "pnl_desc": float(last.realized_pnl_30d or -10**9),
-            "win_desc": float(last.win_rate_30d or -1.0),
-            "trades_desc": int(last.trades_30d or -1),
-            "age_desc": float(last.age_days or -1.0),
-        }
         next_cursor = _encode_cursor(
             sort_by=sort_by,
-            value=sort_value_map[sort_by],
+            value=_catalog_sort_value(trader=last, sort_by=sort_by),
             address=last.address,
         )
         traders = visible
@@ -1295,7 +1462,8 @@ async def subscriber_directory(request: web.Request) -> web.Response:
 
 async def traders_api(request: web.Request) -> web.Response:
     settings = request.app["settings"]
-    sort_by = _normalize_catalog_sort(request.query.get("sort"))
+    selected_period = _normalize_catalog_period(request.query.get("period"))
+    sort_by = _normalize_catalog_sort(request.query.get("sort"), period=selected_period)
     limit = max(1, min(200, _to_int(request.query.get("limit"), 100)))
     cursor_raw = str(request.query.get("cursor", "")).strip()
     cursor = _decode_cursor(cursor_raw, expected_sort=sort_by) if cursor_raw else None
@@ -1339,18 +1507,9 @@ async def traders_api(request: web.Request) -> web.Response:
     if len(traders) > limit:
         visible = traders[:limit]
         last = visible[-1]
-        sort_value_map: dict[str, float | int] = {
-            "activity_desc": float(last.activity_score or -10**9),
-            "recent_desc": int(last.last_fill_time or 0),
-            "score_desc": float(last.score or -10**9),
-            "pnl_desc": float(last.realized_pnl_30d or -10**9),
-            "win_desc": float(last.win_rate_30d or -1.0),
-            "trades_desc": int(last.trades_30d or -1),
-            "age_desc": float(last.age_days or -1.0),
-        }
         next_cursor = _encode_cursor(
             sort_by=sort_by,
-            value=sort_value_map[sort_by],
+            value=_catalog_sort_value(trader=last, sort_by=sort_by),
             address=last.address,
         )
         traders = visible
@@ -1384,6 +1543,7 @@ async def traders_api(request: web.Request) -> web.Response:
             ],
             "next_cursor": next_cursor,
             "sort": sort_by,
+            "period": selected_period,
             "limit": limit,
         }
     )

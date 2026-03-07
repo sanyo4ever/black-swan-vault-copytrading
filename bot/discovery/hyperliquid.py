@@ -481,6 +481,7 @@ class HyperliquidDiscoveryService:
         total_ntl_pos = self._to_float(margin_summary.get("totalNtlPos")) if margin_summary else None
         total_margin_used = self._to_float(margin_summary.get("totalMarginUsed")) if margin_summary else None
 
+        period_1d = self._compute_period_stats(fills=fills_24h, account_value=account_value)
         period_7d = self._compute_period_stats(fills=fills_7d, account_value=account_value)
         period_30d = self._compute_period_stats(fills=fills_30d, account_value=account_value)
 
@@ -534,13 +535,31 @@ class HyperliquidDiscoveryService:
 
         stats_payload = {
             "vault_tvl": candidate["vault_tvl"],
+            "realized_pnl_1d": period_1d["realized_pnl"],
             "realized_pnl_7d": period_7d["realized_pnl"],
+            "wins_1d": period_1d["wins"],
+            "losses_1d": period_1d["losses"],
             "wins_30d": wins,
             "losses_30d": losses,
             "wins_7d": period_7d["wins"],
             "losses_7d": period_7d["losses"],
+            "win_rate_1d": period_1d["win_rate"],
             "win_rate_7d": period_7d["win_rate"],
             "weekly_trades": period_7d["trade_count"],
+            "metrics_1d": {
+                "roi_pct": period_1d["roi_pct"],
+                "realized_pnl": period_1d["realized_pnl"],
+                "win_rate": period_1d["win_rate"],
+                "wins": period_1d["wins"],
+                "losses": period_1d["losses"],
+                "profit_to_loss_ratio": period_1d["profit_to_loss_ratio"],
+                "trade_count": period_1d["trade_count"],
+                "avg_pnl_per_trade": period_1d["avg_pnl_per_trade"],
+                "max_drawdown_pct": period_1d["max_drawdown_pct"],
+                "sharpe": period_1d["sharpe"],
+                "sortino": period_1d["sortino"],
+                "roi_volatility_pct": period_1d["roi_volatility_pct"],
+            },
             "metrics_7d": {
                 "roi_pct": period_7d["roi_pct"],
                 "realized_pnl": period_7d["realized_pnl"],
@@ -548,6 +567,7 @@ class HyperliquidDiscoveryService:
                 "wins": period_7d["wins"],
                 "losses": period_7d["losses"],
                 "profit_to_loss_ratio": period_7d["profit_to_loss_ratio"],
+                "trade_count": period_7d["trade_count"],
                 "weekly_trades": period_7d["trade_count"],
                 "avg_pnl_per_trade": period_7d["avg_pnl_per_trade"],
                 "max_drawdown_pct": period_7d["max_drawdown_pct"],
@@ -562,7 +582,8 @@ class HyperliquidDiscoveryService:
                 "wins": period_30d["wins"],
                 "losses": period_30d["losses"],
                 "profit_to_loss_ratio": period_30d["profit_to_loss_ratio"],
-                "weekly_trades": period_7d["trade_count"],
+                "trade_count": period_30d["trade_count"],
+                "weekly_trades": period_30d["trade_count"],
                 "avg_pnl_per_trade": period_30d["avg_pnl_per_trade"],
                 "max_drawdown_pct": period_30d["max_drawdown_pct"],
                 "sharpe": period_30d["sharpe"],
