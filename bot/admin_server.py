@@ -353,6 +353,10 @@ def _render_public_directory(
     h1 {{ margin:0 0 8px; }}
     p {{ margin:0; color:var(--muted); }}
     .quick-info {{ margin-top:10px; color:var(--muted); font-size:13px; line-height:1.5; }}
+    .hero-actions {{ margin-top:12px; display:flex; gap:10px; flex-wrap:wrap; }}
+    .hero-btn {{ display:inline-block; border-radius:10px; border:1px solid #2f6ab5; background:#1d3f6d; color:var(--text); text-decoration:none; padding:8px 12px; font-size:13px; }}
+    .hero-btn:hover {{ background:#24538f; }}
+    .hero-thanks {{ margin-top:10px; color:#b8d2f3; font-size:13px; }}
     form {{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; }}
     input,select {{ background:#0e1a30; border:1px solid var(--line); color:var(--text); border-radius:8px; padding:7px 9px; }}
     button {{ background:#20477a; border:1px solid #2f6ab5; color:var(--text); border-radius:8px; padding:7px 10px; cursor:pointer; }}
@@ -369,11 +373,18 @@ def _render_public_directory(
     <div class='card'>
       <h1>Futures Traders Catalog</h1>
       <p>Browse all traders stored in database and open a personal Telegram chat in one click.</p>
+      <div class='hero-actions'>
+        <a class='hero-btn' href='{escape(PROJECT_REPO_URL)}' target='_blank' rel='noopener'>Contribute on GitHub</a>
+        <a class='hero-btn' href='{escape(PROJECT_REPO_URL)}/issues/new' target='_blank' rel='noopener'>Report Issue / Idea</a>
+      </div>
+      <div class='hero-thanks'>
+        Thank you to everyone helping keep this server running. Your support makes public access possible.
+      </div>
       <div class='quick-info'>
         <strong>How it works:</strong> Discovery workers collect and score traders continuously.<br/>
         Catalog refresh: <strong>{escape(refreshed_at)}</strong>.<br/>
         Click <strong>Open Trader Chat</strong> to receive new fills from that trader in Telegram.<br/>
-        This project is open-source: <a href='{escape(PROJECT_REPO_URL)}' target='_blank' rel='noopener'>GitHub</a>.<br/>
+        Open-source repository: <a href='{escape(PROJECT_REPO_URL)}' target='_blank' rel='noopener'>GitHub</a>.<br/>
         Project is donation-supported: PayPal <code>{escape(PAYPAL_DONATION_EMAIL)}</code> or USDT TRC20 <code>{escape(USDT_TRC20_DONATION_ADDRESS)}</code>.<br/>
         Informational only. Not financial advice.
       </div>
