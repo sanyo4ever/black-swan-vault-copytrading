@@ -1,0 +1,23 @@
+[Unit]
+Description=CryptoInsider Admin Web
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cryptoinsider
+Group=cryptoinsider
+WorkingDirectory=/opt/cryptoinsider/app
+EnvironmentFile=/etc/cryptoinsider/env
+ExecStart=/opt/cryptoinsider/app/.venv/bin/python admin.py --host 127.0.0.1 --port 8080
+Restart=always
+RestartSec=3
+StartLimitIntervalSec=0
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/cryptoinsider/app/data
+
+[Install]
+WantedBy=multi-user.target

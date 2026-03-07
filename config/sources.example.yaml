@@ -1,0 +1,38 @@
+# Copy this file to config/sources.yaml and edit values.
+
+sources:
+  - id: hl_futures_feed
+    type: hyperliquid_futures
+    name: Hyperliquid Futures
+    enabled: true
+    trader_limit: 20
+    max_fills_per_trader: 5
+    lookback_minutes: 90
+
+  - id: elite_rss_signals
+    type: rss
+    enabled: false
+    url: https://example.com/crypto-signals.xml
+    limit: 5
+
+  - id: quantdesk_api
+    type: json_api
+    enabled: false
+    url: https://example.com/api/signals
+    method: GET
+    headers:
+      Authorization: Bearer REPLACE_ME
+    item_path: data.signals
+    field_map:
+      id: id
+      source: trader
+      symbol: symbol
+      side: side
+      entry: entry
+      stop_loss: stop_loss
+      take_profit: take_profit
+      timeframe: timeframe
+      note: note
+      timestamp: created_at
+    static_values:
+      source: QuantDesk
