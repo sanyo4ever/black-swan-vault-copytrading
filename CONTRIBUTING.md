@@ -30,6 +30,12 @@ python -m unittest -q tests/test_telegram_client.py
 python -m unittest -q tests/test_subscriber_bot.py
 ```
 
+After manual/E2E tests against shared DBs, clean synthetic trader rows:
+
+```bash
+python scripts/cleanup_test_traders.py --postgres-url "$DATABASE_URL" --apply --yes
+```
+
 ## Branch and commit style
 
 - Create a feature branch from `main`
@@ -50,6 +56,7 @@ Recommended commit style:
 - Code builds and tests pass locally
 - New behavior is documented
 - No secrets/tokens in code, docs, screenshots, or logs
+- No leftover test traders in shared DBs (`cleanup_test_traders.py` if needed)
 - Migration steps are included if schema/env changed
 - PR description explains why the change is needed
 

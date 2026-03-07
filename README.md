@@ -151,6 +151,18 @@ Core tables:
 - `subscriptions`, `delivery_sessions`: Telegram delivery lifecycle
 - `discovery_runs`: discovery run observability
 
+## Test Data Hygiene
+
+Never leave synthetic traders in shared databases after manual/E2E testing.
+
+```bash
+# dry run
+python scripts/cleanup_test_traders.py --postgres-url "$DATABASE_URL"
+
+# apply deletion (explicit confirm)
+python scripts/cleanup_test_traders.py --postgres-url "$DATABASE_URL" --apply --yes
+```
+
 ## Open Source, License, and Commercial Use
 
 This project uses a dual licensing policy:
