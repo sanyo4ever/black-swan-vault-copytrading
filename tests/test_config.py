@@ -25,6 +25,24 @@ class ConfigTests(unittest.TestCase):
                 os.environ.clear()
                 os.environ.update(old)
 
+    def test_discovery_age_probe_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old = dict(os.environ)
+            try:
+                os.environ["TELEGRAM_BOT_TOKEN"] = "123:abc"
+                os.environ["TELEGRAM_CHANNEL_ID"] = "-1001"
+                os.environ["DATABASE_PATH"] = str(Path(tmpdir) / "db.sqlite")
+                os.environ["SOURCES_CONFIG_PATH"] = str(Path(tmpdir) / "sources.yaml")
+                os.environ["DISCOVERY_AGE_PROBE_ENABLED"] = "false"
+                os.environ["DISCOVERY_FILL_CAP_HINT"] = "1234"
+
+                settings = load_settings()
+                self.assertFalse(settings.discovery_age_probe_enabled)
+                self.assertEqual(settings.discovery_fill_cap_hint, 1234)
+            finally:
+                os.environ.clear()
+                os.environ.update(old)
+
 
 if __name__ == "__main__":
     unittest.main()

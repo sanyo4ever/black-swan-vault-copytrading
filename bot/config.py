@@ -27,6 +27,8 @@ class Settings:
     discovery_min_trades_7d: int
     discovery_window_hours: int
     discovery_concurrency: int
+    discovery_fill_cap_hint: int
+    discovery_age_probe_enabled: bool
     discovery_interval_seconds: int
     admin_panel_username: str
     admin_panel_password: str
@@ -45,6 +47,16 @@ class Settings:
 
 class ConfigError(RuntimeError):
     pass
+
+
+def _get_bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if not normalized:
+        return default
+    return normalized in {"1", "true", "yes", "on"}
 
 
 def _get_required_env(name: str) -> str:
@@ -92,6 +104,8 @@ def load_settings(
         discovery_min_trades_7d=int(os.getenv("DISCOVERY_MIN_TRADES_7D", "1")),
         discovery_window_hours=int(os.getenv("DISCOVERY_WINDOW_HOURS", "24")),
         discovery_concurrency=int(os.getenv("DISCOVERY_CONCURRENCY", "6")),
+        discovery_fill_cap_hint=int(os.getenv("DISCOVERY_FILL_CAP_HINT", "1900")),
+        discovery_age_probe_enabled=_get_bool_env("DISCOVERY_AGE_PROBE_ENABLED", True),
         discovery_interval_seconds=int(os.getenv("DISCOVERY_INTERVAL_SECONDS", "900")),
         admin_panel_username=admin_panel_username,
         admin_panel_password=admin_panel_password,

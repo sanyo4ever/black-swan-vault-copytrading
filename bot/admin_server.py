@@ -26,6 +26,8 @@ def _discovery_config_from_settings(settings) -> HyperliquidDiscoveryConfig:
         min_trades_7d=settings.discovery_min_trades_7d,
         window_hours=settings.discovery_window_hours,
         concurrency=settings.discovery_concurrency,
+        fill_cap_hint=settings.discovery_fill_cap_hint,
+        age_probe_enabled=settings.discovery_age_probe_enabled,
     )
 
 

@@ -25,6 +25,8 @@ class HyperliquidDiscoveryConfig:
     min_trades_7d: int = 1
     window_hours: int = 24
     concurrency: int = 6
+    fill_cap_hint: int = 1900
+    age_probe_enabled: bool = True
 
 
 class HyperliquidDiscoveryService:
@@ -88,6 +90,29 @@ class HyperliquidDiscoveryService:
             return int(raw)
         except (TypeError, ValueError):
             return 0
+
+    async def _probe_account_first_activity_time(self, address: str) -> int | None:
+        try:
+            updates = await self._info(
+                {
+                    "type": "userNonFundingLedgerUpdates",
+                    "user": address,
+                    "startTime": 0,
+                }
+            )
+        except Exception:
+            return None
+        if not isinstance(updates, list):
+            return None
+
+        times = [
+            self._to_int(item.get("time"))
+            for item in updates
+            if isinstance(item, dict) and self._to_int(item.get("time")) > 0
+        ]
+        if not times:
+            return None
+        return min(times)
 
     async def _fetch_candidates(self) -> list[dict[str, Any]]:
         try:
@@ -254,6 +279,22 @@ class HyperliquidDiscoveryService:
         first_fill_time = self._to_int(normalized[0].get("time")) if normalized else None
         last_fill_time = self._to_int(normalized[-1].get("time")) if normalized else None
         age_days = ((now_ms - first_fill_time) / MS_DAY) if first_fill_time else None
+        fills_capped = len(normalized) >= max(1, self._config.fill_cap_hint)
+        age_probe_used = False
+        ledger_first_activity_time = None
+        if (
+            self._config.age_probe_enabled
+            and fills_capped
+            and (age_days is None or age_days < self._config.min_age_days)
+        ):
+            ledger_first_activity_time = await self._probe_account_first_activity_time(
+                candidate["address"]
+            )
+            if ledger_first_activity_time is not None and ledger_first_activity_time > 0:
+                ledger_age_days = (now_ms - ledger_first_activity_time) / MS_DAY
+                if age_days is None or ledger_age_days > age_days:
+                    age_days = ledger_age_days
+                    age_probe_used = True
 
         notionals: list[float] = []
         closed_pnls: list[float] = []
@@ -323,6 +364,10 @@ class HyperliquidDiscoveryService:
             "vault_tvl": candidate["vault_tvl"],
             "wins_30d": wins,
             "losses_30d": losses,
+            "fills_sample_size": len(normalized),
+            "fills_capped": fills_capped,
+            "age_probe_used": age_probe_used,
+            "ledger_first_activity_time": ledger_first_activity_time,
             "score_components": {
                 "consistency": round(consistency_component, 4),
                 "frequency": round(frequency_component, 4),
