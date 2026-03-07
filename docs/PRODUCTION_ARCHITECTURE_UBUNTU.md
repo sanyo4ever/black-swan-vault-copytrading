@@ -221,3 +221,8 @@ Acceptance SLOs:
 4. Implement payment + subscription state machine.
 5. Implement delivery binding (chat pool / DM).
 6. Add observability and runbooks.
+
+## 11. Official References
+- Telegram Bot API: https://core.telegram.org/bots/api
+- Bot payments in Stars (`currency=XTR`): https://core.telegram.org/bots/payments-stars
+- Telegram Stars API/revenue and TON withdrawal context: https://core.telegram.org/api/stars
