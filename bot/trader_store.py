@@ -3618,10 +3618,11 @@ class TraderStore:
         if not payload:
             return
 
+        max_expr = "GREATEST(COALESCE(last_fill_time, 0), ?)" if self._driver == "postgres" else "MAX(COALESCE(last_fill_time, 0), ?)"
         self._executemany(
-            """
+            f"""
             UPDATE tracked_traders
-            SET last_fill_time = MAX(COALESCE(last_fill_time, 0), ?),
+            SET last_fill_time = {max_expr},
                 updated_at = CURRENT_TIMESTAMP
             WHERE address = ?
             """,
