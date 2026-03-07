@@ -179,6 +179,19 @@ def _client_ip(request: web.Request) -> str:
     return str(request.remote or "-")
 
 
+def _request_origin(request: web.Request) -> str:
+    xfp = request.headers.get("X-Forwarded-Proto", "").strip()
+    proto = xfp.split(",")[0].strip() if xfp else request.scheme
+    if proto not in {"http", "https"}:
+        proto = request.scheme
+
+    xfh = request.headers.get("X-Forwarded-Host", "").strip()
+    host = xfh.split(",")[0].strip() if xfh else request.host
+    host = host or request.host
+
+    return f"{proto}://{host}"
+
+
 @web.middleware
 async def _request_logging_middleware(request: web.Request, handler):
     logger: logging.Logger = request.app["logger"]
@@ -336,14 +349,104 @@ def _render_public_directory(
             "</div>"
         )
 
+    origin = _request_origin(request)
+    canonical_url = f"{origin}/"
+    current_url = f"{origin}{request.path_qs}"
+    has_query_filters = bool(request.query)
+    robots = (
+        "noindex,follow"
+        if has_query_filters
+        else "index,follow,max-snippet:-1,max-image-preview:large,max-video-preview:-1"
+    )
+    page_title = "Free Crypto Copy Trading Signals for Futures | Black Swan Vault"
+    page_description = (
+        "Discover active futures traders, compare real performance stats, and start Telegram copy "
+        "trading feeds in one click. Open-source and donation-supported."
+    )
+    page_keywords = (
+        "copy trading, crypto copy trading, futures copy trading, free crypto signals, "
+        "telegram trading signals, crypto futures signals, copytrading bot"
+    )
+    website_schema = json.dumps(
+        {
+            "@context": "https://schema.org",
+            "@type": "WebSite",
+            "name": "Black Swan Vault",
+            "url": canonical_url,
+            "description": page_description,
+            "potentialAction": {
+                "@type": "SearchAction",
+                "target": f"{canonical_url}?q={{search_term_string}}",
+                "query-input": "required name=search_term_string",
+            },
+        },
+        separators=(",", ":"),
+    )
+    faq_schema = json.dumps(
+        {
+            "@context": "https://schema.org",
+            "@type": "FAQPage",
+            "mainEntity": [
+                {
+                    "@type": "Question",
+                    "name": "Is this crypto copy trading directory free?",
+                    "acceptedAnswer": {
+                        "@type": "Answer",
+                        "text": (
+                            "Yes. Access is open and donation-supported. You can browse traders and open "
+                            "Telegram trader chats without a paywall."
+                        ),
+                    },
+                },
+                {
+                    "@type": "Question",
+                    "name": "Do you provide free crypto signals?",
+                    "acceptedAnswer": {
+                        "@type": "Answer",
+                        "text": (
+                            "The service tracks trader activity and forwards trade fills to Telegram chats. "
+                            "It is informational and not financial advice."
+                        ),
+                    },
+                },
+                {
+                    "@type": "Question",
+                    "name": "How does Telegram copy trading work here?",
+                    "acceptedAnswer": {
+                        "@type": "Answer",
+                        "text": (
+                            "Click Open Trader Chat, start the bot, and the bot posts new fills from the "
+                            "selected trader into your Telegram chat thread."
+                        ),
+                    },
+                },
+            ],
+        },
+        separators=(",", ":"),
+    )
+
     return f"""
 <!doctype html>
 <html lang='en'>
 <head>
   <meta charset='utf-8' />
   <meta name='viewport' content='width=device-width, initial-scale=1' />
+  <meta name='description' content='{escape(page_description)}' />
+  <meta name='keywords' content='{escape(page_keywords)}' />
+  <meta name='robots' content='{escape(robots)}' />
+  <link rel='canonical' href='{escape(canonical_url)}' />
+  <meta property='og:type' content='website' />
+  <meta property='og:site_name' content='Black Swan Vault' />
+  <meta property='og:title' content='{escape(page_title)}' />
+  <meta property='og:description' content='{escape(page_description)}' />
+  <meta property='og:url' content='{escape(current_url)}' />
+  <meta name='twitter:card' content='summary_large_image' />
+  <meta name='twitter:title' content='{escape(page_title)}' />
+  <meta name='twitter:description' content='{escape(page_description)}' />
   <meta http-equiv='refresh' content='30' />
-  <title>Trader Directory</title>
+  <title>{escape(page_title)}</title>
+  <script type='application/ld+json'>{website_schema}</script>
+  <script type='application/ld+json'>{faq_schema}</script>
   <style>
     :root {{ --bg:#08111f; --panel:#12233d; --line:#2b3e5e; --text:#e5eefc; --muted:#9ab0d3; --accent:#6dd3ff; }}
     * {{ box-sizing:border-box; }}
@@ -351,8 +454,14 @@ def _render_public_directory(
     .wrap {{ max-width:1400px; margin:20px auto; padding:0 18px; }}
     .card {{ background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(255,255,255,.01)); border:1px solid var(--line); border-radius:14px; padding:14px; margin-bottom:14px; }}
     h1 {{ margin:0 0 8px; }}
+    h2 {{ margin:0 0 8px; font-size:21px; }}
+    h3 {{ margin:0 0 6px; font-size:16px; }}
     p {{ margin:0; color:var(--muted); }}
     .quick-info {{ margin-top:10px; color:var(--muted); font-size:13px; line-height:1.5; }}
+    .seo-grid {{ margin-top:12px; display:grid; gap:10px; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); }}
+    .seo-box {{ border:1px solid var(--line); border-radius:10px; padding:10px; background:#0e1a30; }}
+    .seo-box ul {{ margin:6px 0 0 18px; color:var(--muted); }}
+    .seo-box li {{ margin:4px 0; }}
     .hero-actions {{ margin-top:12px; display:flex; gap:10px; flex-wrap:wrap; }}
     .hero-btn {{ display:inline-block; border-radius:10px; border:1px solid #2f6ab5; background:#1d3f6d; color:var(--text); text-decoration:none; padding:8px 12px; font-size:13px; }}
     .hero-btn:hover {{ background:#24538f; }}
@@ -366,13 +475,16 @@ def _render_public_directory(
     th,td {{ padding:9px 7px; border-bottom:1px solid var(--line); text-align:left; }}
     th {{ color:var(--muted); }}
     code {{ color:var(--accent); }}
+    .faq-item {{ border-top:1px solid var(--line); padding:10px 0; }}
+    .faq-item:first-of-type {{ border-top:none; padding-top:0; }}
+    .faq-item p {{ line-height:1.5; }}
   </style>
 </head>
 <body>
   <div class='wrap'>
     <div class='card'>
-      <h1>Futures Traders Catalog</h1>
-      <p>Browse all traders stored in database and open a personal Telegram chat in one click.</p>
+      <h1>Crypto Copy Trading Signals for Futures Traders</h1>
+      <p>Find active traders, filter by performance, and open Telegram copy trading feeds in one click.</p>
       <div class='hero-actions'>
         <a class='hero-btn' href='{escape(PROJECT_REPO_URL)}' target='_blank' rel='noopener'>Contribute on GitHub</a>
         <a class='hero-btn' href='{escape(PROJECT_REPO_URL)}/issues/new' target='_blank' rel='noopener'>Report Issue / Idea</a>
@@ -381,12 +493,30 @@ def _render_public_directory(
         Thank you to everyone helping keep this server running. Your support makes public access possible.
       </div>
       <div class='quick-info'>
-        <strong>How it works:</strong> Discovery workers collect and score traders continuously.<br/>
+        <strong>How it works:</strong> Discovery workers collect and score futures traders continuously.<br/>
         Catalog refresh: <strong>{escape(refreshed_at)}</strong>.<br/>
-        Click <strong>Open Trader Chat</strong> to receive new fills from that trader in Telegram.<br/>
+        Click <strong>Open Trader Chat</strong> to receive free crypto signals from your selected trader in Telegram.<br/>
         Open-source repository: <a href='{escape(PROJECT_REPO_URL)}' target='_blank' rel='noopener'>GitHub</a>.<br/>
         Project is donation-supported: PayPal <code>{escape(PAYPAL_DONATION_EMAIL)}</code> or USDT TRC20 <code>{escape(USDT_TRC20_DONATION_ADDRESS)}</code>.<br/>
         Informational only. Not financial advice.
+      </div>
+      <div class='seo-grid'>
+        <div class='seo-box'>
+          <h2>Why Use This Copy Trading Directory</h2>
+          <ul>
+            <li>Free access to crypto futures trader data and Telegram signal delivery.</li>
+            <li>Performance filters: ROI, win rate, PnL, activity, and consistency proxies.</li>
+            <li>Open-source infrastructure you can audit, fork, and improve.</li>
+          </ul>
+        </div>
+        <div class='seo-box'>
+          <h2>Best For</h2>
+          <ul>
+            <li>Users searching for copy trading setups without closed paywalls.</li>
+            <li>Traders comparing active accounts before choosing who to follow.</li>
+            <li>Contributors building transparent crypto signal tooling.</li>
+          </ul>
+        </div>
       </div>
     </div>
 
@@ -438,6 +568,22 @@ def _render_public_directory(
         </tbody>
       </table>
       {pager}
+    </div>
+
+    <div class='card'>
+      <h2>FAQ: Copy Trading and Free Crypto Signals</h2>
+      <div class='faq-item'>
+        <h3>Is this copy trading service free?</h3>
+        <p>Yes. The directory and Telegram flow are open and donation-supported.</p>
+      </div>
+      <div class='faq-item'>
+        <h3>What kind of signals do I get?</h3>
+        <p>You receive trader fill updates captured by the monitoring pipeline and posted to your Telegram thread.</p>
+      </div>
+      <div class='faq-item'>
+        <h3>Is this financial advice?</h3>
+        <p>No. It is an informational copy trading and analytics tool, not investment advice.</p>
+      </div>
     </div>
   </div>
 </body>
