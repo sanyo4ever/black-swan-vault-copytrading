@@ -3,11 +3,12 @@ from __future__ import annotations
 import argparse
 import base64
 import hmac
+import json
 import re
 from datetime import UTC, datetime
 from html import escape
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import aiohttp
 from aiohttp import web
@@ -15,10 +16,10 @@ from aiohttp import web
 from bot.config import load_settings
 from bot.discovery import HyperliquidDiscoveryConfig, HyperliquidDiscoveryService
 from bot.trader_store import (
+    CatalogTrader,
     MODERATION_BLACKLIST,
     MODERATION_NEUTRAL,
     MODERATION_WHITELIST,
-    LiveTopTrader,
     STATUS_ACTIVE,
     STATUS_PAUSED,
     TraderStore,
@@ -129,71 +130,75 @@ async def _admin_auth_middleware(request: web.Request, handler):
     return await handler(request)
 
 
-def _apply_public_filters(traders: list[LiveTopTrader], request: web.Request) -> list[LiveTopTrader]:
-    q = str(request.query.get("q", "")).strip().lower()
-    status = str(request.query.get("status", "ALL")).upper()
+_CATALOG_SORTS = {
+    "activity_desc",
+    "recent_desc",
+    "score_desc",
+    "pnl_desc",
+    "win_desc",
+    "trades_desc",
+    "age_desc",
+}
 
-    min_age_days = _to_float(request.query.get("min_age_days"), 0.0)
-    min_trades_30d = _to_int(request.query.get("min_trades_30d"), 0)
-    min_active_days_30d = _to_int(request.query.get("min_active_days_30d"), 0)
-    min_win_rate_30d = _to_float(request.query.get("min_win_rate_30d"), 0.0)
-    min_realized_pnl_30d = _to_float(request.query.get("min_realized_pnl_30d"), -10**9)
-    min_score = _to_float(request.query.get("min_score"), 0.0)
-    min_activity_score = _to_float(request.query.get("min_activity_score"), 0.0)
 
-    filtered: list[LiveTopTrader] = []
-    for trader in traders:
-        if q and q not in trader.address and q not in (trader.label or "").lower():
-            continue
-        if status in {STATUS_ACTIVE, STATUS_PAUSED} and trader.status != status:
-            continue
-        if (trader.age_days or 0.0) < min_age_days:
-            continue
-        if (trader.trades_30d or 0) < min_trades_30d:
-            continue
-        if (trader.active_days_30d or 0) < min_active_days_30d:
-            continue
-        if ((trader.win_rate_30d or 0.0) * 100.0) < min_win_rate_30d:
-            continue
-        if (trader.realized_pnl_30d or 0.0) < min_realized_pnl_30d:
-            continue
-        if (trader.score or 0.0) < min_score:
-            continue
-        if (trader.activity_score or 0.0) < min_activity_score:
-            continue
-        filtered.append(trader)
+def _normalize_catalog_sort(raw: Any) -> str:
+    value = str(raw or "").strip().lower()
+    if value in _CATALOG_SORTS:
+        return value
+    return "activity_desc"
 
-    sort_by = str(request.query.get("sort", "activity_desc")).strip().lower()
-    sort_map = {
-        "activity_desc": (lambda t: (t.activity_score, -(t.rank_position or 100000)), True),
-        "score_desc": (lambda t: (t.score or -10**9), True),
-        "pnl_desc": (lambda t: (t.realized_pnl_30d or -10**9), True),
-        "win_desc": (lambda t: (t.win_rate_30d or -1), True),
-        "trades_desc": (lambda t: (t.trades_30d or -1), True),
-        "rank_asc": (lambda t: (t.rank_position or 10**9), False),
-        "recent_desc": (lambda t: (t.last_fill_time or 0), True),
-    }
-    sort_fn, reverse = sort_map.get(sort_by, sort_map["activity_desc"])
-    filtered.sort(key=sort_fn, reverse=reverse)
-    return filtered
+
+def _encode_cursor(*, sort_by: str, value: float | int, address: str) -> str:
+    payload = {"s": sort_by, "v": value, "a": address}
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    )
+    return encoded.decode("utf-8")
+
+
+def _decode_cursor(raw: str, *, expected_sort: str) -> tuple[float | int, str] | None:
+    token = str(raw or "").strip()
+    if not token:
+        return None
+    try:
+        padded = token + "=" * (-len(token) % 4)
+        decoded = base64.urlsafe_b64decode(padded.encode("utf-8")).decode("utf-8")
+        data = json.loads(decoded)
+        if not isinstance(data, dict):
+            return None
+        if str(data.get("s", "")) != expected_sort:
+            return None
+        address = str(data.get("a", "")).strip().lower()
+        if not address:
+            return None
+        value = data.get("v")
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return int(value), address
+        return float(value), address
+    except Exception:
+        return None
 
 
 def _render_public_directory(
     *,
-    traders: list[LiveTopTrader],
+    traders: list[CatalogTrader],
     request: web.Request,
     bot_username: str,
+    next_cursor: str | None,
 ) -> str:
     rows = []
-    for trader in traders:
+    for index, trader in enumerate(traders, start=1):
         minutes_since = _minutes_since(trader.last_fill_time)
         freshness = "-" if minutes_since is None else f"{minutes_since}m ago"
         rows.append(
             "<tr>"
-            f"<td>{_fmt(trader.rank_position, 0)}</td>"
+            f"<td>{_fmt(index, 0)}</td>"
             f"<td><code>{escape(trader.address)}</code></td>"
             f"<td>{escape(trader.label or '-')}</td>"
             f"<td>{escape(trader.status)}</td>"
+            f"<td>{escape(trader.moderation_state)}</td>"
             f"<td>{escape(freshness)}</td>"
             f"<td>{_fmt(trader.trades_30d, 0)}</td>"
             f"<td>{_fmt(trader.active_days_30d, 0)}</td>"
@@ -208,9 +213,19 @@ def _render_public_directory(
     table_rows = (
         "\n".join(rows)
         if rows
-        else "<tr><td colspan='12'>No live traders match your filters.</td></tr>"
+        else "<tr><td colspan='13'>No traders match your filters.</td></tr>"
     )
     refreshed_at = traders[0].refreshed_at if traders else "-"
+    pager = ""
+    if next_cursor:
+        params = {key: value for key, value in request.query.items() if key != "cursor"}
+        params["cursor"] = next_cursor
+        next_url = "/?" + urlencode(params)
+        pager = (
+            "<div style='margin-top:10px'>"
+            f"<a class='btn-link' href='{escape(next_url)}'>Next page</a>"
+            "</div>"
+        )
 
     return f"""
 <!doctype html>
@@ -243,11 +258,11 @@ def _render_public_directory(
 <body>
   <div class='wrap'>
     <div class='card'>
-      <h1>Live Futures Top 100</h1>
-      <p>Choose a trader and open a personal Telegram chat in one click.</p>
+      <h1>Futures Traders Catalog</h1>
+      <p>Browse all traders stored in database and open a personal Telegram chat in one click.</p>
       <div class='quick-info'>
-        <strong>How it works:</strong> We rank active futures traders by recency + frequency + quality score.<br/>
-        Top list refreshed by worker. Last refresh: <strong>{escape(refreshed_at)}</strong>.<br/>
+        <strong>How it works:</strong> Discovery workers collect and score traders continuously.<br/>
+        Catalog refresh: <strong>{escape(refreshed_at)}</strong>.<br/>
         Click <strong>Open Trader Chat</strong> to receive new fills from that trader in Telegram.<br/>
         Informational only. Not financial advice.
       </div>
@@ -268,14 +283,15 @@ def _render_public_directory(
         <input name='min_realized_pnl_30d' type='number' step='0.01' value='{escape(str(request.query.get("min_realized_pnl_30d", "-1000000000")))}' placeholder='min pnl 30d' />
         <input name='min_score' type='number' step='0.01' value='{escape(str(request.query.get("min_score", "0")))}' placeholder='min score' />
         <input name='min_activity_score' type='number' step='0.01' value='{escape(str(request.query.get("min_activity_score", "0")))}' placeholder='min activity score' />
+        <input name='active_within_minutes' type='number' step='1' min='0' value='{escape(str(request.query.get("active_within_minutes", "0")))}' placeholder='active within minutes' />
         <select name='sort'>
           <option value='activity_desc'>activity desc</option>
-          <option value='rank_asc'>rank asc</option>
+          <option value='recent_desc'>recent desc</option>
           <option value='score_desc'>score desc</option>
           <option value='pnl_desc'>pnl desc</option>
           <option value='win_desc'>win rate desc</option>
           <option value='trades_desc'>trades desc</option>
-          <option value='recent_desc'>recent desc</option>
+          <option value='age_desc'>age desc</option>
         </select>
         <button type='submit'>Apply Filters</button>
       </form>
@@ -285,10 +301,11 @@ def _render_public_directory(
       <table>
         <thead>
           <tr>
-            <th>Rank</th>
+            <th>#</th>
             <th>Address</th>
             <th>Label</th>
             <th>Status</th>
+            <th>Moderation</th>
             <th>Last Fill</th>
             <th>Trades 30d</th>
             <th>Active Days 30d</th>
@@ -303,6 +320,7 @@ def _render_public_directory(
           {table_rows}
         </tbody>
       </table>
+      {pager}
     </div>
   </div>
 </body>
@@ -511,17 +529,164 @@ def _render_admin_index(*, traders, discovery_runs, message: str | None = None) 
 
 async def subscriber_directory(request: web.Request) -> web.Response:
     settings = request.app["settings"]
-    with TraderStore(settings.database_dsn) as store:
-        traders = store.list_top100_live_traders(limit=settings.live_top100_size)
+    sort_by = _normalize_catalog_sort(request.query.get("sort"))
+    limit = max(1, min(200, _to_int(request.query.get("limit"), settings.live_top100_size)))
+    cursor_raw = str(request.query.get("cursor", "")).strip()
+    cursor = _decode_cursor(cursor_raw, expected_sort=sort_by) if cursor_raw else None
 
-    filtered = _apply_public_filters(traders, request)
+    def _opt_float(name: str, default: float | None = None) -> float | None:
+        value = request.query.get(name)
+        if value is None or str(value).strip() == "":
+            return default
+        return _to_float(value, default if default is not None else 0.0)
+
+    def _opt_int(name: str, default: int | None = None) -> int | None:
+        value = request.query.get(name)
+        if value is None or str(value).strip() == "":
+            return default
+        return _to_int(value, default if default is not None else 0)
+
+    with TraderStore(settings.database_dsn) as store:
+        traders = store.list_catalog_traders(
+            limit=limit + 1,
+            q=str(request.query.get("q", "")),
+            status=str(request.query.get("status", "ALL")).upper(),
+            min_age_days=_opt_float("min_age_days", 0.0),
+            min_trades_30d=_opt_int("min_trades_30d", 0),
+            min_active_days_30d=_opt_int("min_active_days_30d", 0),
+            min_win_rate_30d=(_opt_float("min_win_rate_30d", 0.0) or 0.0) / 100.0,
+            min_realized_pnl_30d=_opt_float("min_realized_pnl_30d", -10**9),
+            min_score=_opt_float("min_score", 0.0),
+            min_activity_score=_opt_float("min_activity_score", 0.0),
+            active_within_minutes=_opt_int("active_within_minutes", 0),
+            sort_by=sort_by,
+            cursor_value=cursor[0] if cursor else None,
+            cursor_address=cursor[1] if cursor else None,
+        )
+
+    next_cursor: str | None = None
+    if len(traders) > limit:
+        visible = traders[:limit]
+        last = visible[-1]
+        sort_value_map: dict[str, float | int] = {
+            "activity_desc": float(last.activity_score or -10**9),
+            "recent_desc": int(last.last_fill_time or 0),
+            "score_desc": float(last.score or -10**9),
+            "pnl_desc": float(last.realized_pnl_30d or -10**9),
+            "win_desc": float(last.win_rate_30d or -1.0),
+            "trades_desc": int(last.trades_30d or -1),
+            "age_desc": float(last.age_days or -1.0),
+        }
+        next_cursor = _encode_cursor(
+            sort_by=sort_by,
+            value=sort_value_map[sort_by],
+            address=last.address,
+        )
+        traders = visible
+
     return web.Response(
         text=_render_public_directory(
-            traders=filtered,
+            traders=traders,
             request=request,
             bot_username=settings.telegram_bot_username,
+            next_cursor=next_cursor,
         ),
         content_type="text/html",
+    )
+
+
+async def traders_api(request: web.Request) -> web.Response:
+    settings = request.app["settings"]
+    sort_by = _normalize_catalog_sort(request.query.get("sort"))
+    limit = max(1, min(200, _to_int(request.query.get("limit"), 100)))
+    cursor_raw = str(request.query.get("cursor", "")).strip()
+    cursor = _decode_cursor(cursor_raw, expected_sort=sort_by) if cursor_raw else None
+
+    def _opt_float(name: str, default: float | None = None) -> float | None:
+        value = request.query.get(name)
+        if value is None or str(value).strip() == "":
+            return default
+        return _to_float(value, default if default is not None else 0.0)
+
+    def _opt_int(name: str, default: int | None = None) -> int | None:
+        value = request.query.get(name)
+        if value is None or str(value).strip() == "":
+            return default
+        return _to_int(value, default if default is not None else 0)
+
+    with TraderStore(settings.database_dsn) as store:
+        traders = store.list_catalog_traders(
+            limit=limit + 1,
+            q=str(request.query.get("q", "")),
+            status=str(request.query.get("status", "ALL")).upper(),
+            moderation_state=str(request.query.get("moderation_state", "ALL")).upper(),
+            min_age_days=_opt_float("min_age_days"),
+            min_trades_30d=_opt_int("min_trades_30d"),
+            min_active_days_30d=_opt_int("min_active_days_30d"),
+            min_win_rate_30d=(
+                (_opt_float("min_win_rate_30d") or 0.0) / 100.0
+                if request.query.get("min_win_rate_30d") is not None
+                else None
+            ),
+            min_realized_pnl_30d=_opt_float("min_realized_pnl_30d"),
+            min_score=_opt_float("min_score"),
+            min_activity_score=_opt_float("min_activity_score"),
+            active_within_minutes=_opt_int("active_within_minutes"),
+            sort_by=sort_by,
+            cursor_value=cursor[0] if cursor else None,
+            cursor_address=cursor[1] if cursor else None,
+        )
+
+    next_cursor: str | None = None
+    if len(traders) > limit:
+        visible = traders[:limit]
+        last = visible[-1]
+        sort_value_map: dict[str, float | int] = {
+            "activity_desc": float(last.activity_score or -10**9),
+            "recent_desc": int(last.last_fill_time or 0),
+            "score_desc": float(last.score or -10**9),
+            "pnl_desc": float(last.realized_pnl_30d or -10**9),
+            "win_desc": float(last.win_rate_30d or -1.0),
+            "trades_desc": int(last.trades_30d or -1),
+            "age_desc": float(last.age_days or -1.0),
+        }
+        next_cursor = _encode_cursor(
+            sort_by=sort_by,
+            value=sort_value_map[sort_by],
+            address=last.address,
+        )
+        traders = visible
+
+    return web.json_response(
+        {
+            "items": [
+                {
+                    "address": trader.address,
+                    "label": trader.label,
+                    "source": trader.source,
+                    "status": trader.status,
+                    "moderation_state": trader.moderation_state,
+                    "moderation_note": trader.moderation_note,
+                    "age_days": trader.age_days,
+                    "trades_24h": trader.trades_24h,
+                    "active_hours_24h": trader.active_hours_24h,
+                    "trades_7d": trader.trades_7d,
+                    "trades_30d": trader.trades_30d,
+                    "active_days_30d": trader.active_days_30d,
+                    "win_rate_30d": trader.win_rate_30d,
+                    "realized_pnl_30d": trader.realized_pnl_30d,
+                    "volume_usd_30d": trader.volume_usd_30d,
+                    "score": trader.score,
+                    "activity_score": trader.activity_score,
+                    "last_fill_time": trader.last_fill_time,
+                    "refreshed_at": trader.refreshed_at,
+                }
+                for trader in traders
+            ],
+            "next_cursor": next_cursor,
+            "sort": sort_by,
+            "limit": limit,
+        }
     )
 
 
@@ -710,6 +875,7 @@ def create_app() -> web.Application:
         [
             web.get("/", subscriber_directory),
             web.get("/directory", subscriber_directory),
+            web.get("/api/traders", traders_api),
             web.get("/subscribe/{address}", subscribe_redirect),
             web.get("/admin", admin_index),
             web.post("/admin/discover", run_discovery),

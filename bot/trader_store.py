@@ -109,6 +109,29 @@ class LiveTopTrader:
 
 
 @dataclass(frozen=True)
+class CatalogTrader:
+    address: str
+    label: str | None
+    source: str
+    status: str
+    moderation_state: str
+    moderation_note: str | None
+    age_days: float | None
+    trades_24h: int | None
+    active_hours_24h: int | None
+    trades_7d: int | None
+    trades_30d: int | None
+    active_days_30d: int | None
+    win_rate_30d: float | None
+    realized_pnl_30d: float | None
+    volume_usd_30d: float | None
+    score: float | None
+    activity_score: float | None
+    last_fill_time: int | None
+    refreshed_at: str
+
+
+@dataclass(frozen=True)
 class DeliveryTarget:
     session_id: int
     subscription_id: int
@@ -387,6 +410,48 @@ class TraderStore:
         )
         self._execute(
             """
+            CREATE INDEX IF NOT EXISTS idx_tracked_traders_last_fill
+            ON tracked_traders(last_fill_time DESC)
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tracked_traders_status_mod
+            ON tracked_traders(status, moderation_state)
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tracked_traders_trades_30d
+            ON tracked_traders(trades_30d DESC)
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tracked_traders_win_rate
+            ON tracked_traders(win_rate_30d DESC)
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tracked_traders_pnl_30d
+            ON tracked_traders(realized_pnl_30d DESC)
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tracked_traders_lower_address
+            ON tracked_traders(lower(address))
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tracked_traders_lower_label
+            ON tracked_traders(lower(label))
+            """
+        )
+        self._execute(
+            """
             CREATE TABLE IF NOT EXISTS discovery_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -501,6 +566,81 @@ class TraderStore:
         )
         self._execute(
             """
+            CREATE TABLE IF NOT EXISTS catalog_current (
+                address TEXT PRIMARY KEY,
+                label TEXT,
+                source TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('ACTIVE', 'PAUSED')),
+                moderation_state TEXT NOT NULL
+                    CHECK(moderation_state IN ('NEUTRAL', 'WHITELIST', 'BLACKLIST')),
+                moderation_note TEXT,
+                age_days REAL,
+                trades_24h INTEGER,
+                active_hours_24h INTEGER,
+                trades_7d INTEGER,
+                trades_30d INTEGER,
+                active_days_30d INTEGER,
+                win_rate_30d REAL,
+                realized_pnl_30d REAL,
+                volume_usd_30d REAL,
+                score REAL,
+                activity_score REAL,
+                last_fill_time INTEGER,
+                refreshed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(address) REFERENCES tracked_traders(address) ON DELETE CASCADE
+            )
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_catalog_current_activity
+            ON catalog_current(activity_score DESC, address ASC)
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_catalog_current_score
+            ON catalog_current(score DESC, address ASC)
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_catalog_current_last_fill
+            ON catalog_current(last_fill_time DESC, address ASC)
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_catalog_current_trades_30d
+            ON catalog_current(trades_30d DESC, address ASC)
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_catalog_current_pnl_30d
+            ON catalog_current(realized_pnl_30d DESC, address ASC)
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_catalog_current_status_mod
+            ON catalog_current(status, moderation_state)
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_catalog_current_lower_address
+            ON catalog_current(lower(address))
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_catalog_current_lower_label
+            ON catalog_current(lower(label))
+            """
+        )
+        self._execute(
+            """
             CREATE TABLE IF NOT EXISTS subscriptions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 chat_id TEXT NOT NULL,
@@ -592,6 +732,11 @@ class TraderStore:
         )
 
     def _ensure_common_tables_postgres(self) -> None:
+        try:
+            self._execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+        except Exception:
+            self._connection.rollback()
+
         self._execute(
             """
             CREATE INDEX IF NOT EXISTS idx_tracked_traders_status
@@ -604,6 +749,57 @@ class TraderStore:
             ON tracked_traders(score DESC)
             """
         )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tracked_traders_last_fill
+            ON tracked_traders(last_fill_time DESC)
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tracked_traders_status_mod
+            ON tracked_traders(status, moderation_state)
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tracked_traders_trades_30d
+            ON tracked_traders(trades_30d DESC)
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tracked_traders_win_rate
+            ON tracked_traders(win_rate_30d DESC)
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tracked_traders_pnl_30d
+            ON tracked_traders(realized_pnl_30d DESC)
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tracked_traders_lower_address
+            ON tracked_traders((lower(address)))
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tracked_traders_lower_label
+            ON tracked_traders((lower(label)))
+            """
+        )
+        try:
+            self._execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_tracked_traders_label_trgm
+                ON tracked_traders USING gin (label gin_trgm_ops)
+                """
+            )
+        except Exception:
+            self._connection.rollback()
         self._execute(
             """
             CREATE TABLE IF NOT EXISTS discovery_runs (
@@ -718,6 +914,90 @@ class TraderStore:
             ON traders_top100_live(address)
             """
         )
+        self._execute(
+            """
+            CREATE TABLE IF NOT EXISTS catalog_current (
+                address TEXT PRIMARY KEY,
+                label TEXT,
+                source TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('ACTIVE', 'PAUSED')),
+                moderation_state TEXT NOT NULL
+                    CHECK(moderation_state IN ('NEUTRAL', 'WHITELIST', 'BLACKLIST')),
+                moderation_note TEXT,
+                age_days DOUBLE PRECISION,
+                trades_24h INTEGER,
+                active_hours_24h INTEGER,
+                trades_7d INTEGER,
+                trades_30d INTEGER,
+                active_days_30d INTEGER,
+                win_rate_30d DOUBLE PRECISION,
+                realized_pnl_30d DOUBLE PRECISION,
+                volume_usd_30d DOUBLE PRECISION,
+                score DOUBLE PRECISION,
+                activity_score DOUBLE PRECISION,
+                last_fill_time BIGINT,
+                refreshed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(address) REFERENCES tracked_traders(address) ON DELETE CASCADE
+            )
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_catalog_current_activity
+            ON catalog_current(activity_score DESC, address ASC)
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_catalog_current_score
+            ON catalog_current(score DESC, address ASC)
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_catalog_current_last_fill
+            ON catalog_current(last_fill_time DESC, address ASC)
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_catalog_current_trades_30d
+            ON catalog_current(trades_30d DESC, address ASC)
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_catalog_current_pnl_30d
+            ON catalog_current(realized_pnl_30d DESC, address ASC)
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_catalog_current_status_mod
+            ON catalog_current(status, moderation_state)
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_catalog_current_lower_address
+            ON catalog_current((lower(address)))
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_catalog_current_lower_label
+            ON catalog_current((lower(label)))
+            """
+        )
+        try:
+            self._execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_catalog_current_label_trgm
+                ON catalog_current USING gin (label gin_trgm_ops)
+                """
+            )
+        except Exception:
+            self._connection.rollback()
         self._execute(
             """
             CREATE TABLE IF NOT EXISTS subscriptions (
@@ -901,6 +1181,30 @@ class TraderStore:
             realized_pnl_30d=row["realized_pnl_30d"],
             volume_usd_30d=row["volume_usd_30d"],
             score=row["score"],
+            last_fill_time=row["last_fill_time"],
+            refreshed_at=TraderStore._format_datetime(row["refreshed_at"]),
+        )
+
+    @staticmethod
+    def _row_to_catalog_trader(row: Mapping[str, Any]) -> CatalogTrader:
+        return CatalogTrader(
+            address=row["address"],
+            label=row["label"],
+            source=row["source"],
+            status=row["status"],
+            moderation_state=row["moderation_state"],
+            moderation_note=row["moderation_note"],
+            age_days=row["age_days"],
+            trades_24h=row["trades_24h"],
+            active_hours_24h=row["active_hours_24h"],
+            trades_7d=row["trades_7d"],
+            trades_30d=row["trades_30d"],
+            active_days_30d=row["active_days_30d"],
+            win_rate_30d=row["win_rate_30d"],
+            realized_pnl_30d=row["realized_pnl_30d"],
+            volume_usd_30d=row["volume_usd_30d"],
+            score=row["score"],
+            activity_score=row["activity_score"],
             last_fill_time=row["last_fill_time"],
             refreshed_at=TraderStore._format_datetime(row["refreshed_at"]),
         )
@@ -1188,6 +1492,274 @@ class TraderStore:
             raise
 
         return len(ranked)
+
+    def refresh_catalog_current(self, *, activity_window_minutes: int = 60) -> int:
+        now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
+        rows = self._execute(
+            """
+            SELECT
+                address,
+                label,
+                source,
+                status,
+                moderation_state,
+                moderation_note,
+                age_days,
+                trades_24h,
+                active_hours_24h,
+                trades_7d,
+                trades_30d,
+                active_days_30d,
+                win_rate_30d,
+                realized_pnl_30d,
+                volume_usd_30d,
+                score,
+                last_fill_time
+            FROM tracked_traders
+            """
+        ).fetchall()
+
+        payload: list[tuple[Any, ...]] = []
+        for row in rows:
+            score = float(row["score"] or 0.0)
+            trades_30d = int(row["trades_30d"] or 0)
+            last_fill = int(row["last_fill_time"]) if row["last_fill_time"] is not None else None
+            if last_fill is None:
+                recency_component = 0.0
+            else:
+                age_minutes = max(0.0, (now_ms - last_fill) / 60000.0)
+                recency_component = (
+                    max(0.0, 1.0 - (age_minutes / max(1, activity_window_minutes))) * 40.0
+                )
+            frequency_component = min(30.0, trades_30d / 12.0)
+            quality_component = min(30.0, max(0.0, score))
+            activity_score = round(recency_component + frequency_component + quality_component, 4)
+            payload.append(
+                (
+                    str(row["address"]),
+                    row["label"],
+                    str(row["source"]),
+                    str(row["status"]),
+                    str(row["moderation_state"]),
+                    row["moderation_note"],
+                    row["age_days"],
+                    row["trades_24h"],
+                    row["active_hours_24h"],
+                    row["trades_7d"],
+                    row["trades_30d"],
+                    row["active_days_30d"],
+                    row["win_rate_30d"],
+                    row["realized_pnl_30d"],
+                    row["volume_usd_30d"],
+                    row["score"],
+                    activity_score,
+                    last_fill,
+                )
+            )
+
+        keep = [str(item[0]) for item in payload]
+        try:
+            if payload:
+                self._executemany(
+                    """
+                    INSERT INTO catalog_current(
+                        address,
+                        label,
+                        source,
+                        status,
+                        moderation_state,
+                        moderation_note,
+                        age_days,
+                        trades_24h,
+                        active_hours_24h,
+                        trades_7d,
+                        trades_30d,
+                        active_days_30d,
+                        win_rate_30d,
+                        realized_pnl_30d,
+                        volume_usd_30d,
+                        score,
+                        activity_score,
+                        last_fill_time,
+                        refreshed_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(address) DO UPDATE SET
+                        label = excluded.label,
+                        source = excluded.source,
+                        status = excluded.status,
+                        moderation_state = excluded.moderation_state,
+                        moderation_note = excluded.moderation_note,
+                        age_days = excluded.age_days,
+                        trades_24h = excluded.trades_24h,
+                        active_hours_24h = excluded.active_hours_24h,
+                        trades_7d = excluded.trades_7d,
+                        trades_30d = excluded.trades_30d,
+                        active_days_30d = excluded.active_days_30d,
+                        win_rate_30d = excluded.win_rate_30d,
+                        realized_pnl_30d = excluded.realized_pnl_30d,
+                        volume_usd_30d = excluded.volume_usd_30d,
+                        score = excluded.score,
+                        activity_score = excluded.activity_score,
+                        last_fill_time = excluded.last_fill_time,
+                        refreshed_at = CURRENT_TIMESTAMP
+                    """,
+                    payload,
+                )
+            if keep:
+                placeholders = ",".join("?" for _ in keep)
+                self._execute(
+                    f"DELETE FROM catalog_current WHERE address NOT IN ({placeholders})",
+                    keep,
+                )
+            else:
+                self._execute("DELETE FROM catalog_current")
+            self._connection.commit()
+        except Exception:
+            self._connection.rollback()
+            raise
+        return len(payload)
+
+    def list_catalog_traders(
+        self,
+        *,
+        limit: int = 101,
+        q: str = "",
+        status: str = "ALL",
+        moderation_state: str = "ALL",
+        min_age_days: float | None = None,
+        min_trades_30d: int | None = None,
+        min_active_days_30d: int | None = None,
+        min_win_rate_30d: float | None = None,
+        min_realized_pnl_30d: float | None = None,
+        min_score: float | None = None,
+        min_activity_score: float | None = None,
+        active_within_minutes: int | None = None,
+        sort_by: str = "activity_desc",
+        cursor_value: float | int | None = None,
+        cursor_address: str | None = None,
+    ) -> list[CatalogTrader]:
+        sort_map: dict[str, tuple[str, str]] = {
+            "activity_desc": ("COALESCE(activity_score, -1000000000)", "DESC"),
+            "score_desc": ("COALESCE(score, -1000000000)", "DESC"),
+            "pnl_desc": ("COALESCE(realized_pnl_30d, -1000000000)", "DESC"),
+            "win_desc": ("COALESCE(win_rate_30d, -1)", "DESC"),
+            "trades_desc": ("COALESCE(trades_30d, -1)", "DESC"),
+            "recent_desc": ("COALESCE(last_fill_time, 0)", "DESC"),
+            "age_desc": ("COALESCE(age_days, -1)", "DESC"),
+        }
+        sort_expr, direction = sort_map.get(sort_by, sort_map["activity_desc"])
+
+        where: list[str] = []
+        params: list[Any] = []
+
+        q_norm = str(q or "").strip().lower()
+        if q_norm:
+            if q_norm.startswith("0x"):
+                where.append(
+                    "("
+                    "lower(address) = ? "
+                    "OR lower(address) LIKE ? "
+                    "OR lower(COALESCE(label, '')) LIKE ? "
+                    "OR lower(source) LIKE ?"
+                    ")"
+                )
+                params.extend([q_norm, f"{q_norm}%", f"%{q_norm}%", f"%{q_norm}%"])
+            else:
+                where.append(
+                    "("
+                    "lower(COALESCE(label, '')) LIKE ? "
+                    "OR lower(address) LIKE ? "
+                    "OR lower(source) LIKE ?"
+                    ")"
+                )
+                params.extend([f"%{q_norm}%", f"%{q_norm}%", f"%{q_norm}%"])
+
+        status_norm = str(status or "").upper()
+        if status_norm in {STATUS_ACTIVE, STATUS_PAUSED}:
+            where.append("status = ?")
+            params.append(status_norm)
+
+        moderation_norm = str(moderation_state or "").upper()
+        if moderation_norm in {
+            MODERATION_NEUTRAL,
+            MODERATION_WHITELIST,
+            MODERATION_BLACKLIST,
+        }:
+            where.append("moderation_state = ?")
+            params.append(moderation_norm)
+
+        if min_age_days is not None:
+            where.append("COALESCE(age_days, 0) >= ?")
+            params.append(float(min_age_days))
+        if min_trades_30d is not None:
+            where.append("COALESCE(trades_30d, 0) >= ?")
+            params.append(int(min_trades_30d))
+        if min_active_days_30d is not None:
+            where.append("COALESCE(active_days_30d, 0) >= ?")
+            params.append(int(min_active_days_30d))
+        if min_win_rate_30d is not None:
+            where.append("COALESCE(win_rate_30d, 0) >= ?")
+            params.append(float(min_win_rate_30d))
+        if min_realized_pnl_30d is not None:
+            where.append("COALESCE(realized_pnl_30d, -1000000000) >= ?")
+            params.append(float(min_realized_pnl_30d))
+        if min_score is not None:
+            where.append("COALESCE(score, -1000000000) >= ?")
+            params.append(float(min_score))
+        if min_activity_score is not None:
+            where.append("COALESCE(activity_score, -1000000000) >= ?")
+            params.append(float(min_activity_score))
+
+        if active_within_minutes is not None and int(active_within_minutes) > 0:
+            cutoff_ms = int(datetime.now(tz=UTC).timestamp() * 1000) - (
+                int(active_within_minutes) * 60 * 1000
+            )
+            where.append("COALESCE(last_fill_time, 0) >= ?")
+            params.append(cutoff_ms)
+
+        if cursor_value is not None and cursor_address:
+            if direction == "DESC":
+                where.append(
+                    f"(({sort_expr}) < ? OR (({sort_expr}) = ? AND address > ?))"
+                )
+            else:
+                where.append(
+                    f"(({sort_expr}) > ? OR (({sort_expr}) = ? AND address > ?))"
+                )
+            params.extend([cursor_value, cursor_value, self.normalize_address(cursor_address)])
+
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        rows = self._execute(
+            f"""
+            SELECT
+                address,
+                label,
+                source,
+                status,
+                moderation_state,
+                moderation_note,
+                age_days,
+                trades_24h,
+                active_hours_24h,
+                trades_7d,
+                trades_30d,
+                active_days_30d,
+                win_rate_30d,
+                realized_pnl_30d,
+                volume_usd_30d,
+                score,
+                activity_score,
+                last_fill_time,
+                refreshed_at
+            FROM catalog_current
+            {where_sql}
+            ORDER BY {sort_expr} {direction}, address ASC
+            LIMIT ?
+            """,
+            (*params, int(limit)),
+        ).fetchall()
+        return [self._row_to_catalog_trader(row) for row in rows]
 
     def list_top100_live_traders(self, *, limit: int = 100) -> list[LiveTopTrader]:
         rows = self._execute(

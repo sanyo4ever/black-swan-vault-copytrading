@@ -6,10 +6,11 @@ Service stack for discovering futures traders, storing rich metrics, and publish
 
 - Continuous discovery worker (`discovery_worker.py`) that updates DB on schedule
 - Universe worker (`universe_worker.py`) that builds long-lived qualified trader pool
-- Top100 worker (`top100_worker.py`) that refreshes live active list (<1h) for subscriber page
+- Top100 worker (`top100_worker.py`) that refreshes `traders_top100_live` and `catalog_current`
 - Auto-discovered traders are added as `PAUSED` by default
 - Rich trader stats (7d/30d activity, PnL, fees, win rate, volume, age, score, margin stats)
-- Public subscriber directory page with filters (`/`) over `traders_top100_live`
+- Public subscriber directory page (`/`) over `catalog_current` with keyset pagination
+- Public JSON API for full catalog filtering/sorting/search: `/api/traders`
 - One-click trader chat flow via Telegram bot (`/subscribe/<trader_address>`)
 - Topic-based 24h delivery sessions per subscription (`createForumTopic` + `deleteForumTopic`)
 - Password-protected admin panel (`/admin`) with add/delete, pause/resume, blacklist/whitelist, bulk moderation, and run discovery now
@@ -156,7 +157,13 @@ python subscriber_bot.py
 ### `traders_top100_live`
 
 - rolling live shortlist of active traders (`last_fill_time` within configured window)
-- ranked by activity score for subscriber page
+- maintained for shortlist/ranking use-cases
+
+### `catalog_current`
+
+- denormalized full trader catalog for subscriber page and API
+- includes activity score + moderation fields + sortable metrics
+- supports keyset pagination for stable performance at scale
 
 ### `subscriptions` + `delivery_sessions`
 
@@ -167,7 +174,8 @@ python subscriber_bot.py
 ## Important behavior
 
 - Discovery updates `tracked_traders` stats.
-- Universe/top100 workers derive subscriber-facing list from discovery results.
+- Universe/top100 workers derive rankings from discovery results.
+- `catalog_current` powers full trader directory and `/api/traders`.
 - Traders stay `PAUSED` until you manually click `Resume` in admin.
 - Blacklisted traders are removed from active delivery/monitoring flows until moderation changes.
 - Telegram source monitors addresses from active sessions + active trader set.

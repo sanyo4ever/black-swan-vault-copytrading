@@ -405,6 +405,67 @@ class TraderStoreTests(unittest.TestCase):
             assert t1 is not None
             self.assertEqual(t1.moderation_state, MODERATION_NEUTRAL)
 
+    def test_catalog_refresh_and_keyset_filters(self) -> None:
+        now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
+        addresses = [
+            "0x7777777777777777777777777777777777777771",
+            "0x7777777777777777777777777777777777777772",
+            "0x7777777777777777777777777777777777777773",
+        ]
+        with TraderStore(self.db_path) as store:
+            for idx, address in enumerate(addresses):
+                store.upsert_discovered(
+                    address=address,
+                    label=f"C{idx + 1}",
+                    source="hyperliquid_recent_trades",
+                    trades_24h=5 + idx,
+                    active_hours_24h=3 + idx,
+                    trades_7d=10 + idx,
+                    trades_30d=40 + (idx * 10),
+                    active_days_30d=8 + idx,
+                    first_fill_time=now_ms - (60 * 86_400_000),
+                    last_fill_time=now_ms - (idx * 15 * 60_000),
+                    age_days=60.0,
+                    volume_usd_30d=120000.0 + (idx * 50000.0),
+                    realized_pnl_30d=2000.0 + (idx * 1000.0),
+                    fees_30d=200.0 + (idx * 50.0),
+                    win_rate_30d=0.50 + (idx * 0.05),
+                    long_ratio_30d=0.5,
+                    avg_notional_30d=2500.0,
+                    max_notional_30d=12000.0,
+                    account_value=100000.0,
+                    total_ntl_pos=20000.0,
+                    total_margin_used=7000.0,
+                    score=20.0 + idx,
+                    stats_json="{}",
+                )
+
+            refreshed = store.refresh_catalog_current(activity_window_minutes=60)
+            self.assertEqual(refreshed, 3)
+
+            page1 = store.list_catalog_traders(limit=2, sort_by="activity_desc")
+            self.assertEqual(len(page1), 2)
+            self.assertTrue((page1[0].activity_score or 0.0) >= (page1[1].activity_score or 0.0))
+
+            cursor_value = float(page1[-1].activity_score or -10**9)
+            cursor_address = page1[-1].address
+            page2 = store.list_catalog_traders(
+                limit=2,
+                sort_by="activity_desc",
+                cursor_value=cursor_value,
+                cursor_address=cursor_address,
+            )
+            self.assertGreaterEqual(len(page2), 1)
+            self.assertNotEqual(page1[0].address, page2[0].address)
+
+            filtered = store.list_catalog_traders(
+                limit=10,
+                q=addresses[0][:18],
+                status=STATUS_PAUSED,
+            )
+            self.assertGreaterEqual(len(filtered), 1)
+            self.assertTrue(any(item.address == addresses[0] for item in filtered))
+
 
 if __name__ == "__main__":
     unittest.main()

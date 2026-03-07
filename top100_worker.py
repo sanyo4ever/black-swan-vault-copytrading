@@ -38,11 +38,18 @@ async def _run() -> None:
         cycle_started = time.monotonic()
         try:
             with TraderStore(settings.database_dsn) as store:
+                catalog_size = store.refresh_catalog_current(
+                    activity_window_minutes=settings.live_top100_active_window_minutes,
+                )
                 count = store.refresh_top100_live(
                     max_rows=settings.live_top100_size,
                     active_window_minutes=settings.live_top100_active_window_minutes,
                 )
-            logging.info("Top100 refresh complete: size=%s", count)
+            logging.info(
+                "Catalog refresh complete: size=%s | Top100 refresh complete: size=%s",
+                catalog_size,
+                count,
+            )
         except Exception as exc:
             logging.exception("Top100 cycle failed: %s", exc)
 
