@@ -53,6 +53,51 @@ class HyperliquidDiscoveryService:
         self._store = store
         self._config = config
         self._logger = logger or logging.getLogger("cryptoinsider.discovery")
+        self._rate_limit_counts: dict[str, int] = {}
+        self._rate_limit_max_retry_after: dict[str, float] = {}
+        self._response_retry_counts: dict[str, int] = {}
+        self._client_retry_counts: dict[str, int] = {}
+
+    def _reset_retry_stats(self) -> None:
+        self._rate_limit_counts.clear()
+        self._rate_limit_max_retry_after.clear()
+        self._response_retry_counts.clear()
+        self._client_retry_counts.clear()
+
+    def _record_rate_limit(self, *, payload_type: str, retry_after: float) -> None:
+        key = payload_type or "unknown"
+        self._rate_limit_counts[key] = self._rate_limit_counts.get(key, 0) + 1
+        current_max = self._rate_limit_max_retry_after.get(key, 0.0)
+        self._rate_limit_max_retry_after[key] = max(current_max, retry_after)
+
+    def _record_response_retry(self, *, payload_type: str, status: int) -> None:
+        key = f"{payload_type or 'unknown'}:{status}"
+        self._response_retry_counts[key] = self._response_retry_counts.get(key, 0) + 1
+
+    def _record_client_retry(self, *, payload_type: str, error_name: str) -> None:
+        key = f"{payload_type or 'unknown'}:{error_name or 'ClientError'}"
+        self._client_retry_counts[key] = self._client_retry_counts.get(key, 0) + 1
+
+    def _log_retry_summary(self) -> None:
+        rate_total = sum(self._rate_limit_counts.values())
+        response_total = sum(self._response_retry_counts.values())
+        client_total = sum(self._client_retry_counts.values())
+        if rate_total <= 0 and response_total <= 0 and client_total <= 0:
+            return
+
+        max_retry_after = max(self._rate_limit_max_retry_after.values(), default=0.0)
+        level = logging.WARNING if rate_total >= 50 else logging.INFO
+        self._logger.log(
+            level,
+            "Hyperliquid retry summary rate_limits=%s response_retries=%s client_retries=%s rate_limit_breakdown=%s response_breakdown=%s client_breakdown=%s max_retry_after=%s",
+            rate_total,
+            response_total,
+            client_total,
+            self._rate_limit_counts,
+            self._response_retry_counts,
+            self._client_retry_counts,
+            round(max_retry_after, 3),
+        )
 
     def _merge_with_existing_tracked(
         self, candidates: list[dict[str, Any]]
@@ -115,6 +160,7 @@ class HyperliquidDiscoveryService:
         attempts = 5
         backoff = 1.0
         last_error: Exception | None = None
+        payload_type = str(payload.get("type") or "unknown")
 
         for attempt in range(attempts):
             try:
@@ -122,9 +168,10 @@ class HyperliquidDiscoveryService:
                     if response.status == 429 and attempt < attempts - 1:
                         retry_after_raw = response.headers.get("Retry-After", "").strip()
                         retry_after = float(retry_after_raw) if retry_after_raw else 0.0
-                        self._logger.warning(
+                        self._record_rate_limit(payload_type=payload_type, retry_after=retry_after)
+                        self._logger.debug(
                             "Hyperliquid rate limit payload_type=%s attempt=%s retry_after=%s",
-                            payload.get("type"),
+                            payload_type,
                             attempt + 1,
                             retry_after,
                         )
@@ -137,9 +184,10 @@ class HyperliquidDiscoveryService:
             except aiohttp.ClientResponseError as exc:
                 last_error = exc
                 if exc.status in {429, 500, 502, 503, 504} and attempt < attempts - 1:
-                    self._logger.warning(
+                    self._record_response_retry(payload_type=payload_type, status=exc.status)
+                    self._logger.debug(
                         "Hyperliquid response error payload_type=%s attempt=%s status=%s",
-                        payload.get("type"),
+                        payload_type,
                         attempt + 1,
                         exc.status,
                     )
@@ -150,9 +198,13 @@ class HyperliquidDiscoveryService:
             except aiohttp.ClientError as exc:
                 last_error = exc
                 if attempt < attempts - 1:
-                    self._logger.warning(
+                    self._record_client_retry(
+                        payload_type=payload_type,
+                        error_name=exc.__class__.__name__,
+                    )
+                    self._logger.debug(
                         "Hyperliquid client error payload_type=%s attempt=%s error=%s",
-                        payload.get("type"),
+                        payload_type,
                         attempt + 1,
                         exc,
                     )
@@ -949,6 +1001,7 @@ class HyperliquidDiscoveryService:
 
     async def discover(self) -> dict[str, Any]:
         discovery_source = "hyperliquid_vault_leader_scan"
+        self._reset_retry_stats()
         try:
             candidates = await self._fetch_candidates()
             self._logger.info("Discovery candidates fetched count=%s", len(candidates))
@@ -1122,3 +1175,5 @@ class HyperliquidDiscoveryService:
             )
             self._logger.exception("Discovery failed: %s", exc)
             raise
+        finally:
+            self._log_retry_summary()

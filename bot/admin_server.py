@@ -303,6 +303,16 @@ def _request_origin(request: web.Request) -> str:
     return f"{proto}://{host}"
 
 
+def _http_log_level_for_status(status: int) -> int:
+    if status >= 500:
+        return logging.ERROR
+    if status == 429:
+        return logging.WARNING
+    if status in {401, 403}:
+        return logging.WARNING
+    return logging.INFO
+
+
 @web.middleware
 async def _request_logging_middleware(request: web.Request, handler):
     logger: logging.Logger = request.app["logger"]
@@ -319,7 +329,7 @@ async def _request_logging_middleware(request: web.Request, handler):
         except web.HTTPException as exc:
             duration_ms = int((time.monotonic() - started) * 1000)
             logger.log(
-                logging.INFO if exc.status < 400 else logging.WARNING,
+                _http_log_level_for_status(exc.status),
                 "HTTP exception status=%s duration_ms=%s remote=%s path_qs=%s ua=%s",
                 exc.status,
                 duration_ms,
