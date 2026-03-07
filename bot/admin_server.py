@@ -89,6 +89,50 @@ def _minutes_since(last_fill_time: int | None) -> int | None:
     return int(delta_ms // 60000)
 
 
+def _extract_stat_metrics(stats_json: str | None) -> dict[str, Any]:
+    if not stats_json:
+        return {}
+    try:
+        payload = json.loads(stats_json)
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+
+    metrics_7d = payload.get("metrics_7d")
+    if not isinstance(metrics_7d, dict):
+        metrics_7d = {}
+    metrics_30d = payload.get("metrics_30d")
+    if not isinstance(metrics_30d, dict):
+        metrics_30d = {}
+
+    return {
+        "roi_7d": metrics_7d.get("roi_pct"),
+        "roi_30d": metrics_30d.get("roi_pct"),
+        "pnl_7d": metrics_7d.get("realized_pnl"),
+        "pnl_30d": metrics_30d.get("realized_pnl"),
+        "win_rate_7d": metrics_7d.get("win_rate"),
+        "win_rate_30d": metrics_30d.get("win_rate"),
+        "wins_7d": metrics_7d.get("wins"),
+        "losses_7d": metrics_7d.get("losses"),
+        "wins_30d": metrics_30d.get("wins"),
+        "losses_30d": metrics_30d.get("losses"),
+        "profit_to_loss_ratio_7d": metrics_7d.get("profit_to_loss_ratio"),
+        "profit_to_loss_ratio_30d": metrics_30d.get("profit_to_loss_ratio"),
+        "weekly_trades": metrics_7d.get("weekly_trades"),
+        "avg_pnl_per_trade_7d": metrics_7d.get("avg_pnl_per_trade"),
+        "avg_pnl_per_trade_30d": metrics_30d.get("avg_pnl_per_trade"),
+        "max_drawdown_7d": metrics_7d.get("max_drawdown_pct"),
+        "max_drawdown_30d": metrics_30d.get("max_drawdown_pct"),
+        "sharpe_7d": metrics_7d.get("sharpe"),
+        "sharpe_30d": metrics_30d.get("sharpe"),
+        "sortino_7d": metrics_7d.get("sortino"),
+        "sortino_30d": metrics_30d.get("sortino"),
+        "roi_volatility_7d": metrics_7d.get("roi_volatility_pct"),
+        "roi_volatility_30d": metrics_30d.get("roi_volatility_pct"),
+    }
+
+
 def _subscribe_button(*, trader_address: str, bot_username: str) -> str:
     if not bot_username:
         return "<span style='opacity:.7'>Bot not configured</span>"
@@ -798,6 +842,7 @@ async def traders_api(request: web.Request) -> web.Response:
                     "activity_score": trader.activity_score,
                     "last_fill_time": trader.last_fill_time,
                     "refreshed_at": trader.refreshed_at,
+                    **_extract_stat_metrics(trader.stats_json),
                 }
                 for trader in traders
             ],

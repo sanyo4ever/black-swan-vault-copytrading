@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -111,6 +112,110 @@ class HyperliquidDiscoveryService:
             return int(raw)
         except (TypeError, ValueError):
             return 0
+
+    @staticmethod
+    def _population_std(values: list[float]) -> float:
+        if not values:
+            return 0.0
+        mean = sum(values) / len(values)
+        variance = sum((value - mean) ** 2 for value in values) / len(values)
+        return math.sqrt(max(0.0, variance))
+
+    def _compute_period_stats(
+        self,
+        *,
+        fills: list[dict[str, Any]],
+        account_value: float | None,
+    ) -> dict[str, float | int | None]:
+        closed_pnls: list[float] = []
+        returns: list[float] = []
+        notionals: list[float] = []
+
+        equity = 1.0
+        peak_equity = 1.0
+        max_drawdown = 0.0
+
+        for item in fills:
+            px = self._to_float(item.get("px"))
+            sz = self._to_float(item.get("sz"))
+            notional = abs(px * sz) if px > 0 and sz > 0 else 0.0
+            if notional > 0:
+                notionals.append(notional)
+
+            closed_pnl = self._to_float(item.get("closedPnl"))
+            if abs(closed_pnl) <= 1e-12:
+                continue
+            closed_pnls.append(closed_pnl)
+
+            if notional <= 0:
+                continue
+            trade_return = closed_pnl / notional
+            # Guard against extreme outliers from tiny notionals.
+            trade_return = max(-0.99, min(10.0, trade_return))
+            returns.append(trade_return)
+            equity *= 1.0 + trade_return
+            peak_equity = max(peak_equity, equity)
+            if peak_equity > 0:
+                drawdown = (peak_equity - equity) / peak_equity
+                max_drawdown = max(max_drawdown, drawdown)
+
+        realized_pnl = sum(closed_pnls)
+        wins = sum(1 for value in closed_pnls if value > 0)
+        losses = sum(1 for value in closed_pnls if value < 0)
+        closed_count = wins + losses
+
+        win_rate = (wins / closed_count) if closed_count else None
+        total_profit = sum(value for value in closed_pnls if value > 0)
+        total_loss_abs = abs(sum(value for value in closed_pnls if value < 0))
+        profit_to_loss_ratio = (
+            (total_profit / total_loss_abs) if total_loss_abs > 0 else None
+        )
+        avg_pnl_per_trade = (realized_pnl / closed_count) if closed_count else None
+
+        roi_base = None
+        if account_value is not None and abs(account_value) > 1e-9:
+            roi_base = abs(account_value)
+        else:
+            volume = sum(notionals)
+            if volume > 1e-9:
+                roi_base = volume
+        roi_pct = ((realized_pnl / roi_base) * 100.0) if roi_base else None
+
+        mean_return = (sum(returns) / len(returns)) if returns else 0.0
+        volatility = self._population_std(returns) if returns else 0.0
+        roi_volatility_pct = (volatility * 100.0) if returns else None
+        sharpe = (
+            (mean_return / volatility) * math.sqrt(len(returns))
+            if volatility > 1e-12
+            else None
+        )
+
+        downside = [value for value in returns if value < 0]
+        downside_vol = self._population_std(downside) if downside else 0.0
+        sortino = (
+            (mean_return / downside_vol) * math.sqrt(len(returns))
+            if downside_vol > 1e-12
+            else None
+        )
+
+        return {
+            "trade_count": len(fills),
+            "closed_trade_count": closed_count,
+            "realized_pnl": realized_pnl,
+            "win_rate": win_rate,
+            "wins": wins,
+            "losses": losses,
+            "profit_to_loss_ratio": profit_to_loss_ratio,
+            "avg_pnl_per_trade": avg_pnl_per_trade,
+            "roi_pct": roi_pct,
+            "max_drawdown_pct": (max_drawdown * 100.0) if returns else None,
+            "sharpe": sharpe,
+            "sortino": sortino,
+            "roi_volatility_pct": roi_volatility_pct,
+            "volume_usd": sum(notionals),
+            "avg_notional": ((sum(notionals) / len(fills)) if fills else None),
+            "max_notional": (max(notionals) if notionals else None),
+        }
 
     async def _probe_account_first_activity_time(self, address: str) -> int | None:
         try:
@@ -321,36 +426,6 @@ class HyperliquidDiscoveryService:
                     age_days = ledger_age_days
                     age_probe_used = True
 
-        notionals: list[float] = []
-        closed_pnls: list[float] = []
-        fees_30d = 0.0
-        long_count = 0
-        for item in fills_30d:
-            px = self._to_float(item.get("px"))
-            sz = self._to_float(item.get("sz"))
-            if px > 0 and sz > 0:
-                notionals.append(abs(px * sz))
-
-            closed_pnl = self._to_float(item.get("closedPnl"))
-            closed_pnls.append(closed_pnl)
-            fees_30d += abs(self._to_float(item.get("fee")))
-
-            direction = str(item.get("dir", "")).lower()
-            side = str(item.get("side", "")).upper()
-            if "long" in direction or side == "B":
-                long_count += 1
-
-        volume_usd_30d = sum(notionals)
-        realized_pnl_30d = sum(closed_pnls)
-
-        wins = sum(1 for value in closed_pnls if value > 0)
-        losses = sum(1 for value in closed_pnls if value < 0)
-        win_rate_30d = (wins / (wins + losses)) if (wins + losses) else None
-
-        long_ratio_30d = (long_count / trades_30d) if trades_30d else None
-        avg_notional_30d = (volume_usd_30d / trades_30d) if trades_30d else None
-        max_notional_30d = max(notionals) if notionals else None
-
         clearinghouse_state = await self._info(
             {
                 "type": "clearinghouseState",
@@ -366,6 +441,39 @@ class HyperliquidDiscoveryService:
         account_value = self._to_float(margin_summary.get("accountValue")) if margin_summary else None
         total_ntl_pos = self._to_float(margin_summary.get("totalNtlPos")) if margin_summary else None
         total_margin_used = self._to_float(margin_summary.get("totalMarginUsed")) if margin_summary else None
+
+        period_7d = self._compute_period_stats(fills=fills_7d, account_value=account_value)
+        period_30d = self._compute_period_stats(fills=fills_30d, account_value=account_value)
+
+        fees_30d = sum(abs(self._to_float(item.get("fee"))) for item in fills_30d)
+        long_count = 0
+        for item in fills_30d:
+            direction = str(item.get("dir", "")).lower()
+            side = str(item.get("side", "")).upper()
+            if "long" in direction or side == "B":
+                long_count += 1
+
+        volume_usd_30d = float(period_30d["volume_usd"] or 0.0)
+        realized_pnl_30d = float(period_30d["realized_pnl"] or 0.0)
+        win_rate_30d = (
+            float(period_30d["win_rate"])
+            if period_30d["win_rate"] is not None
+            else None
+        )
+        wins = int(period_30d["wins"] or 0)
+        losses = int(period_30d["losses"] or 0)
+
+        long_ratio_30d = (long_count / trades_30d) if trades_30d else None
+        avg_notional_30d = (
+            float(period_30d["avg_notional"])
+            if period_30d["avg_notional"] is not None
+            else None
+        )
+        max_notional_30d = (
+            float(period_30d["max_notional"])
+            if period_30d["max_notional"] is not None
+            else None
+        )
 
         consistency_component = min(1.0, active_days_30d / 30.0) * 25.0
         frequency_component = min(1.0, trades_30d / 120.0) * 20.0
@@ -387,8 +495,41 @@ class HyperliquidDiscoveryService:
 
         stats_payload = {
             "vault_tvl": candidate["vault_tvl"],
+            "realized_pnl_7d": period_7d["realized_pnl"],
             "wins_30d": wins,
             "losses_30d": losses,
+            "wins_7d": period_7d["wins"],
+            "losses_7d": period_7d["losses"],
+            "win_rate_7d": period_7d["win_rate"],
+            "weekly_trades": period_7d["trade_count"],
+            "metrics_7d": {
+                "roi_pct": period_7d["roi_pct"],
+                "realized_pnl": period_7d["realized_pnl"],
+                "win_rate": period_7d["win_rate"],
+                "wins": period_7d["wins"],
+                "losses": period_7d["losses"],
+                "profit_to_loss_ratio": period_7d["profit_to_loss_ratio"],
+                "weekly_trades": period_7d["trade_count"],
+                "avg_pnl_per_trade": period_7d["avg_pnl_per_trade"],
+                "max_drawdown_pct": period_7d["max_drawdown_pct"],
+                "sharpe": period_7d["sharpe"],
+                "sortino": period_7d["sortino"],
+                "roi_volatility_pct": period_7d["roi_volatility_pct"],
+            },
+            "metrics_30d": {
+                "roi_pct": period_30d["roi_pct"],
+                "realized_pnl": period_30d["realized_pnl"],
+                "win_rate": period_30d["win_rate"],
+                "wins": period_30d["wins"],
+                "losses": period_30d["losses"],
+                "profit_to_loss_ratio": period_30d["profit_to_loss_ratio"],
+                "weekly_trades": period_7d["trade_count"],
+                "avg_pnl_per_trade": period_30d["avg_pnl_per_trade"],
+                "max_drawdown_pct": period_30d["max_drawdown_pct"],
+                "sharpe": period_30d["sharpe"],
+                "sortino": period_30d["sortino"],
+                "roi_volatility_pct": period_30d["roi_volatility_pct"],
+            },
             "fills_sample_size": len(normalized),
             "fills_capped": fills_capped,
             "age_probe_used": age_probe_used,

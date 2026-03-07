@@ -9,6 +9,7 @@ Service stack for discovering futures traders, storing rich metrics, and publish
 - Top100 worker (`top100_worker.py`) that refreshes `traders_top100_live` and `catalog_current`
 - Auto-discovered traders are kept `ACTIVE` by default (blacklist controls delivery blocking)
 - Rich trader stats (7d/30d activity, PnL, fees, win rate, volume, age, score, margin stats)
+- Extended performance stats per trader (7d/30d ROI, PnL, Win/Lose, Profit-to-Loss, Avg PnL/trade, Max Drawdown, Sharpe, Sortino, ROI volatility)
 - Public subscriber directory page (`/`) over `catalog_current` with keyset pagination
 - Public JSON API for full catalog filtering/sorting/search: `/api/traders`
 - One-click trader chat flow via Telegram bot (`/subscribe/<trader_address>`)
@@ -135,6 +136,16 @@ python subscriber_bot.py
 - `http://127.0.0.1:8080/subscribe/<trader_address>` -> subscription landing page (shows 24h duration, no payment) and redirects to Telegram
 - `http://127.0.0.1:8080/subscribe/<trader_address>/go` -> direct deep-link redirect endpoint
 - `http://127.0.0.1:8080/admin` -> admin panel (HTTP Basic Auth)
+
+`/api/traders` now includes extra computed fields:
+- `roi_7d`, `roi_30d`
+- `pnl_7d`, `pnl_30d`
+- `wins_7d`, `losses_7d`, `wins_30d`, `losses_30d`
+- `profit_to_loss_ratio_7d`, `profit_to_loss_ratio_30d`
+- `weekly_trades`, `avg_pnl_per_trade_7d`, `avg_pnl_per_trade_30d`
+- `max_drawdown_7d`, `max_drawdown_30d`
+- `sharpe_7d`, `sharpe_30d`, `sortino_7d`, `sortino_30d`
+- `roi_volatility_7d`, `roi_volatility_30d`
 
 ## Logging and Debugging
 

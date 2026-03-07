@@ -128,6 +128,7 @@ class CatalogTrader:
     score: float | None
     activity_score: float | None
     last_fill_time: int | None
+    stats_json: str | None
     refreshed_at: str
 
 
@@ -613,11 +614,19 @@ class TraderStore:
                 score REAL,
                 activity_score REAL,
                 last_fill_time INTEGER,
+                stats_json TEXT,
                 refreshed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(address) REFERENCES tracked_traders(address) ON DELETE CASCADE
             )
             """
         )
+        existing_catalog_columns = {
+            str(row["name"]) for row in self._execute("PRAGMA table_info(catalog_current)").fetchall()
+        }
+        for column, ddl in {"stats_json": "TEXT"}.items():
+            if column in existing_catalog_columns:
+                continue
+            self._execute(f"ALTER TABLE catalog_current ADD COLUMN {column} {ddl}")
         self._execute(
             """
             CREATE INDEX IF NOT EXISTS idx_catalog_current_activity
@@ -963,9 +972,15 @@ class TraderStore:
                 score DOUBLE PRECISION,
                 activity_score DOUBLE PRECISION,
                 last_fill_time BIGINT,
+                stats_json TEXT,
                 refreshed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(address) REFERENCES tracked_traders(address) ON DELETE CASCADE
             )
+            """
+        )
+        self._execute(
+            """
+            ALTER TABLE catalog_current ADD COLUMN IF NOT EXISTS stats_json TEXT
             """
         )
         self._execute(
@@ -1233,6 +1248,7 @@ class TraderStore:
             score=row["score"],
             activity_score=row["activity_score"],
             last_fill_time=row["last_fill_time"],
+            stats_json=row["stats_json"],
             refreshed_at=TraderStore._format_datetime(row["refreshed_at"]),
         )
 
@@ -1539,7 +1555,8 @@ class TraderStore:
                 realized_pnl_30d,
                 volume_usd_30d,
                 score,
-                last_fill_time
+                last_fill_time,
+                stats_json
             FROM tracked_traders
             """
         ).fetchall()
@@ -1579,6 +1596,7 @@ class TraderStore:
                     row["score"],
                     activity_score,
                     last_fill,
+                    row["stats_json"],
                 )
             )
 
@@ -1606,9 +1624,10 @@ class TraderStore:
                         score,
                         activity_score,
                         last_fill_time,
+                        stats_json,
                         refreshed_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                     ON CONFLICT(address) DO UPDATE SET
                         label = excluded.label,
                         source = excluded.source,
@@ -1627,6 +1646,7 @@ class TraderStore:
                         score = excluded.score,
                         activity_score = excluded.activity_score,
                         last_fill_time = excluded.last_fill_time,
+                        stats_json = excluded.stats_json,
                         refreshed_at = CURRENT_TIMESTAMP
                     """,
                     payload,
@@ -1776,6 +1796,7 @@ class TraderStore:
                 score,
                 activity_score,
                 last_fill_time,
+                stats_json,
                 refreshed_at
             FROM catalog_current
             {where_sql}
