@@ -59,6 +59,19 @@ def _fmt_expiry(value: str) -> str:
     return parsed.strftime("%Y-%m-%d %H:%M UTC")
 
 
+def _fmt_remaining(value: str) -> str:
+    parsed = _parse_db_ts(value)
+    if parsed is None:
+        return "-"
+    now = datetime.now(tz=UTC)
+    seconds = int((parsed - now).total_seconds())
+    if seconds <= 0:
+        return "expired"
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    return f"{hours}h {minutes}m"
+
+
 async def _send_welcome(*, session: aiohttp.ClientSession, settings, chat_id: int) -> None:
     await send_message(
         session,
@@ -190,7 +203,8 @@ async def _handle_start_with_payload(
             text=(
                 "<b>Session started ✅</b>\n"
                 f"Trader: <code>{_short(address)}</code>\n"
-                f"Expires: <b>{_fmt_expiry(session_info.expires_at)}</b>\n\n"
+                f"Expires: <b>{_fmt_expiry(session_info.expires_at)}</b>\n"
+                f"Remaining: <b>{_fmt_remaining(session_info.expires_at)}</b>\n\n"
                 "Сюди будуть приходити нові угоди цього трейдера."
             ),
         )
@@ -273,8 +287,9 @@ async def _handle_message(
         for item in sessions:
             topic = item.topic_name or "Trader thread"
             thread = item.message_thread_id if item.message_thread_id is not None else "-"
+            remaining = _fmt_remaining(item.expires_at)
             lines.append(
-                f"• <code>{_short(item.trader_address)}</code> | {topic} | thread={thread} | exp={_fmt_expiry(item.expires_at)}"
+                f"• <code>{_short(item.trader_address)}</code> | {topic} | thread={thread} | exp={_fmt_expiry(item.expires_at)} | left={remaining}"
             )
         lines.append("\nЗупинити: <code>/stop 0x...</code>")
 

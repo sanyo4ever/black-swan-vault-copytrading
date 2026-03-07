@@ -93,7 +93,7 @@ def _subscribe_button(*, trader_address: str, bot_username: str) -> str:
     encoded = quote(trader_address, safe="")
     return (
         f"<a class='btn-link' href='/subscribe/{encoded}' target='_blank' rel='noopener'>"
-        "Open Trader Chat"
+        "Subscribe (24h Free)"
         "</a>"
     )
 
@@ -527,6 +527,82 @@ def _render_admin_index(*, traders, discovery_runs, message: str | None = None) 
 """
 
 
+def _build_subscribe_deep_link(*, bot_username: str, trader_address: str) -> str:
+    start_payload = f"sub_{trader_address}"
+    return f"https://t.me/{bot_username}?start={quote(start_payload, safe='')}"
+
+
+def _render_subscribe_landing(
+    *,
+    trader,
+    deep_link: str,
+    go_link: str,
+    lifetime_hours: int,
+) -> str:
+    label = trader.label or "-"
+    return f"""
+<!doctype html>
+<html lang='en'>
+<head>
+  <meta charset='utf-8' />
+  <meta name='viewport' content='width=device-width, initial-scale=1' />
+  <title>Subscribe Trader</title>
+  <style>
+    :root {{ --bg:#0b1220; --panel:#131f36; --line:#2b4267; --text:#e8f0ff; --muted:#9eb4d8; --accent:#4ca7ff; --ok:#4bd39e; }}
+    * {{ box-sizing:border-box; }}
+    body {{ margin:0; min-height:100vh; display:grid; place-items:center; font-family:"Space Grotesk","Segoe UI",sans-serif; background:radial-gradient(circle at top,#1a2f52 0%,var(--bg) 62%); color:var(--text); padding:16px; }}
+    .card {{ width:min(760px,100%); background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(255,255,255,.01)); border:1px solid var(--line); border-radius:16px; padding:18px; }}
+    h1 {{ margin:0 0 10px; font-size:24px; }}
+    p {{ color:var(--muted); margin:6px 0; }}
+    .meta {{ margin-top:12px; display:grid; grid-template-columns:1fr 1fr; gap:10px; }}
+    .box {{ border:1px solid var(--line); border-radius:12px; padding:10px; background:#0f1b31; }}
+    .box strong {{ display:block; margin-bottom:3px; font-size:13px; color:var(--muted); }}
+    code {{ color:#88d8ff; }}
+    .cta {{ margin-top:16px; display:flex; flex-wrap:wrap; gap:10px; align-items:center; }}
+    .btn {{ display:inline-block; text-decoration:none; border-radius:10px; padding:10px 14px; border:1px solid #3476bd; background:#1b4679; color:var(--text); }}
+    .btn:hover {{ background:#235998; }}
+    .note {{ margin-top:10px; color:var(--muted); font-size:13px; }}
+    .ok {{ color:var(--ok); }}
+  </style>
+</head>
+<body>
+  <div class='card'>
+    <h1>Trader Subscription</h1>
+    <p>Open Telegram and start your personal trader chat thread.</p>
+    <div class='meta'>
+      <div class='box'><strong>Trader Address</strong><code>{escape(trader.address)}</code></div>
+      <div class='box'><strong>Label</strong>{escape(label)}</div>
+      <div class='box'><strong>Subscription Duration</strong><span class='ok'>{int(lifetime_hours)}h</span> from activation</div>
+      <div class='box'><strong>Payment</strong><span class='ok'>Free now (no payment)</span></div>
+    </div>
+    <div class='cta'>
+      <a class='btn' href='{escape(go_link)}'>Create Chat in Telegram</a>
+      <a class='btn' href='{escape(deep_link)}' target='_blank' rel='noopener'>Open Bot Directly</a>
+      <span class='note'>Auto-open in <span id='count'>5</span>s...</span>
+    </div>
+    <p class='note'>After you press <code>/start</code> in Telegram, bot creates a dedicated thread and posts trades until expiry.</p>
+  </div>
+  <script>
+    (function() {{
+      var secs = 5;
+      var el = document.getElementById('count');
+      var link = {json.dumps(go_link)};
+      var timer = setInterval(function() {{
+        secs -= 1;
+        if (secs <= 0) {{
+          clearInterval(timer);
+          window.location.href = link;
+          return;
+        }}
+        if (el) el.textContent = String(secs);
+      }}, 1000);
+    }})();
+  </script>
+</body>
+</html>
+"""
+
+
 async def subscriber_directory(request: web.Request) -> web.Response:
     settings = request.app["settings"]
     sort_by = _normalize_catalog_sort(request.query.get("sort"))
@@ -715,12 +791,44 @@ async def subscribe_redirect(request: web.Request) -> web.Response:
             text="TELEGRAM_BOT_USERNAME is not configured on server.",
         )
 
-    start_payload = f"sub_{trader.address}"
-    deep_link = (
-        f"https://t.me/{settings.telegram_bot_username}"
-        f"?start={quote(start_payload, safe='')}"
+    deep_link = _build_subscribe_deep_link(
+        bot_username=settings.telegram_bot_username,
+        trader_address=trader.address,
     )
     raise web.HTTPFound(deep_link)
+
+
+async def subscribe_landing(request: web.Request) -> web.Response:
+    settings = request.app["settings"]
+    address = request.match_info.get("address", "")
+
+    with TraderStore(settings.database_dsn) as store:
+        trader = store.get_trader(address=address)
+        if trader is None:
+            raise web.HTTPNotFound(text="Trader not found")
+        if trader.moderation_state == MODERATION_BLACKLIST:
+            raise web.HTTPForbidden(text="Trader is not available for subscription")
+
+    if not settings.telegram_bot_username:
+        return web.Response(
+            status=503,
+            text="TELEGRAM_BOT_USERNAME is not configured on server.",
+        )
+
+    deep_link = _build_subscribe_deep_link(
+        bot_username=settings.telegram_bot_username,
+        trader_address=trader.address,
+    )
+    go_link = f"/subscribe/{quote(trader.address, safe='')}/go"
+    return web.Response(
+        text=_render_subscribe_landing(
+            trader=trader,
+            deep_link=deep_link,
+            go_link=go_link,
+            lifetime_hours=settings.subscription_lifetime_hours,
+        ),
+        content_type="text/html",
+    )
 
 
 async def admin_index(request: web.Request) -> web.Response:
@@ -876,7 +984,8 @@ def create_app() -> web.Application:
             web.get("/", subscriber_directory),
             web.get("/directory", subscriber_directory),
             web.get("/api/traders", traders_api),
-            web.get("/subscribe/{address}", subscribe_redirect),
+            web.get("/subscribe/{address}", subscribe_landing),
+            web.get("/subscribe/{address}/go", subscribe_redirect),
             web.get("/admin", admin_index),
             web.post("/admin/discover", run_discovery),
             web.post("/admin/traders/add", add_trader),

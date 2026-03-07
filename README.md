@@ -125,6 +125,8 @@ python subscriber_bot.py
 
 - `http://127.0.0.1:8080/` -> public subscriber directory with filters
 - `http://127.0.0.1:8080/subscribe/<trader_address>` -> logs request and redirects user to bot deep-link
+- `http://127.0.0.1:8080/subscribe/<trader_address>` -> subscription landing page (shows 24h duration, no payment) and redirects to Telegram
+- `http://127.0.0.1:8080/subscribe/<trader_address>/go` -> direct deep-link redirect endpoint
 - `http://127.0.0.1:8080/admin` -> admin panel (HTTP Basic Auth)
 
 ## Production Planning
