@@ -11,8 +11,13 @@ from bot.config import ConfigError, load_settings, load_sources_config
 from bot.dedup import DedupStore
 from bot.formatter import format_signal
 from bot.sources import build_source
-from bot.telegram_client import delete_forum_topic, send_message
+from bot.telegram_client import TelegramClientError, delete_forum_topic, send_message
 from bot.trader_store import TraderStore
+
+RETRY_BASE_DELAY_SECONDS = 15
+RETRY_MAX_DELAY_SECONDS = 15 * 60
+RETRY_MAX_ATTEMPTS = 8
+RETRY_BATCH_LIMIT = 200
 
 
 def _setup_logging() -> None:
@@ -38,6 +43,320 @@ def _sort_key(signal) -> tuple[int, datetime]:
     return (0, signal.timestamp)
 
 
+def _short_error(exc: Exception, *, limit: int = 500) -> str:
+    text = str(exc).strip() or exc.__class__.__name__
+    if len(text) <= limit:
+        return text
+    return f"{text[: limit - 3]}..."
+
+
+def _retry_delay_seconds(*, attempt_count: int, retry_after: int | None) -> int:
+    if retry_after is not None and retry_after > 0:
+        return max(1, min(RETRY_MAX_DELAY_SECONDS, int(retry_after)))
+    exponent = max(0, int(attempt_count) - 1)
+    delay = RETRY_BASE_DELAY_SECONDS * (2**exponent)
+    return max(1, min(RETRY_MAX_DELAY_SECONDS, delay))
+
+
+def _classify_delivery_error(exc: Exception) -> str:
+    if isinstance(exc, TelegramClientError):
+        if exc.is_flood_limit():
+            return "flood"
+        if exc.is_topic_missing():
+            return "topic_missing"
+        if exc.is_chat_unavailable():
+            return "chat_unavailable"
+        if exc.is_transient():
+            return "transient"
+        return "permanent"
+    if isinstance(exc, (aiohttp.ClientError, asyncio.TimeoutError, OSError)):
+        return "transient"
+    return "permanent"
+
+
+def _deactivate_chat_targets(
+    *,
+    settings,
+    chat_id: str | int,
+    logger: logging.Logger,
+    reason: str,
+) -> None:
+    with TraderStore(settings.database_dsn) as store:
+        sessions = store.cancel_all_chat_subscriptions(chat_id=chat_id)
+        dropped = store.delete_pending_retries_for_chat(chat_id=chat_id)
+    logger.warning(
+        "Deactivated chat targets chat_id=%s sessions=%s pending_retries_deleted=%s reason=%s",
+        chat_id,
+        len(sessions),
+        dropped,
+        reason,
+    )
+
+
+def _deactivate_trader_target(
+    *,
+    settings,
+    chat_id: str | int,
+    trader_address: str | None,
+    message_thread_id: int | None,
+    logger: logging.Logger,
+    reason: str,
+) -> None:
+    if not trader_address:
+        return
+    with TraderStore(settings.database_dsn) as store:
+        sessions = store.cancel_chat_trader_subscriptions(
+            chat_id=chat_id,
+            trader_address=trader_address,
+        )
+        dropped = store.delete_pending_retries_for_target(
+            chat_id=chat_id,
+            trader_address=trader_address,
+            message_thread_id=message_thread_id,
+        )
+    logger.warning(
+        "Deactivated target chat_id=%s trader=%s thread=%s sessions=%s pending_retries_deleted=%s reason=%s",
+        chat_id,
+        trader_address,
+        message_thread_id,
+        len(sessions),
+        dropped,
+        reason,
+    )
+
+
+def _queue_initial_retry(
+    *,
+    settings,
+    dedup_key: str,
+    chat_id: str | int,
+    trader_address: str | None,
+    message_thread_id: int | None,
+    message_text: str,
+    error: str,
+    attempt_count: int,
+    retry_after: int | None,
+    logger: logging.Logger,
+) -> None:
+    delay_seconds = _retry_delay_seconds(
+        attempt_count=attempt_count,
+        retry_after=retry_after,
+    )
+    with TraderStore(settings.database_dsn) as store:
+        store.enqueue_delivery_retry(
+            dedup_key=dedup_key,
+            chat_id=chat_id,
+            trader_address=trader_address,
+            message_thread_id=message_thread_id,
+            message_text=message_text,
+            delay_seconds=delay_seconds,
+            error=error,
+        )
+    logger.warning(
+        "Queued retry dedup=%s chat=%s thread=%s delay=%ss error=%s",
+        dedup_key,
+        chat_id,
+        message_thread_id,
+        delay_seconds,
+        error,
+    )
+
+
+async def _send_live_target(
+    *,
+    settings,
+    http_session,
+    logger: logging.Logger,
+    dedup_key: str,
+    message_text: str,
+    chat_id: str | int,
+    trader_address: str | None,
+    message_thread_id: int | None = None,
+) -> str:
+    try:
+        await send_message(
+            http_session,
+            bot_token=settings.telegram_bot_token,
+            chat_id=chat_id,
+            text=message_text,
+            message_thread_id=message_thread_id,
+        )
+        return "sent"
+    except Exception as exc:
+        category = _classify_delivery_error(exc)
+        error_text = _short_error(exc)
+
+        if (
+            category == "chat_unavailable"
+            and trader_address is not None
+            and message_thread_id is not None
+        ):
+            _deactivate_chat_targets(
+                settings=settings,
+                chat_id=chat_id,
+                logger=logger,
+                reason=error_text,
+            )
+            return "dropped"
+
+        if category == "topic_missing" and message_thread_id is not None:
+            _deactivate_trader_target(
+                settings=settings,
+                chat_id=chat_id,
+                trader_address=trader_address,
+                message_thread_id=message_thread_id,
+                logger=logger,
+                reason=error_text,
+            )
+            return "dropped"
+
+        if category in {"flood", "transient"}:
+            retry_after = exc.retry_after if isinstance(exc, TelegramClientError) else None
+            _queue_initial_retry(
+                settings=settings,
+                dedup_key=dedup_key,
+                chat_id=chat_id,
+                trader_address=trader_address,
+                message_thread_id=message_thread_id,
+                message_text=message_text,
+                error=error_text,
+                attempt_count=1,
+                retry_after=retry_after,
+                logger=logger,
+            )
+            return "queued"
+
+        logger.warning(
+            "Dropping delivery dedup=%s chat=%s thread=%s reason=%s",
+            dedup_key,
+            chat_id,
+            message_thread_id,
+            error_text,
+        )
+        return "dropped"
+
+
+def _handle_retry_delivery_failure(
+    *,
+    settings,
+    logger: logging.Logger,
+    retry_id: int,
+    chat_id: str | int,
+    trader_address: str | None,
+    message_thread_id: int | None,
+    attempt_count: int,
+    exc: Exception,
+) -> str:
+    category = _classify_delivery_error(exc)
+    error_text = _short_error(exc)
+
+    if (
+        category == "chat_unavailable"
+        and trader_address is not None
+        and message_thread_id is not None
+    ):
+        _deactivate_chat_targets(
+            settings=settings,
+            chat_id=chat_id,
+            logger=logger,
+            reason=error_text,
+        )
+        with TraderStore(settings.database_dsn) as store:
+            store.mark_delivery_retry_dead(retry_id=retry_id, error=error_text)
+        return "dead"
+
+    if category == "topic_missing" and message_thread_id is not None:
+        _deactivate_trader_target(
+            settings=settings,
+            chat_id=chat_id,
+            trader_address=trader_address,
+            message_thread_id=message_thread_id,
+            logger=logger,
+            reason=error_text,
+        )
+        with TraderStore(settings.database_dsn) as store:
+            store.mark_delivery_retry_dead(retry_id=retry_id, error=error_text)
+        return "dead"
+
+    if category in {"flood", "transient"}:
+        if int(attempt_count) >= RETRY_MAX_ATTEMPTS:
+            with TraderStore(settings.database_dsn) as store:
+                store.mark_delivery_retry_dead(retry_id=retry_id, error=error_text)
+            logger.warning(
+                "Retry attempts exhausted retry_id=%s attempts=%s error=%s",
+                retry_id,
+                attempt_count,
+                error_text,
+            )
+            return "dead"
+
+        retry_after = exc.retry_after if isinstance(exc, TelegramClientError) else None
+        delay_seconds = _retry_delay_seconds(
+            attempt_count=attempt_count,
+            retry_after=retry_after,
+        )
+        with TraderStore(settings.database_dsn) as store:
+            store.reschedule_delivery_retry(
+                retry_id=retry_id,
+                delay_seconds=delay_seconds,
+                error=error_text,
+            )
+        return "rescheduled"
+
+    with TraderStore(settings.database_dsn) as store:
+        store.mark_delivery_retry_dead(retry_id=retry_id, error=error_text)
+    return "dead"
+
+
+async def _process_retry_queue(*, settings, http_session, dedup_store, logger) -> int:
+    with TraderStore(settings.database_dsn) as store:
+        jobs = store.list_due_delivery_retries(limit=RETRY_BATCH_LIMIT)
+
+    if not jobs:
+        return 0
+
+    sent = 0
+    rescheduled = 0
+    dead = 0
+    for job in jobs:
+        try:
+            await send_message(
+                http_session,
+                bot_token=settings.telegram_bot_token,
+                chat_id=job.chat_id,
+                text=job.message_text,
+                message_thread_id=job.message_thread_id,
+            )
+            with TraderStore(settings.database_dsn) as store:
+                store.mark_delivery_retry_sent(retry_id=job.id)
+            dedup_store.remember(job.dedup_key)
+            sent += 1
+        except Exception as exc:
+            outcome = _handle_retry_delivery_failure(
+                settings=settings,
+                logger=logger,
+                retry_id=job.id,
+                chat_id=job.chat_id,
+                trader_address=job.trader_address,
+                message_thread_id=job.message_thread_id,
+                attempt_count=job.attempt_count,
+                exc=exc,
+            )
+            if outcome == "rescheduled":
+                rescheduled += 1
+            else:
+                dead += 1
+
+    logger.info(
+        "Retry queue processed due=%s sent=%s rescheduled=%s dead=%s",
+        len(jobs),
+        sent,
+        rescheduled,
+        dead,
+    )
+    return sent
+
+
 async def _cleanup_expired_sessions(*, settings, http_session, logger) -> int:
     with TraderStore(settings.database_dsn) as store:
         expired = store.expire_due_delivery_sessions()
@@ -59,6 +378,29 @@ async def _cleanup_expired_sessions(*, settings, http_session, logger) -> int:
                 message_thread_id=item.message_thread_id,
             )
             cleanup_ok += 1
+        except TelegramClientError as exc:
+            if exc.is_topic_missing() or exc.is_chat_unavailable():
+                cleanup_ok += 1
+                logger.info(
+                    "Topic already unavailable during cleanup chat_id=%s thread=%s session_id=%s",
+                    item.chat_id,
+                    item.message_thread_id,
+                    item.session_id,
+                )
+                continue
+            cleanup_failed += 1
+            logger.warning(
+                "Failed to delete expired topic chat_id=%s thread=%s session_id=%s: %s",
+                item.chat_id,
+                item.message_thread_id,
+                item.session_id,
+                exc,
+            )
+            with TraderStore(settings.database_dsn) as store:
+                store.set_delivery_session_cleanup_error(
+                    session_id=item.session_id,
+                    error=str(exc),
+                )
         except Exception as exc:
             cleanup_failed += 1
             logger.warning(
@@ -126,26 +468,26 @@ async def _run_cycle(*, settings, http_session, dedup_store, logger) -> int:
 
         delivered = 0
         failed = 0
+        queued = 0
         try:
             text = format_signal(signal)
 
             if settings.telegram_channel_id:
-                try:
-                    await send_message(
-                        http_session,
-                        bot_token=settings.telegram_bot_token,
-                        chat_id=settings.telegram_channel_id,
-                        text=text,
-                    )
+                status = await _send_live_target(
+                    settings=settings,
+                    http_session=http_session,
+                    logger=logger,
+                    dedup_key=dedup_key,
+                    message_text=text,
+                    chat_id=settings.telegram_channel_id,
+                    trader_address=signal.trader_address,
+                )
+                if status == "sent":
                     delivered += 1
-                except Exception as exc:
+                else:
                     failed += 1
-                    logger.exception(
-                        "Failed to send signal %s to channel %s: %s",
-                        dedup_key,
-                        settings.telegram_channel_id,
-                        exc,
-                    )
+                    if status == "queued":
+                        queued += 1
 
             seen_sub_targets: set[tuple[str, int | None]] = set()
             for target in delivery_targets:
@@ -153,24 +495,22 @@ async def _run_cycle(*, settings, http_session, dedup_store, logger) -> int:
                 if target_key in seen_sub_targets:
                     continue
                 seen_sub_targets.add(target_key)
-                try:
-                    await send_message(
-                        http_session,
-                        bot_token=settings.telegram_bot_token,
-                        chat_id=target.chat_id,
-                        text=text,
-                        message_thread_id=target.message_thread_id,
-                    )
+                status = await _send_live_target(
+                    settings=settings,
+                    http_session=http_session,
+                    logger=logger,
+                    dedup_key=dedup_key,
+                    message_text=text,
+                    chat_id=target.chat_id,
+                    trader_address=target.trader_address,
+                    message_thread_id=target.message_thread_id,
+                )
+                if status == "sent":
                     delivered += 1
-                except Exception as exc:
+                else:
                     failed += 1
-                    logger.exception(
-                        "Failed to send signal %s to chat=%s thread=%s: %s",
-                        dedup_key,
-                        target.chat_id,
-                        target.message_thread_id,
-                        exc,
-                    )
+                    if status == "queued":
+                        queued += 1
         except Exception as exc:
             logger.exception("Failed to publish signal %s: %s", dedup_key, exc)
             continue
@@ -182,10 +522,11 @@ async def _run_cycle(*, settings, http_session, dedup_store, logger) -> int:
         dedup_store.remember(dedup_key)
         published += 1
         logger.info(
-            "Published signal %s to %s target(s), failed=%s",
+            "Published signal %s to %s target(s), failed=%s queued=%s",
             dedup_key,
             delivered,
             failed,
+            queued,
         )
 
     logger.info("Cycle complete. Published %s signal(s)", published)
@@ -213,7 +554,19 @@ async def _run() -> None:
                     http_session=http_session,
                     logger=logger,
                 )
+                await _process_retry_queue(
+                    settings=settings,
+                    http_session=http_session,
+                    dedup_store=dedup_store,
+                    logger=logger,
+                )
                 await _run_cycle(
+                    settings=settings,
+                    http_session=http_session,
+                    dedup_store=dedup_store,
+                    logger=logger,
+                )
+                await _process_retry_queue(
                     settings=settings,
                     http_session=http_session,
                     dedup_store=dedup_store,

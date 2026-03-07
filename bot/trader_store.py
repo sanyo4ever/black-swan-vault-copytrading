@@ -21,6 +21,9 @@ SUBSCRIPTION_CANCELLED = "CANCELLED"
 SESSION_ACTIVE = "ACTIVE"
 SESSION_EXPIRED = "EXPIRED"
 SESSION_ERROR = "ERROR"
+RETRY_PENDING = "PENDING"
+RETRY_SENT = "SENT"
+RETRY_DEAD = "DEAD"
 
 
 @dataclass(frozen=True)
@@ -117,6 +120,19 @@ class DeliverySessionInfo:
     message_thread_id: int | None
     topic_name: str | None
     expires_at: str
+
+
+@dataclass(frozen=True)
+class DeliveryRetryJob:
+    id: int
+    dedup_key: str
+    chat_id: str
+    trader_address: str | None
+    message_thread_id: int | None
+    message_text: str
+    attempt_count: int
+    next_attempt_at: str
+    last_error: str | None
 
 
 class TraderStore:
@@ -511,6 +527,37 @@ class TraderStore:
             ON delivery_sessions(chat_id, status, expires_at)
             """
         )
+        self._execute(
+            """
+            CREATE TABLE IF NOT EXISTS delivery_retry_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dedup_key TEXT NOT NULL,
+                chat_id TEXT NOT NULL,
+                trader_address TEXT,
+                message_thread_id INTEGER NOT NULL DEFAULT 0,
+                message_text TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                status TEXT NOT NULL CHECK(status IN ('PENDING', 'SENT', 'DEAD')) DEFAULT 'PENDING',
+                last_error TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(dedup_key, chat_id, message_thread_id)
+            )
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_delivery_retry_queue_due
+            ON delivery_retry_queue(status, next_attempt_at)
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_delivery_retry_queue_chat
+            ON delivery_retry_queue(chat_id, status)
+            """
+        )
 
     def _ensure_common_tables_postgres(self) -> None:
         self._execute(
@@ -699,6 +746,37 @@ class TraderStore:
             ON delivery_sessions(chat_id, status, expires_at)
             """
         )
+        self._execute(
+            """
+            CREATE TABLE IF NOT EXISTS delivery_retry_queue (
+                id BIGSERIAL PRIMARY KEY,
+                dedup_key TEXT NOT NULL,
+                chat_id TEXT NOT NULL,
+                trader_address TEXT,
+                message_thread_id INTEGER NOT NULL DEFAULT 0,
+                message_text TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                status TEXT NOT NULL CHECK(status IN ('PENDING', 'SENT', 'DEAD')) DEFAULT 'PENDING',
+                last_error TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(dedup_key, chat_id, message_thread_id)
+            )
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_delivery_retry_queue_due
+            ON delivery_retry_queue(status, next_attempt_at)
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_delivery_retry_queue_chat
+            ON delivery_retry_queue(chat_id, status)
+            """
+        )
 
     @staticmethod
     def _format_datetime(value: Any) -> Any:
@@ -820,6 +898,21 @@ class TraderStore:
             ),
             topic_name=row["topic_name"],
             expires_at=TraderStore._format_datetime(row["expires_at"]),
+        )
+
+    @staticmethod
+    def _row_to_delivery_retry_job(row: Mapping[str, Any]) -> DeliveryRetryJob:
+        thread_raw = int(row["message_thread_id"] or 0)
+        return DeliveryRetryJob(
+            id=int(row["id"]),
+            dedup_key=str(row["dedup_key"]),
+            chat_id=str(row["chat_id"]),
+            trader_address=(str(row["trader_address"]) if row["trader_address"] else None),
+            message_thread_id=(thread_raw if thread_raw > 0 else None),
+            message_text=str(row["message_text"]),
+            attempt_count=int(row["attempt_count"] or 0),
+            next_attempt_at=TraderStore._format_datetime(row["next_attempt_at"]),
+            last_error=(str(row["last_error"]) if row["last_error"] else None),
         )
 
     def list_traders(self, *, limit: int = 500) -> list[TrackedTrader]:
@@ -1424,6 +1517,232 @@ class TraderStore:
             raise
 
         return sessions
+
+    def cancel_all_chat_subscriptions(self, *, chat_id: str | int) -> list[DeliverySessionInfo]:
+        chat_id_str = str(chat_id)
+        rows = self._execute(
+            """
+            SELECT
+                ds.id AS session_id,
+                ds.subscription_id,
+                ds.chat_id,
+                ds.trader_address,
+                ds.message_thread_id,
+                ds.topic_name,
+                ds.expires_at
+            FROM delivery_sessions ds
+            JOIN subscriptions s ON s.id = ds.subscription_id
+            WHERE ds.chat_id = ?
+              AND ds.status = 'ACTIVE'
+              AND s.status = 'ACTIVE'
+            """,
+            (chat_id_str,),
+        ).fetchall()
+        sessions = [self._row_to_delivery_session_info(row) for row in rows]
+        if not sessions:
+            return []
+
+        sub_ids = [item.subscription_id for item in sessions]
+        sess_ids = [item.session_id for item in sessions]
+        sub_ph = ",".join("?" for _ in sub_ids)
+        sess_ph = ",".join("?" for _ in sess_ids)
+
+        try:
+            self._execute(
+                f"""
+                UPDATE subscriptions
+                SET status = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id IN ({sub_ph})
+                """,
+                (SUBSCRIPTION_CANCELLED, *sub_ids),
+            )
+            self._execute(
+                f"""
+                UPDATE delivery_sessions
+                SET status = ?, closed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+                WHERE id IN ({sess_ph})
+                """,
+                (SESSION_EXPIRED, *sess_ids),
+            )
+            self._connection.commit()
+        except Exception:
+            self._connection.rollback()
+            raise
+
+        return sessions
+
+    def enqueue_delivery_retry(
+        self,
+        *,
+        dedup_key: str,
+        chat_id: str | int,
+        trader_address: str | None,
+        message_thread_id: int | None,
+        message_text: str,
+        delay_seconds: int,
+        error: str | None = None,
+    ) -> None:
+        retry_at = (datetime.now(tz=UTC) + timedelta(seconds=max(1, delay_seconds))).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        thread_key = int(message_thread_id or 0)
+        chat_id_str = str(chat_id)
+        trader_norm = (
+            self.normalize_address(trader_address) if trader_address is not None else None
+        )
+        self._execute(
+            """
+            INSERT INTO delivery_retry_queue(
+                dedup_key,
+                chat_id,
+                trader_address,
+                message_thread_id,
+                message_text,
+                attempt_count,
+                next_attempt_at,
+                status,
+                last_error,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(dedup_key, chat_id, message_thread_id) DO UPDATE SET
+                trader_address = excluded.trader_address,
+                message_text = excluded.message_text,
+                attempt_count = delivery_retry_queue.attempt_count + 1,
+                next_attempt_at = excluded.next_attempt_at,
+                status = excluded.status,
+                last_error = excluded.last_error,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                dedup_key,
+                chat_id_str,
+                trader_norm,
+                thread_key,
+                message_text,
+                retry_at,
+                RETRY_PENDING,
+                (error or None),
+            ),
+        )
+        self._connection.commit()
+
+    def list_due_delivery_retries(self, *, limit: int = 200) -> list[DeliveryRetryJob]:
+        rows = self._execute(
+            """
+            SELECT
+                id,
+                dedup_key,
+                chat_id,
+                trader_address,
+                message_thread_id,
+                message_text,
+                attempt_count,
+                next_attempt_at,
+                last_error
+            FROM delivery_retry_queue
+            WHERE status = ? AND next_attempt_at <= CURRENT_TIMESTAMP
+            ORDER BY next_attempt_at ASC, id ASC
+            LIMIT ?
+            """,
+            (RETRY_PENDING, int(limit)),
+        ).fetchall()
+        return [self._row_to_delivery_retry_job(row) for row in rows]
+
+    def reschedule_delivery_retry(
+        self,
+        *,
+        retry_id: int,
+        delay_seconds: int,
+        error: str,
+    ) -> None:
+        retry_at = (datetime.now(tz=UTC) + timedelta(seconds=max(1, delay_seconds))).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        self._execute(
+            """
+            UPDATE delivery_retry_queue
+            SET status = ?,
+                attempt_count = attempt_count + 1,
+                next_attempt_at = ?,
+                last_error = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (RETRY_PENDING, retry_at, error[:1000], int(retry_id)),
+        )
+        self._connection.commit()
+
+    def mark_delivery_retry_sent(self, *, retry_id: int) -> None:
+        self._execute(
+            """
+            UPDATE delivery_retry_queue
+            SET status = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (RETRY_SENT, int(retry_id)),
+        )
+        self._connection.commit()
+
+    def mark_delivery_retry_dead(self, *, retry_id: int, error: str) -> None:
+        self._execute(
+            """
+            UPDATE delivery_retry_queue
+            SET status = ?, last_error = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (RETRY_DEAD, error[:1000], int(retry_id)),
+        )
+        self._connection.commit()
+
+    def delete_pending_retries_for_chat(self, *, chat_id: str | int) -> int:
+        cursor = self._execute(
+            """
+            DELETE FROM delivery_retry_queue
+            WHERE chat_id = ? AND status = ?
+            """,
+            (str(chat_id), RETRY_PENDING),
+        )
+        self._connection.commit()
+        return int(cursor.rowcount)
+
+    def delete_pending_retries_for_target(
+        self,
+        *,
+        chat_id: str | int,
+        trader_address: str | None,
+        message_thread_id: int | None,
+    ) -> int:
+        thread_key = int(message_thread_id or 0)
+        chat_id_str = str(chat_id)
+        if trader_address:
+            cursor = self._execute(
+                """
+                DELETE FROM delivery_retry_queue
+                WHERE chat_id = ?
+                  AND status = ?
+                  AND trader_address = ?
+                  AND message_thread_id = ?
+                """,
+                (
+                    chat_id_str,
+                    RETRY_PENDING,
+                    self.normalize_address(trader_address),
+                    thread_key,
+                ),
+            )
+        else:
+            cursor = self._execute(
+                """
+                DELETE FROM delivery_retry_queue
+                WHERE chat_id = ?
+                  AND status = ?
+                  AND message_thread_id = ?
+                """,
+                (chat_id_str, RETRY_PENDING, thread_key),
+            )
+        self._connection.commit()
+        return int(cursor.rowcount)
 
     def add_manual(self, *, address: str, label: str | None = None) -> None:
         normalized = self.normalize_address(address)

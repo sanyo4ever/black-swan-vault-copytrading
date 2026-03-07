@@ -158,6 +158,152 @@ class TraderStoreTests(unittest.TestCase):
             self.assertEqual(len(live), 1)
             self.assertEqual(live[0].address, address)
 
+    def test_delivery_retry_queue_lifecycle_and_dedup(self) -> None:
+        address = "0xffffffffffffffffffffffffffffffffffffffff"
+
+        with TraderStore(self.db_path) as store:
+            store.add_manual(address=address, label="Retry")
+            store.enqueue_delivery_retry(
+                dedup_key="sig-1",
+                chat_id=777,
+                trader_address=address,
+                message_thread_id=42,
+                message_text="first",
+                delay_seconds=60,
+                error="first error",
+            )
+            store.enqueue_delivery_retry(
+                dedup_key="sig-1",
+                chat_id=777,
+                trader_address=address,
+                message_thread_id=42,
+                message_text="second",
+                delay_seconds=60,
+                error="second error",
+            )
+
+            row = store._connection.execute(
+                """
+                SELECT attempt_count, message_text, status
+                FROM delivery_retry_queue
+                WHERE dedup_key = 'sig-1' AND chat_id = '777' AND message_thread_id = 42
+                """
+            ).fetchone()
+            self.assertIsNotNone(row)
+            assert row is not None
+            self.assertEqual(row[0], 2)
+            self.assertEqual(row[1], "second")
+            self.assertEqual(row[2], "PENDING")
+
+            store._connection.execute(
+                """
+                UPDATE delivery_retry_queue
+                SET next_attempt_at = '2000-01-01 00:00:00'
+                WHERE dedup_key = 'sig-1'
+                """
+            )
+            store._connection.commit()
+
+            due = store.list_due_delivery_retries(limit=10)
+            self.assertEqual(len(due), 1)
+            self.assertEqual(due[0].message_thread_id, 42)
+            self.assertEqual(due[0].attempt_count, 2)
+            self.assertEqual(due[0].message_text, "second")
+
+            store.reschedule_delivery_retry(
+                retry_id=due[0].id,
+                delay_seconds=120,
+                error="still failing",
+            )
+            row = store._connection.execute(
+                "SELECT attempt_count, status, last_error FROM delivery_retry_queue WHERE id = ?",
+                (due[0].id,),
+            ).fetchone()
+            self.assertIsNotNone(row)
+            assert row is not None
+            self.assertEqual(row[0], 3)
+            self.assertEqual(row[1], "PENDING")
+            self.assertEqual(row[2], "still failing")
+
+            store.mark_delivery_retry_sent(retry_id=due[0].id)
+            row = store._connection.execute(
+                "SELECT status FROM delivery_retry_queue WHERE id = ?",
+                (due[0].id,),
+            ).fetchone()
+            self.assertEqual(row[0], "SENT")
+
+    def test_cancel_all_chat_subscriptions_and_retry_cleanup(self) -> None:
+        address1 = "0x1111111111111111111111111111111111111111"
+        address2 = "0x2222222222222222222222222222222222222222"
+
+        with TraderStore(self.db_path) as store:
+            store.add_manual(address=address1, label="A1")
+            store.add_manual(address=address2, label="A2")
+
+            store.create_subscription_with_session(
+                chat_id=12345,
+                trader_address=address1,
+                message_thread_id=11,
+                topic_name="A1",
+                lifetime_hours=24,
+            )
+            store.create_subscription_with_session(
+                chat_id=12345,
+                trader_address=address2,
+                message_thread_id=22,
+                topic_name="A2",
+                lifetime_hours=24,
+            )
+
+            store.enqueue_delivery_retry(
+                dedup_key="sig-a",
+                chat_id=12345,
+                trader_address=address1,
+                message_thread_id=11,
+                message_text="payload-a",
+                delay_seconds=60,
+            )
+            store.enqueue_delivery_retry(
+                dedup_key="sig-b",
+                chat_id=12345,
+                trader_address=address2,
+                message_thread_id=22,
+                message_text="payload-b",
+                delay_seconds=60,
+            )
+            store.enqueue_delivery_retry(
+                dedup_key="sig-c",
+                chat_id=99999,
+                trader_address=address1,
+                message_thread_id=11,
+                message_text="payload-c",
+                delay_seconds=60,
+            )
+
+            cancelled = store.cancel_all_chat_subscriptions(chat_id=12345)
+            self.assertEqual(len(cancelled), 2)
+
+            deleted_target = store.delete_pending_retries_for_target(
+                chat_id=12345,
+                trader_address=address1,
+                message_thread_id=11,
+            )
+            self.assertEqual(deleted_target, 1)
+
+            deleted_chat = store.delete_pending_retries_for_chat(chat_id=12345)
+            self.assertEqual(deleted_chat, 1)
+
+            remaining = store._connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM delivery_retry_queue
+                WHERE status = 'PENDING'
+                """
+            ).fetchone()
+            self.assertIsNotNone(remaining)
+            assert remaining is not None
+            self.assertEqual(remaining[0], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
