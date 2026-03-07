@@ -292,16 +292,6 @@ class TraderStore:
         table_name: str,
         constraint_name: str,
     ) -> None:
-        status_values = "','".join(
-            (
-                STATUS_ACTIVE_LISTED,
-                STATUS_ACTIVE_UNLISTED,
-                STATUS_STALE,
-                STATUS_ARCHIVED,
-                "ACTIVE",
-                "PAUSED",
-            )
-        )
         self._execute(
             f"""
             DO $status$
@@ -322,7 +312,7 @@ class TraderStore:
                     END IF;
                     EXECUTE
                         'ALTER TABLE {table_name} ADD CONSTRAINT {constraint_name} '
-                        || 'CHECK (status IN (''{status_values}''))';
+                        || 'CHECK (status IN (''ACTIVE_LISTED'',''ACTIVE_UNLISTED'',''STALE'',''ARCHIVED'',''ACTIVE'',''PAUSED''))';
                 END IF;
             END
             $status$;
