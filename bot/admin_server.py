@@ -24,7 +24,6 @@ from bot.trader_store import (
     MODERATION_NEUTRAL,
     MODERATION_WHITELIST,
     STATUS_ACTIVE,
-    STATUS_PAUSED,
     TraderStore,
 )
 
@@ -333,11 +332,6 @@ def _render_public_directory(
     <div class='card'>
       <form method='get' action='/'>
         <input name='q' placeholder='search label/address' value='{escape(str(request.query.get("q", "")))}' />
-        <select name='status'>
-          <option value='ALL'>ALL</option>
-          <option value='ACTIVE'>ACTIVE</option>
-          <option value='PAUSED'>PAUSED</option>
-        </select>
         <input name='min_age_days' type='number' step='1' min='0' value='{escape(str(request.query.get("min_age_days", "0")))}' placeholder='min age days' />
         <input name='min_trades_30d' type='number' step='1' min='0' value='{escape(str(request.query.get("min_trades_30d", "0")))}' placeholder='min trades 30d' />
         <input name='min_active_days_30d' type='number' step='1' min='0' value='{escape(str(request.query.get("min_active_days_30d", "0")))}' placeholder='min active days 30d' />
@@ -392,7 +386,6 @@ def _render_public_directory(
 
 def _render_admin_index(*, traders, discovery_runs, message: str | None = None) -> str:
     active_count = sum(1 for trader in traders if trader.status == STATUS_ACTIVE)
-    paused_count = sum(1 for trader in traders if trader.status == STATUS_PAUSED)
     blacklisted_count = sum(
         1 for trader in traders if trader.moderation_state == MODERATION_BLACKLIST
     )
@@ -409,13 +402,6 @@ def _render_admin_index(*, traders, discovery_runs, message: str | None = None) 
     rows = []
     for trader in traders:
         encoded = quote(trader.address, safe="")
-        action_button = (
-            f"<form method='post' action='/admin/traders/{encoded}/pause' style='display:inline'>"
-            "<button class='btn pause' type='submit'>Pause</button></form>"
-            if trader.status == STATUS_ACTIVE
-            else f"<form method='post' action='/admin/traders/{encoded}/resume' style='display:inline'>"
-            "<button class='btn resume' type='submit'>Resume</button></form>"
-        )
         moderation_class = "moder-neutral"
         if trader.moderation_state == MODERATION_BLACKLIST:
             moderation_class = "moder-blacklist"
@@ -439,7 +425,6 @@ def _render_admin_index(*, traders, discovery_runs, message: str | None = None) 
             f"<td>{_fmt(trader.realized_pnl_30d, 2)}</td>"
             f"<td>{_fmt(trader.score, 2)}</td>"
             "<td>"
-            f"{action_button} "
             f"<form method='post' action='/admin/traders/{encoded}/moderate/whitelist' style='display:inline'>"
             "<button class='btn whitelist' type='submit'>Whitelist</button></form> "
             f"<form method='post' action='/admin/traders/{encoded}/moderate/blacklist' style='display:inline'>"
@@ -500,8 +485,6 @@ def _render_admin_index(*, traders, discovery_runs, message: str | None = None) 
     th, td {{ border-bottom:1px solid var(--line); padding:8px 6px; text-align:left; }}
     th {{ color:var(--muted); }}
     .btn {{ border:1px solid var(--line); color:var(--text); background:#1e2740; border-radius:8px; padding:6px 10px; cursor:pointer; }}
-    .pause {{ border-color:#c3871f; }}
-    .resume {{ border-color:var(--ok); }}
     .whitelist {{ border-color:var(--ok); }}
     .blacklist {{ border-color:#ff9f43; }}
     .danger {{ border-color:var(--danger); }}
@@ -524,7 +507,6 @@ def _render_admin_index(*, traders, discovery_runs, message: str | None = None) 
       <div class='row'>
         <div class='stat'><span>Tracked</span><strong>{len(traders)}</strong></div>
         <div class='stat'><span>Active</span><strong>{active_count}</strong></div>
-        <div class='stat'><span>Paused</span><strong>{paused_count}</strong></div>
         <div class='stat'><span>Whitelist</span><strong>{whitelisted_count}</strong></div>
         <div class='stat'><span>Blacklist</span><strong>{blacklisted_count}</strong></div>
         <div class='stat'><span>Last Discovery</span><strong>{escape(recent_run_label)}</strong></div>
@@ -541,8 +523,6 @@ def _render_admin_index(*, traders, discovery_runs, message: str | None = None) 
       <h3>Bulk Actions</h3>
       <form id='bulk-form' method='post' action='/admin/traders/bulk' class='row'>
         <select name='action'>
-          <option value='pause'>Pause selected</option>
-          <option value='resume'>Resume selected</option>
           <option value='whitelist'>Whitelist selected</option>
           <option value='blacklist'>Blacklist selected</option>
           <option value='neutral'>Set neutral selected</option>
@@ -950,14 +930,6 @@ async def bulk_trader_action(request: web.Request) -> web.Response:
         raise web.HTTPFound("/admin?msg=No+addresses+selected+for+bulk+action")
 
     with TraderStore(settings.database_dsn) as store:
-        if action == "pause":
-            changed = store.set_status_bulk(addresses=unique_addresses, status=STATUS_PAUSED)
-            logger.info("Bulk action pause addresses=%s changed=%s", len(unique_addresses), changed)
-            raise web.HTTPFound(f"/admin?msg=Bulk+pause+applied:+{changed}")
-        if action == "resume":
-            changed = store.set_status_bulk(addresses=unique_addresses, status=STATUS_ACTIVE)
-            logger.info("Bulk action resume addresses=%s changed=%s", len(unique_addresses), changed)
-            raise web.HTTPFound(f"/admin?msg=Bulk+resume+applied:+{changed}")
         moderation_state = _parse_moderation_state(action)
         if moderation_state is None:
             raise web.HTTPFound("/admin?msg=Unknown+bulk+action")
@@ -973,27 +945,6 @@ async def bulk_trader_action(request: web.Request) -> web.Response:
             changed,
         )
         raise web.HTTPFound(f"/admin?msg=Bulk+moderation+applied:+{changed}")
-
-
-async def set_pause_state(request: web.Request, status: str) -> web.Response:
-    settings = request.app["settings"]
-    logger: logging.Logger = request.app["logger"]
-    address = request.match_info.get("address", "")
-
-    with TraderStore(settings.database_dsn) as store:
-        store.set_status(address=address, status=status)
-    logger.info("Trader status updated address=%s status=%s", address.lower(), status)
-
-    action = "paused" if status == STATUS_PAUSED else "resumed"
-    raise web.HTTPFound(f"/admin?msg=Trader+{action}")
-
-
-async def pause_trader(request: web.Request) -> web.Response:
-    return await set_pause_state(request, STATUS_PAUSED)
-
-
-async def resume_trader(request: web.Request) -> web.Response:
-    return await set_pause_state(request, STATUS_ACTIVE)
 
 
 async def moderate_trader(request: web.Request) -> web.Response:
@@ -1085,8 +1036,6 @@ def create_app(*, settings=None, logger: logging.Logger | None = None) -> web.Ap
             web.post("/admin/discover", run_discovery),
             web.post("/admin/traders/add", add_trader),
             web.post("/admin/traders/bulk", bulk_trader_action),
-            web.post("/admin/traders/{address}/pause", pause_trader),
-            web.post("/admin/traders/{address}/resume", resume_trader),
             web.post("/admin/traders/{address}/moderate/{state}", moderate_trader),
             web.post("/admin/traders/{address}/delete", delete_trader),
         ]

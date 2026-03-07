@@ -11,7 +11,6 @@ from bot.trader_store import (
     MODERATION_NEUTRAL,
     MODERATION_WHITELIST,
     STATUS_ACTIVE,
-    STATUS_PAUSED,
     TraderStore,
 )
 
@@ -37,6 +36,27 @@ class TraderStoreTests(unittest.TestCase):
         self.assertEqual(trader.address, "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         self.assertEqual(trader.label, "Manual Trader")
         self.assertEqual(trader.status, STATUS_ACTIVE)
+
+    def test_active_only_mode_normalizes_legacy_paused_status(self) -> None:
+        address = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab"
+        with TraderStore(self.db_path) as store:
+            store.add_manual(address=address, label="Legacy")
+            store._connection.execute(
+                """
+                UPDATE tracked_traders
+                SET status = 'PAUSED', manual_status_override = 1
+                WHERE address = ?
+                """,
+                (address,),
+            )
+            store._connection.commit()
+
+        with TraderStore(self.db_path) as store:
+            trader = store.get_trader(address=address)
+        self.assertIsNotNone(trader)
+        assert trader is not None
+        self.assertEqual(trader.status, STATUS_ACTIVE)
+        self.assertFalse(trader.manual_status_override)
 
     def test_record_subscription_request(self) -> None:
         with TraderStore(self.db_path) as store:
@@ -342,7 +362,7 @@ class TraderStoreTests(unittest.TestCase):
             self.assertIsNotNone(trader)
             assert trader is not None
             self.assertEqual(trader.moderation_state, MODERATION_BLACKLIST)
-            self.assertEqual(trader.status, STATUS_PAUSED)
+            self.assertEqual(trader.status, STATUS_ACTIVE)
             self.assertEqual(trader.moderation_note, "manual review")
 
             active_addresses = store.list_active_addresses(limit=10)
@@ -371,7 +391,7 @@ class TraderStoreTests(unittest.TestCase):
             store.add_manual(address=a1, label="A1")
             store.add_manual(address=a2, label="A2")
 
-            changed = store.set_status_bulk(addresses=[a1, a2], status=STATUS_PAUSED)
+            changed = store.set_status_bulk(addresses=[a1, a2], status=STATUS_ACTIVE)
             self.assertEqual(changed, 2)
             t1 = store.get_trader(address=a1)
             t2 = store.get_trader(address=a2)
@@ -379,8 +399,11 @@ class TraderStoreTests(unittest.TestCase):
             self.assertIsNotNone(t2)
             assert t1 is not None
             assert t2 is not None
-            self.assertEqual(t1.status, STATUS_PAUSED)
-            self.assertEqual(t2.status, STATUS_PAUSED)
+            self.assertEqual(t1.status, STATUS_ACTIVE)
+            self.assertEqual(t2.status, STATUS_ACTIVE)
+
+            with self.assertRaises(ValueError):
+                store.set_status_bulk(addresses=[a1], status="PAUSED")
 
             changed = store.set_moderation_bulk(
                 addresses=[a1, a2],
@@ -461,7 +484,7 @@ class TraderStoreTests(unittest.TestCase):
             filtered = store.list_catalog_traders(
                 limit=10,
                 q=addresses[0][:18],
-                status=STATUS_PAUSED,
+                status=STATUS_ACTIVE,
             )
             self.assertGreaterEqual(len(filtered), 1)
             self.assertTrue(any(item.address == addresses[0] for item in filtered))

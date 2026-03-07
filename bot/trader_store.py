@@ -194,6 +194,7 @@ class TraderStore:
             self._connection = sqlite3.connect(db_path)
             self._connection.row_factory = sqlite3.Row
         self._ensure_schema()
+        self._enforce_active_only_trader_status()
 
     def _q(self, sql: str) -> str:
         if self._driver == "postgres":
@@ -230,6 +231,32 @@ class TraderStore:
             self._ensure_schema_postgres()
         else:
             self._ensure_schema_sqlite()
+
+    def _enforce_active_only_trader_status(self) -> None:
+        # Current product mode: every tracked trader remains ACTIVE.
+        try:
+            self._execute(
+                """
+                UPDATE tracked_traders
+                SET status = ?,
+                    manual_status_override = 0,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE status <> ?
+                """,
+                (STATUS_ACTIVE, STATUS_ACTIVE),
+            )
+            self._execute(
+                """
+                UPDATE catalog_current
+                SET status = ?
+                WHERE status <> ?
+                """,
+                (STATUS_ACTIVE, STATUS_ACTIVE),
+            )
+            self._connection.commit()
+        except Exception:
+            self._connection.rollback()
+            raise
 
     def _ensure_schema_sqlite(self) -> None:
         self._execute(
@@ -1261,7 +1288,6 @@ class TraderStore:
             SELECT *
             FROM tracked_traders
             ORDER BY
-                CASE status WHEN 'ACTIVE' THEN 0 ELSE 1 END,
                 COALESCE(score, -1) DESC,
                 updated_at DESC
             LIMIT ?
@@ -1275,12 +1301,11 @@ class TraderStore:
             """
             SELECT address
             FROM tracked_traders
-            WHERE status = ?
-              AND COALESCE(moderation_state, ?) <> ?
+            WHERE COALESCE(moderation_state, ?) <> ?
             ORDER BY COALESCE(score, -1) DESC, updated_at DESC
             LIMIT ?
             """,
-            (STATUS_ACTIVE, MODERATION_NEUTRAL, MODERATION_BLACKLIST, limit),
+            (MODERATION_NEUTRAL, MODERATION_BLACKLIST, limit),
         ).fetchall()
         return [str(row["address"]) for row in rows]
 
@@ -1676,7 +1701,7 @@ class TraderStore:
                 params.extend([f"%{q_norm}%", f"%{q_norm}%", f"%{q_norm}%"])
 
         status_norm = str(status or "").upper()
-        if status_norm in {STATUS_ACTIVE, STATUS_PAUSED}:
+        if status_norm == STATUS_ACTIVE:
             where.append("status = ?")
             params.append(status_norm)
 
@@ -2433,10 +2458,8 @@ class TraderStore:
                 label = COALESCE(excluded.label, tracked_traders.label),
                 source = excluded.source,
                 auto_discovered = 1,
-                status = CASE
-                    WHEN tracked_traders.manual_status_override = 0 THEN 'PAUSED'
-                    ELSE tracked_traders.status
-                END,
+                status = 'ACTIVE',
+                manual_status_override = 0,
                 trades_24h = excluded.trades_24h,
                 active_hours_24h = excluded.active_hours_24h,
                 trades_7d = excluded.trades_7d,
@@ -2464,7 +2487,7 @@ class TraderStore:
                 normalized,
                 (label or None),
                 source,
-                STATUS_PAUSED,
+                STATUS_ACTIVE,
                 MODERATION_NEUTRAL,
                 trades_24h,
                 active_hours_24h,
@@ -2492,21 +2515,25 @@ class TraderStore:
 
     def set_status(self, *, address: str, status: str) -> None:
         normalized = self.normalize_address(address)
-        if status not in {STATUS_ACTIVE, STATUS_PAUSED}:
-            raise ValueError(f"Unsupported status: {status}")
+        if status != STATUS_ACTIVE:
+            raise ValueError(
+                "PAUSED mode is deprecated. Only ACTIVE status is supported in current mode."
+            )
         self._execute(
             """
             UPDATE tracked_traders
-            SET status = ?, manual_status_override = 1, updated_at = CURRENT_TIMESTAMP
+            SET status = ?, manual_status_override = 0, updated_at = CURRENT_TIMESTAMP
             WHERE address = ?
             """,
-            (status, normalized),
+            (STATUS_ACTIVE, normalized),
         )
         self._connection.commit()
 
     def set_status_bulk(self, *, addresses: Iterable[str], status: str) -> int:
-        if status not in {STATUS_ACTIVE, STATUS_PAUSED}:
-            raise ValueError(f"Unsupported status: {status}")
+        if status != STATUS_ACTIVE:
+            raise ValueError(
+                "PAUSED mode is deprecated. Only ACTIVE status is supported in current mode."
+            )
 
         normalized = [
             self.normalize_address(address)
@@ -2520,10 +2547,10 @@ class TraderStore:
         cursor = self._execute(
             f"""
             UPDATE tracked_traders
-            SET status = ?, manual_status_override = 1, updated_at = CURRENT_TIMESTAMP
+            SET status = ?, manual_status_override = 0, updated_at = CURRENT_TIMESTAMP
             WHERE address IN ({placeholders})
             """,
-            (status, *normalized),
+            (STATUS_ACTIVE, *normalized),
         )
         self._connection.commit()
         return int(cursor.rowcount)
@@ -2577,18 +2604,8 @@ class TraderStore:
             (moderation_state, note_value, *normalized),
         )
 
-        # Blacklisted traders are forcibly paused and detached from delivery flows.
+        # Blacklisted traders are detached from delivery flows.
         if moderation_state == MODERATION_BLACKLIST:
-            self._execute(
-                f"""
-                UPDATE tracked_traders
-                SET status = ?,
-                    manual_status_override = 1,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE address IN ({placeholders})
-                """,
-                (STATUS_PAUSED, *normalized),
-            )
             self._execute(
                 f"""
                 UPDATE subscriptions

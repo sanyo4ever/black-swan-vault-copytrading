@@ -7,13 +7,13 @@ Service stack for discovering futures traders, storing rich metrics, and publish
 - Continuous discovery worker (`discovery_worker.py`) that updates DB on schedule
 - Universe worker (`universe_worker.py`) that builds long-lived qualified trader pool
 - Top100 worker (`top100_worker.py`) that refreshes `traders_top100_live` and `catalog_current`
-- Auto-discovered traders are added as `PAUSED` by default
+- Auto-discovered traders are kept `ACTIVE` by default (blacklist controls delivery blocking)
 - Rich trader stats (7d/30d activity, PnL, fees, win rate, volume, age, score, margin stats)
 - Public subscriber directory page (`/`) over `catalog_current` with keyset pagination
 - Public JSON API for full catalog filtering/sorting/search: `/api/traders`
 - One-click trader chat flow via Telegram bot (`/subscribe/<trader_address>`)
 - Topic-based 24h delivery sessions per subscription (`createForumTopic` + `deleteForumTopic`)
-- Password-protected admin panel (`/admin`) with add/delete, pause/resume, blacklist/whitelist, bulk moderation, and run discovery now
+- Password-protected admin panel (`/admin`) with add/delete, blacklist/whitelist, bulk moderation, and run discovery now
 - Telegram posting pipeline that sends fills to channel + subscriber topic threads
 
 ## Entrypoints
@@ -203,7 +203,7 @@ sudo journalctl -u cryptoinsider-top100.service -f
 - Discovery updates `tracked_traders` stats.
 - Universe/top100 workers derive rankings from discovery results.
 - `catalog_current` powers full trader directory and `/api/traders`.
-- Traders stay `PAUSED` until you manually click `Resume` in admin.
+- Discovery keeps all tracked traders active in DB; moderation (`BLACKLIST`) controls blocking from delivery/monitoring.
 - Blacklisted traders are removed from active delivery/monitoring flows until moderation changes.
 - Telegram source monitors addresses from active sessions + active trader set.
 - New subscription creates a new topic thread with TTL 24h.

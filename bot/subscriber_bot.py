@@ -16,7 +16,7 @@ from bot.telegram_client import (
     send_message,
     set_telegram_http_logging,
 )
-from bot.trader_store import STATUS_ACTIVE, TraderStore
+from bot.trader_store import TraderStore
 
 
 def _short(address: str) -> str:
@@ -202,8 +202,6 @@ async def _handle_start_with_payload(
                 topic_name=(topic_name if topic_supported else None),
                 lifetime_hours=settings.subscription_lifetime_hours,
             )
-            if trader.status != STATUS_ACTIVE:
-                store.set_status(address=address, status=STATUS_ACTIVE)
         logger.info(
             "Subscription started trader=%s chat_id=%s thread=%s expires_at=%s",
             address,
