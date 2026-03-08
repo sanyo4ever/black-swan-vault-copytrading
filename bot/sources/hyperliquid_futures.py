@@ -17,7 +17,9 @@ from bot.trader_store import DeliveryMonitorTarget, MonitoringTarget, TraderStor
 class _PollOutcome:
     address: str
     fills: tuple[dict[str, Any], ...]
-    newest_fill_time: int | None
+    watermark_fill_time: int | None
+    newest_observed_fill_time: int | None
+    dropped_fills: int
     error: str | None
     delivery_target: DeliveryMonitorTarget | None
     legacy_target: MonitoringTarget | None
@@ -80,17 +82,18 @@ class HyperliquidFuturesSource(Source):
 
     @staticmethod
     def _build_side(fill: dict[str, Any]) -> str | None:
-        direction = str(fill.get("dir", "")).lower()
-        if "long" in direction:
-            return "LONG"
-        if "short" in direction:
-            return "SHORT"
-
+        # Exchange-native side code (B/A) is the most precise action signal.
         side = str(fill.get("side", "")).upper()
         if side == "B":
             return "BUY"
         if side == "A":
             return "SELL"
+
+        direction = str(fill.get("dir", "")).lower()
+        if "long" in direction:
+            return "LONG"
+        if "short" in direction:
+            return "SHORT"
         return None
 
     @staticmethod
@@ -190,29 +193,45 @@ class HyperliquidFuturesSource(Source):
             return _PollOutcome(
                 address=target.address,
                 fills=(),
-                newest_fill_time=None,
+                watermark_fill_time=None,
+                newest_observed_fill_time=None,
+                dropped_fills=0,
                 error=str(exc),
                 delivery_target=target,
                 legacy_target=None,
             )
 
-        newest_fill = None
+        newest_observed_fill = None
         fresh: list[dict[str, Any]] = []
         for item in fills:
             fill_time = self._to_int(item.get("time"))
             if fill_time <= 0:
                 continue
-            if newest_fill is None or fill_time > newest_fill:
-                newest_fill = fill_time
+            if newest_observed_fill is None or fill_time > newest_observed_fill:
+                newest_observed_fill = fill_time
             if watermark > 0 and fill_time <= watermark:
                 continue
             fresh.append(item)
 
-        fresh.sort(key=lambda row: self._to_int(row.get("time")), reverse=True)
+        fresh.sort(key=lambda row: self._to_int(row.get("time")))
+        limit = max(1, int(max_fills_per_trader))
+        dropped_fills = max(0, len(fresh) - limit)
+        if dropped_fills > 0:
+            # Bootstrap starts from the most recent slice to avoid replaying very old history.
+            # Regular cycles process oldest-first chunks to prevent watermark skips under load.
+            selected = fresh[-limit:] if watermark <= 0 else fresh[:limit]
+        else:
+            selected = fresh
+
+        watermark_fill_time = None
+        if selected:
+            watermark_fill_time = max(self._to_int(item.get("time")) for item in selected)
         return _PollOutcome(
             address=target.address,
-            fills=tuple(fresh[: max(1, int(max_fills_per_trader))]),
-            newest_fill_time=newest_fill,
+            fills=tuple(selected),
+            watermark_fill_time=watermark_fill_time,
+            newest_observed_fill_time=newest_observed_fill,
+            dropped_fills=dropped_fills,
             error=None,
             delivery_target=target,
             legacy_target=None,
@@ -234,7 +253,9 @@ class HyperliquidFuturesSource(Source):
             return _PollOutcome(
                 address=target.address,
                 fills=(),
-                newest_fill_time=None,
+                watermark_fill_time=None,
+                newest_observed_fill_time=None,
+                dropped_fills=0,
                 error=str(exc),
                 delivery_target=None,
                 legacy_target=target,
@@ -245,10 +266,16 @@ class HyperliquidFuturesSource(Source):
             reverse=True,
         )
         newest = self._to_int(fills_sorted[0].get("time")) if fills_sorted else None
+        selected = tuple(fills_sorted[: max(1, int(max_fills_per_trader))])
+        watermark_fill_time = None
+        if selected:
+            watermark_fill_time = max(self._to_int(item.get("time")) for item in selected)
         return _PollOutcome(
             address=target.address,
-            fills=tuple(fills_sorted[: max(1, int(max_fills_per_trader))]),
-            newest_fill_time=(newest if newest and newest > 0 else None),
+            fills=selected,
+            watermark_fill_time=watermark_fill_time,
+            newest_observed_fill_time=(newest if newest and newest > 0 else None),
+            dropped_fills=max(0, len(fills_sorted) - len(selected)),
             error=None,
             delivery_target=None,
             legacy_target=target,
@@ -347,8 +374,15 @@ class HyperliquidFuturesSource(Source):
             seen_ids: set[str] = set()
 
             for outcome in outcomes:
-                if outcome.newest_fill_time:
-                    last_fill_updates.append((outcome.address, outcome.newest_fill_time))
+                if outcome.newest_observed_fill_time:
+                    last_fill_updates.append((outcome.address, outcome.newest_observed_fill_time))
+                if outcome.dropped_fills > 0:
+                    self._logger.warning(
+                        "Signal backlog trader=%s selected=%s dropped=%s",
+                        outcome.address,
+                        len(outcome.fills),
+                        outcome.dropped_fills,
+                    )
 
                 for fill in outcome.fills:
                     signal = self._build_signal(fill=fill, trader=outcome.address, seen_ids=seen_ids)
@@ -366,7 +400,7 @@ class HyperliquidFuturesSource(Source):
                     store.mark_delivery_monitor_polled(
                         address=outcome.address,
                         next_poll_seconds=next_poll_seconds,
-                        newest_fill_time=outcome.newest_fill_time,
+                        newest_fill_time=outcome.watermark_fill_time,
                         had_new_fill=bool(outcome.fills),
                         error=outcome.error,
                     )
