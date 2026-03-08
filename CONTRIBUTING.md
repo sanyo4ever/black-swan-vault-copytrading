@@ -31,6 +31,12 @@ cp .env.example .env
 
 ## Test and QA commands
 
+Run documentation review (required before push):
+
+```bash
+python scripts/doc_review.py
+```
+
 Run full local QA gate:
 
 ```bash
@@ -60,6 +66,7 @@ python scripts/cleanup_test_traders.py --postgres-url "$DATABASE_URL" --apply --
 
 - Changes are focused and explainable.
 - Tests added/updated for behavior changes.
+- Documentation review passes (`python scripts/doc_review.py`).
 - QA gate passes locally.
 - No secrets/tokens in code/docs/logs/screenshots.
 - Docs updated in the same PR when behavior changed.

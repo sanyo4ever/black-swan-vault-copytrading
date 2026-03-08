@@ -187,6 +187,12 @@ Lifecycle transitions are automatic (`top100_worker` + `universe_worker`) and su
 
 ## QA Certification Gate
 
+Run documentation review before every push:
+
+```bash
+python scripts/doc_review.py
+```
+
 Run the full QA gate locally (unit/integration/e2e tests):
 
 ```bash

@@ -27,6 +27,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Run documentation review gate
+        run: |
+          python scripts/doc_review.py
+
       - name: Run QA certification gate
         run: |
           python scripts/qa_certification.py --skip-db-audit --json-out qa-report.json

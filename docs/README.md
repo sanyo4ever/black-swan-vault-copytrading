@@ -12,6 +12,7 @@ Start here if you are new to the project.
 ## Quality and Testing
 
 - [`QA_TEST_STRATEGY.md`](./QA_TEST_STRATEGY.md): quality gate scope and pass criteria.
+- `scripts/doc_review.py`: documentation consistency gate (links + stale wording checks).
 - `scripts/qa_certification.py`: executable gate for unit/integration/e2e tests and optional live DB audit.
 
 ## Operational Guides
