@@ -764,7 +764,6 @@ def _render_public_directory(
   <meta name='twitter:image' content='{escape(logo_og_url)}' />
   <link rel='icon' type='image/svg+xml' href='{escape(logo_mark_url)}' />
   <meta name='theme-color' content='#06080d' />
-  <meta http-equiv='refresh' content='30' />
   <title>{escape(page_title)}</title>
   {analytics_tag}
   <script type='application/ld+json'>{website_schema}</script>
@@ -1272,7 +1271,6 @@ def _render_admin_index(*, traders, discovery_runs, message: str | None = None) 
 <head>
   <meta charset='utf-8' />
   <meta name='viewport' content='width=device-width, initial-scale=1' />
-  <meta http-equiv='refresh' content='20' />
   <title>Admin Discovery Panel</title>
   <style>
     :root {{ --bg:#0b1020; --panel:#141b2d; --line:#29324b; --text:#e7edf8; --muted:#9fb2d1; --ok:#38c172; --danger:#ff5d5d; --accent:#3f8cff; }}
