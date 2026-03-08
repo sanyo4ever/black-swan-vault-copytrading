@@ -398,6 +398,7 @@ class TraderStoreTests(unittest.TestCase):
         active = "0x1010101010101010101010101010101010101010"
         stale = "0x2020202020202020202020202020202020202020"
         extra = "0x3030303030303030303030303030303030303030"
+        ghost = "0x4040404040404040404040404040404040404040"
         with TraderStore(self.db_path) as store:
             store.upsert_discovered(
                 address=active,
@@ -474,10 +475,38 @@ class TraderStoreTests(unittest.TestCase):
                 score=11.0,
                 stats_json='{"metrics_30d":{"roi_pct":2.0}}',
             )
+            store.upsert_discovered(
+                address=ghost,
+                label="Ghost",
+                source="hyperliquid_recent_trades",
+                trades_24h=1,
+                active_hours_24h=1,
+                trades_7d=3,
+                trades_30d=12,
+                active_days_30d=4,
+                first_fill_time=now_ms - (20 * 86_400_000),
+                last_fill_time=now_ms - (90 * 60_000),
+                age_days=20.0,
+                volume_usd_30d=9_000.0,
+                realized_pnl_30d=120.0,
+                fees_30d=12.0,
+                win_rate_30d=0.52,
+                long_ratio_30d=0.5,
+                avg_notional_30d=300.0,
+                max_notional_30d=900.0,
+                account_value=4_000.0,
+                total_ntl_pos=500.0,
+                total_margin_used=150.0,
+                score=2.0,
+                stats_json='{"metrics_30d":{"roi_pct":1.0}}',
+            )
 
             store.upsert_showcase_wallet(address=active, status=SHOWCASE_STATUS_ACTIVE)
             store.upsert_showcase_wallet(address=stale, status=SHOWCASE_STATUS_STALE)
             store.upsert_showcase_wallet(address=extra, status=SHOWCASE_STATUS_ACTIVE)
+            purged = store.purge_non_showcase_traders()
+            self.assertEqual(purged, 1)
+            self.assertIsNone(store.get_trader(address=ghost))
             self.assertEqual(store.count_showcase_wallets(active_only=False), 3)
             self.assertEqual(store.count_showcase_wallets(active_only=True), 2)
 

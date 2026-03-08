@@ -2224,6 +2224,20 @@ class TraderStore:
                 trimmed += removed
         return trimmed
 
+    def purge_non_showcase_traders(self) -> int:
+        cursor = self._execute(
+            """
+            DELETE FROM tracked_traders
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM showcase_wallets sw
+                WHERE sw.address = tracked_traders.address
+            )
+            """
+        )
+        self._connection.commit()
+        return int(cursor.rowcount or 0)
+
     def update_showcase_health(
         self,
         *,

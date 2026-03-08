@@ -620,8 +620,11 @@ class LightweightRotationWorker:
 
             with TraderStore(self._settings.database_dsn) as store:
                 trimmed = store.trim_showcase_wallets(max_slots=slots)
+                purged = store.purge_non_showcase_traders()
             if trimmed > 0:
                 self._logger.warning("Showcase trim removed overflow wallets count=%s", trimmed)
+            if purged > 0:
+                self._logger.info("Showcase purge removed non-showcase tracked rows count=%s", purged)
 
             bootstrap_interval = max(
                 1,
