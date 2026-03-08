@@ -7,8 +7,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from bot.app import _process_retry_queue, _send_live_target
+from bot.app import _process_retry_queue, _run_cycle, _send_live_target
 from bot.dedup import DedupStore
+from bot.models import TradeSignal
 from bot.subscriber_bot import _handle_start_with_payload
 from bot.telegram_client import TelegramClientError
 from bot.trader_store import TraderStore
@@ -33,6 +34,24 @@ class _RecordingDispatcher:
 
     async def send(self, _session, *, chat_id, text: str, message_thread_id: int | None = None) -> None:
         self.calls.append((str(chat_id), message_thread_id, text))
+
+
+class _SingleSignalSource:
+    id = "hl_futures_feed"
+
+    async def fetch_signals(self) -> list[TradeSignal]:
+        return [
+            TradeSignal(
+                source_id="hl_futures_feed",
+                source_name="Hyperliquid Futures",
+                external_id="e2e-shared-topic-1",
+                trader_address="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                symbol="DOGE-PERP",
+                side="BUY",
+                entry="0.1",
+                note="e2e signal",
+            )
+        ]
 
 
 class SubscriptionDeliveryE2ETests(unittest.IsolatedAsyncioTestCase):
@@ -83,6 +102,76 @@ class SubscriptionDeliveryE2ETests(unittest.IsolatedAsyncioTestCase):
             self.assertGreaterEqual(send_mock.await_count, 2)
             texts = [str(call.kwargs.get("text", "")) for call in send_mock.await_args_list]
             self.assertTrue(any("Trader Thread" in text for text in texts))
+
+    async def test_subscribe_then_signal_delivers_once_to_shared_group_topic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "e2e-shared-delivery.db"
+            dedup_path = Path(tmpdir) / "dedup-shared-delivery.db"
+            address = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            forum_chat_id = "-1001234567890"
+
+            with TraderStore(db_path) as store:
+                store.add_manual(address=address, label="A1")
+
+            subscriber_settings = SimpleNamespace(
+                telegram_bot_token="123:abc",
+                database_dsn=str(db_path),
+                telegram_forum_chat_id=forum_chat_id,
+                telegram_join_url="https://t.me/blackswanvaultcopytrading",
+                subscriber_telegram_retry_attempts=1,
+            )
+            logger = logging.getLogger("test.e2e.shared-delivery")
+            send_mock = AsyncMock()
+            create_mock = AsyncMock(return_value={"message_thread_id": 321})
+            with (
+                patch("bot.subscriber_bot.create_forum_topic", create_mock),
+                patch("bot.subscriber_bot.send_message", send_mock),
+            ):
+                await _handle_start_with_payload(
+                    session=None,
+                    settings=subscriber_settings,
+                    chat_id=7001,
+                    payload=f"sub_{address}",
+                    logger=logger,
+                )
+                await _handle_start_with_payload(
+                    session=None,
+                    settings=subscriber_settings,
+                    chat_id=7002,
+                    payload=f"sub_{address}",
+                    logger=logger,
+                )
+
+            poster_settings = SimpleNamespace(
+                sources_config_path=Path("config/sources.yaml"),
+                database_dsn=str(db_path),
+                max_signals_per_cycle=20,
+                telegram_bot_token="123:abc",
+                telegram_channel_id=forum_chat_id,
+                telegram_forum_chat_id=forum_chat_id,
+                monitor_delivery_only_subscribed=False,
+            )
+            dedup_store = DedupStore(dedup_path)
+            dispatcher = _RecordingDispatcher()
+            try:
+                with (
+                    patch("bot.app.load_sources_config", return_value=[{"id": "source"}]),
+                    patch("bot.app.build_source", return_value=_SingleSignalSource()),
+                ):
+                    published = await _run_cycle(
+                        settings=poster_settings,
+                        http_session=None,
+                        dedup_store=dedup_store,
+                        dispatcher=dispatcher,
+                        logger=logger,
+                    )
+            finally:
+                dedup_store.close()
+
+            self.assertEqual(published, 1)
+            self.assertEqual(len(dispatcher.calls), 1)
+            self.assertEqual(dispatcher.calls[0][0], forum_chat_id)
+            self.assertEqual(dispatcher.calls[0][1], 321)
 
     async def test_fanout_mapping_for_multiple_chats_same_trader(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

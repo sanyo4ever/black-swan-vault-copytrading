@@ -32,8 +32,11 @@ _START_LOCKS: dict[str, asyncio.Lock] = {}
 _START_LOCKS_GUARD = asyncio.Lock()
 _CHAT_LOCKS: dict[int, asyncio.Lock] = {}
 _CHAT_LOCKS_GUARD = asyncio.Lock()
+_TOPIC_LOCKS: dict[str, asyncio.Lock] = {}
+_TOPIC_LOCKS_GUARD = asyncio.Lock()
 _START_LOCKS_LAST_USED: dict[str, float] = {}
 _CHAT_LOCKS_LAST_USED: dict[int, float] = {}
+_TOPIC_LOCKS_LAST_USED: dict[str, float] = {}
 _LOCK_MAX_TRACKED = 5000
 _LOCK_STALE_SECONDS = 3600.0
 _T = TypeVar("_T")
@@ -122,6 +125,25 @@ async def _get_chat_lock(*, chat_id: int) -> asyncio.Lock:
         _gc_lock_registry(
             _CHAT_LOCKS,
             _CHAT_LOCKS_LAST_USED,
+            max_tracked=_LOCK_MAX_TRACKED,
+            stale_seconds=_LOCK_STALE_SECONDS,
+            now=now,
+        )
+        return lock
+
+
+async def _get_topic_lock(*, trader_address: str) -> asyncio.Lock:
+    key = str(trader_address).strip().lower()
+    async with _TOPIC_LOCKS_GUARD:
+        now = time.monotonic()
+        lock = _TOPIC_LOCKS.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _TOPIC_LOCKS[key] = lock
+        _TOPIC_LOCKS_LAST_USED[key] = now
+        _gc_lock_registry(
+            _TOPIC_LOCKS,
+            _TOPIC_LOCKS_LAST_USED,
             max_tracked=_LOCK_MAX_TRACKED,
             stale_seconds=_LOCK_STALE_SECONDS,
             now=now,
@@ -321,47 +343,49 @@ async def _ensure_shared_forum_topic(
         return None, None
 
     normalized = _normalize_address(trader_address)
-    existing = await _store_call(
-        settings,
-        lambda store: store.get_trader_forum_topic(
-            trader_address=normalized,
-            forum_chat_id=forum_chat_id,
-        ),
-    )
-    if existing is not None and int(existing.message_thread_id or 0) > 0:
-        return int(existing.message_thread_id), existing.topic_name
+    topic_lock = await _get_topic_lock(trader_address=normalized)
+    async with topic_lock:
+        existing = await _store_call(
+            settings,
+            lambda store: store.get_trader_forum_topic(
+                trader_address=normalized,
+                forum_chat_id=forum_chat_id,
+            ),
+        )
+        if existing is not None and int(existing.message_thread_id or 0) > 0:
+            return int(existing.message_thread_id), existing.topic_name
 
-    topic_name = _forum_topic_name(normalized)
-    topic_result = await _telegram_call_with_retry(
-        logger=logger,
-        label="createForumTopic",
-        max_attempts=_retry_attempts(settings),
-        call=lambda: create_forum_topic(
-            session,
-            bot_token=settings.telegram_bot_token,
-            chat_id=forum_chat_id,
-            name=topic_name,
-        ),
-    )
-    thread_id = int(topic_result.get("message_thread_id", 0))
-    if thread_id <= 0:
-        raise RuntimeError(f"Invalid forum topic response: {topic_result}")
-    await _store_call(
-        settings,
-        lambda store: store.upsert_trader_forum_topic(
-            trader_address=normalized,
-            forum_chat_id=forum_chat_id,
-            message_thread_id=thread_id,
-            topic_name=topic_name,
-        ),
-    )
-    logger.info(
-        "Created shared forum topic forum_chat_id=%s trader=%s thread=%s",
-        forum_chat_id,
-        normalized,
-        thread_id,
-    )
-    return thread_id, topic_name
+        topic_name = _forum_topic_name(normalized)
+        topic_result = await _telegram_call_with_retry(
+            logger=logger,
+            label="createForumTopic",
+            max_attempts=_retry_attempts(settings),
+            call=lambda: create_forum_topic(
+                session,
+                bot_token=settings.telegram_bot_token,
+                chat_id=forum_chat_id,
+                name=topic_name,
+            ),
+        )
+        thread_id = int(topic_result.get("message_thread_id", 0))
+        if thread_id <= 0:
+            raise RuntimeError(f"Invalid forum topic response: {topic_result}")
+        await _store_call(
+            settings,
+            lambda store: store.upsert_trader_forum_topic(
+                trader_address=normalized,
+                forum_chat_id=forum_chat_id,
+                message_thread_id=thread_id,
+                topic_name=topic_name,
+            ),
+        )
+        logger.info(
+            "Created shared forum topic forum_chat_id=%s trader=%s thread=%s",
+            forum_chat_id,
+            normalized,
+            thread_id,
+        )
+        return thread_id, topic_name
 
 
 async def _send_trader_topic_link(
