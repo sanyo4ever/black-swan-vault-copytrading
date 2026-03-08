@@ -51,10 +51,8 @@ class LightweightRotationWorker:
         self._http_session = http_session
         self._logger = logger
         self._lease_holder = f"{socket.gethostname()}:{os.getpid()}:rotation"
-        self._lease_ttl_seconds = max(
-            180,
-            int(settings.rotation_health_interval_minutes) * 120,
-        )
+        # Keep runtime lease short to avoid long stale-lock windows after restarts.
+        self._lease_ttl_seconds = 180
         self._discovery_config = HyperliquidDiscoveryConfig(
             info_url=settings.hyperliquid_info_url,
             candidate_limit=max(
