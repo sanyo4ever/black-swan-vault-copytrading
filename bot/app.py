@@ -203,6 +203,10 @@ async def _ensure_forum_topic_for_trader(
     trader_address: str,
     topic_cache: dict[str, int],
 ) -> int | None:
+    unsupported_key = "__forum_unsupported__"
+    if topic_cache.get(unsupported_key) == 1:
+        return None
+
     normalized = _normalize_trader_address(trader_address)
     if not normalized:
         return None
@@ -235,6 +239,7 @@ async def _ensure_forum_topic_for_trader(
             raise RuntimeError(f"Invalid createForumTopic response: {topic_result}")
     except TelegramClientError as exc:
         if exc.is_forum_not_supported():
+            topic_cache[unsupported_key] = 1
             logger.error(
                 "Forum topics are not supported for chat_id=%s; switch chat to supergroup with Topics",
                 chat_id,
