@@ -397,6 +397,7 @@ class TraderStoreTests(unittest.TestCase):
         now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
         active = "0x1010101010101010101010101010101010101010"
         stale = "0x2020202020202020202020202020202020202020"
+        extra = "0x3030303030303030303030303030303030303030"
         with TraderStore(self.db_path) as store:
             store.upsert_discovered(
                 address=active,
@@ -448,23 +449,49 @@ class TraderStoreTests(unittest.TestCase):
                 score=33.0,
                 stats_json='{"metrics_30d":{"roi_pct":4.1}}',
             )
+            store.upsert_discovered(
+                address=extra,
+                label="Extra",
+                source="hyperliquid_recent_trades",
+                trades_24h=2,
+                active_hours_24h=2,
+                trades_7d=14,
+                trades_30d=70,
+                active_days_30d=9,
+                first_fill_time=now_ms - (40 * 86_400_000),
+                last_fill_time=now_ms - (30 * 60_000),
+                age_days=40.0,
+                volume_usd_30d=40_000.0,
+                realized_pnl_30d=800.0,
+                fees_30d=80.0,
+                win_rate_30d=0.57,
+                long_ratio_30d=0.52,
+                avg_notional_30d=700.0,
+                max_notional_30d=3000.0,
+                account_value=18_000.0,
+                total_ntl_pos=2_000.0,
+                total_margin_used=900.0,
+                score=11.0,
+                stats_json='{"metrics_30d":{"roi_pct":2.0}}',
+            )
 
             store.upsert_showcase_wallet(address=active, status=SHOWCASE_STATUS_ACTIVE)
             store.upsert_showcase_wallet(address=stale, status=SHOWCASE_STATUS_STALE)
-            self.assertEqual(store.count_showcase_wallets(active_only=False), 2)
-            self.assertEqual(store.count_showcase_wallets(active_only=True), 1)
+            store.upsert_showcase_wallet(address=extra, status=SHOWCASE_STATUS_ACTIVE)
+            self.assertEqual(store.count_showcase_wallets(active_only=False), 3)
+            self.assertEqual(store.count_showcase_wallets(active_only=True), 2)
 
             active_only = store.list_showcase_addresses(limit=10, include_stale=False)
-            self.assertEqual(active_only, [active])
+            self.assertEqual(active_only, [active, extra])
 
             filtered_active = store.list_active_addresses(limit=10, showcase_only=True)
-            self.assertEqual(filtered_active, [active])
+            self.assertEqual(filtered_active, [active, extra])
 
             monitor_stats = store.refresh_delivery_monitor_state(
                 max_targets_per_cycle=10,
                 showcase_only=True,
             )
-            self.assertEqual(monitor_stats["total"], 1)
+            self.assertEqual(monitor_stats["total"], 2)
             dms_rows = store._connection.execute(
                 """
                 SELECT address
@@ -472,19 +499,43 @@ class TraderStoreTests(unittest.TestCase):
                 ORDER BY address ASC
                 """
             ).fetchall()
-            self.assertEqual([str(row[0]) for row in dms_rows], [active])
+            self.assertEqual([str(row[0]) for row in dms_rows], [active, extra])
+
+            trimmed = store.trim_showcase_wallets(max_slots=2)
+            self.assertEqual(trimmed, 1)
+            self.assertEqual(store.count_showcase_wallets(active_only=False), 2)
+
+            remaining_wallets = store.list_showcase_wallets(limit=10)
+            remaining_addresses = {wallet.address for wallet in remaining_wallets}
+            self.assertEqual(len(remaining_addresses), 2)
+            removed_candidates = {active, stale, extra} - remaining_addresses
+            self.assertEqual(len(removed_candidates), 1)
+            removed_address = next(iter(removed_candidates))
+            self.assertIsNone(store.get_trader(address=removed_address))
+
+            survivor_address = next(iter(remaining_addresses))
+            deleted = store.cleanup_rotated_trader(address=survivor_address)
+            self.assertEqual(deleted, 0)
+            store.remove_showcase_wallet(address=survivor_address)
+            deleted = store.cleanup_rotated_trader(address=survivor_address)
+            self.assertEqual(deleted, 1)
+            self.assertIsNone(store.get_trader(address=survivor_address))
+
+            remaining_after_removal = store.list_showcase_wallets(limit=10)
+            self.assertEqual(len(remaining_after_removal), 1)
+            last_address = remaining_after_removal[0].address
 
             store.update_showcase_health(
-                address=active,
+                address=last_address,
                 idle_hours=97.0,
                 idle_cycles=4,
                 status=SHOWCASE_STATUS_STALE,
             )
             showcase_rows = store.list_showcase_wallets(status=SHOWCASE_STATUS_STALE, limit=10)
-            self.assertEqual(len(showcase_rows), 2)
+            self.assertEqual(len(showcase_rows), 1)
 
             refreshed = store.refresh_catalog_current_from_showcase(activity_window_minutes=60)
-            self.assertEqual(refreshed, 2)
+            self.assertEqual(refreshed, 1)
 
             count = store._connection.execute(
                 """
@@ -494,7 +545,7 @@ class TraderStoreTests(unittest.TestCase):
             ).fetchone()
             self.assertIsNotNone(count)
             assert count is not None
-            self.assertEqual(int(count[0]), 2)
+            self.assertEqual(int(count[0]), 1)
 
             store.log_rotation(
                 old_address=active,

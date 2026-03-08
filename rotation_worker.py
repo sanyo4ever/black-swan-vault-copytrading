@@ -504,6 +504,7 @@ class LightweightRotationWorker:
                 metrics_at=datetime.now(tz=UTC).strftime("%Y-%m-%d %H:%M:%S"),
             )
             store.remove_showcase_wallet(address=old_address)
+            store.cleanup_rotated_trader(address=old_address)
             store.delete_trader_forum_topic(
                 trader_address=old_address,
                 forum_chat_id=forum_chat_id if forum_chat_id else None,
@@ -614,6 +615,12 @@ class LightweightRotationWorker:
             return
         try:
             now = time.monotonic()
+            slots = max(1, int(self._settings.showcase_slots))
+
+            with TraderStore(self._settings.database_dsn) as store:
+                trimmed = store.trim_showcase_wallets(max_slots=slots)
+            if trimmed > 0:
+                self._logger.warning("Showcase trim removed overflow wallets count=%s", trimmed)
 
             bootstrap_interval = max(
                 1,

@@ -25,7 +25,8 @@ def build_source(source_cfg: dict, *, http_session, settings):
                 settings.monitor_delivery_only_subscribed,
             )
         if showcase_mode_enabled:
-            merged_cfg["delivery_only_subscribed"] = False
+            # Showcase mode uses delivery monitor state sourced from showcase_wallets.
+            merged_cfg["delivery_only_subscribed"] = True
             merged_cfg["showcase_mode"] = True
             merged_cfg["trader_limit"] = max(1, int(settings.showcase_slots))
             merged_cfg["max_traders_per_cycle"] = max(1, int(settings.showcase_slots))

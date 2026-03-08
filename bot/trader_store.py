@@ -2190,6 +2190,40 @@ class TraderStore:
         self._connection.commit()
         return int(cursor.rowcount or 0)
 
+    def cleanup_rotated_trader(self, *, address: str) -> int:
+        normalized = self.normalize_address(address)
+        cursor = self._execute(
+            """
+            DELETE FROM tracked_traders
+            WHERE address = ?
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM showcase_wallets
+                  WHERE address = ?
+              )
+            """,
+            (normalized, normalized),
+        )
+        self._connection.commit()
+        return int(cursor.rowcount or 0)
+
+    def trim_showcase_wallets(self, *, max_slots: int) -> int:
+        slots = max(1, int(max_slots))
+        wallets = self.list_showcase_wallets(limit=10_000)
+        if len(wallets) <= slots:
+            return 0
+
+        keep = {wallet.address for wallet in wallets[:slots]}
+        trimmed = 0
+        for wallet in wallets[slots:]:
+            if wallet.address in keep:
+                continue
+            removed = self.remove_showcase_wallet(address=wallet.address)
+            if removed > 0:
+                self.cleanup_rotated_trader(address=wallet.address)
+                trimmed += removed
+        return trimmed
+
     def update_showcase_health(
         self,
         *,
