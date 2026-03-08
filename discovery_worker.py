@@ -75,19 +75,21 @@ async def _run() -> None:
     cycle = 0
     async with aiohttp.ClientSession(timeout=timeout) as session:
         while True:
-            cycle += 1
-            cycle_started = time.monotonic()
-            with bind_log_context(cycle=cycle, cycle_id=new_trace_id("disc")):
-                try:
-                    with TraderStore(settings.database_dsn) as store:
-                        has_lease = store.acquire_runtime_lease(
-                            lock_name="tracked-traders-write",
-                            holder=lease_holder,
-                            ttl_seconds=lease_ttl_seconds,
-                        )
-                        if not has_lease:
-                            logger.info("Discovery cycle skipped: lease is held by another worker")
-                            continue
+        cycle += 1
+        cycle_started = time.monotonic()
+        with bind_log_context(cycle=cycle, cycle_id=new_trace_id("disc")):
+            cycle_skipped = False
+            try:
+                with TraderStore(settings.database_dsn) as store:
+                    has_lease = store.acquire_runtime_lease(
+                        lock_name="tracked-traders-write",
+                        holder=lease_holder,
+                        ttl_seconds=lease_ttl_seconds,
+                    )
+                    if not has_lease:
+                        logger.info("Discovery cycle skipped: lease is held by another worker")
+                        cycle_skipped = True
+                    else:
                         service = HyperliquidDiscoveryService(
                             http_session=session,
                             store=store,
@@ -95,6 +97,7 @@ async def _run() -> None:
                             logger=logger,
                         )
                         summary = await service.discover()
+                if not cycle_skipped:
                     logger.info(
                         "Cycle done: candidates=%s qualified=%s upserted=%s unlisted=%s",
                         summary["candidates"],
@@ -102,8 +105,8 @@ async def _run() -> None:
                         summary["upserted"],
                         summary.get("unlisted", summary.get("pruned", 0)),
                     )
-                except Exception as exc:
-                    logger.exception("Discovery cycle failed: %s", exc)
+            except Exception as exc:
+                logger.exception("Discovery cycle failed: %s", exc)
 
             if args.once:
                 return

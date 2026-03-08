@@ -49,6 +49,7 @@ async def _run() -> None:
         cycle += 1
         cycle_started = time.monotonic()
         with bind_log_context(cycle=cycle, cycle_id=new_trace_id("top")):
+            cycle_skipped = False
             try:
                 with TraderStore(settings.database_dsn) as store:
                     has_lease = store.acquire_runtime_lease(
@@ -58,32 +59,34 @@ async def _run() -> None:
                     )
                     if not has_lease:
                         logger.info("Top100 cycle skipped: lease is held by another worker")
-                        continue
-                    catalog_size = store.refresh_catalog_current(
-                        activity_window_minutes=settings.live_top100_active_window_minutes,
+                        cycle_skipped = True
+                    else:
+                        catalog_size = store.refresh_catalog_current(
+                            activity_window_minutes=settings.live_top100_active_window_minutes,
+                        )
+                        count = store.refresh_top100_live(
+                            max_rows=settings.live_top100_size,
+                            active_window_minutes=settings.live_top100_active_window_minutes,
+                        )
+                        monitoring_stats = store.refresh_monitoring_pool(
+                            hot_size=settings.monitor_hot_size,
+                            warm_size=settings.monitor_warm_size,
+                            hot_poll_seconds=settings.monitor_hot_poll_seconds,
+                            warm_poll_seconds=settings.monitor_warm_poll_seconds,
+                            cold_poll_seconds=settings.monitor_cold_poll_seconds,
+                            hot_recency_minutes=settings.monitor_hot_recency_minutes,
+                            warm_recency_minutes=settings.monitor_warm_recency_minutes,
+                        )
+                if not cycle_skipped:
+                    logger.info(
+                        "Catalog size=%s | Top100 size=%s | Monitoring pool total=%s hot=%s warm=%s cold=%s",
+                        catalog_size,
+                        count,
+                        monitoring_stats.get("total", 0),
+                        monitoring_stats.get("hot", 0),
+                        monitoring_stats.get("warm", 0),
+                        monitoring_stats.get("cold", 0),
                     )
-                    count = store.refresh_top100_live(
-                        max_rows=settings.live_top100_size,
-                        active_window_minutes=settings.live_top100_active_window_minutes,
-                    )
-                    monitoring_stats = store.refresh_monitoring_pool(
-                        hot_size=settings.monitor_hot_size,
-                        warm_size=settings.monitor_warm_size,
-                        hot_poll_seconds=settings.monitor_hot_poll_seconds,
-                        warm_poll_seconds=settings.monitor_warm_poll_seconds,
-                        cold_poll_seconds=settings.monitor_cold_poll_seconds,
-                        hot_recency_minutes=settings.monitor_hot_recency_minutes,
-                        warm_recency_minutes=settings.monitor_warm_recency_minutes,
-                    )
-                logger.info(
-                    "Catalog size=%s | Top100 size=%s | Monitoring pool total=%s hot=%s warm=%s cold=%s",
-                    catalog_size,
-                    count,
-                    monitoring_stats.get("total", 0),
-                    monitoring_stats.get("hot", 0),
-                    monitoring_stats.get("warm", 0),
-                    monitoring_stats.get("cold", 0),
-                )
             except Exception as exc:
                 logger.exception("Top100 cycle failed: %s", exc)
 
