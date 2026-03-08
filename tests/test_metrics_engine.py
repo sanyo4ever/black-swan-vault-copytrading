@@ -73,8 +73,8 @@ class MetricsComputationTests(unittest.TestCase):
         self.assertAlmostEqual(float(stats["realized_pnl"] or 0.0), 20.0, places=6)
         self.assertAlmostEqual(float(stats["win_rate"] or 0.0), 2 / 3, places=6)
         self.assertAlmostEqual(float(stats["profit_to_loss_ratio"] or 0.0), 2.0, places=6)
-        self.assertAlmostEqual(float(stats["roi_pct"] or 0.0), 2.0, places=6)
-        self.assertAlmostEqual(float(stats["max_drawdown_pct"] or 0.0), 1.980198, places=3)
+        self.assertAlmostEqual(float(stats["roi_pct"] or 0.0), 2.040816, places=6)
+        self.assertAlmostEqual(float(stats["max_drawdown_pct"] or 0.0), 2.020202, places=3)
         self.assertGreater(float(stats["sharpe"] or 0.0), 0.0)
         self.assertGreater(float(stats["sortino"] or 0.0), 0.0)
 
@@ -103,8 +103,21 @@ class MetricsComputationTests(unittest.TestCase):
         stats = self.service._compute_period_stats(fills=fills, account_value=1000.0)
         # returns: [0.05, -0.03, 0.02, -0.01]
         # downside deviation = sqrt((0^2 + 0.03^2 + 0^2 + 0.01^2) / 4) = 0.015811...
-        # mean_return = 0.0075, sortino = mean/downside * sqrt(4) = 0.948683...
-        self.assertAlmostEqual(float(stats["sortino"] or 0.0), 0.948683, places=5)
+        # mean_return = 0.0075, downside deviation = 0.015811...
+        # annualizer for 30d window = sqrt(365/30) = 3.488...
+        # sortino = mean/downside * annualizer = 1.6547...
+        self.assertAlmostEqual(float(stats["sortino"] or 0.0), 1.654539, places=5)
+
+    def test_roi_uses_estimated_start_equity_not_current_equity(self) -> None:
+        fills = [
+            {"oid": "1", "time": 1, "px": "100", "sz": "1", "closedPnl": "40"},
+            {"oid": "2", "time": 2, "px": "100", "sz": "1", "closedPnl": "60"},
+        ]
+        stats = self.service._compute_period_stats(fills=fills, account_value=200.0)
+        self.assertAlmostEqual(float(stats["realized_pnl"] or 0.0), 100.0, places=6)
+        # start_equity_estimate = abs(200 - 100) = 100. ROI should use 100 (=> 100%),
+        # not current equity 200 (=> 50%).
+        self.assertAlmostEqual(float(stats["roi_pct"] or 0.0), 100.0, places=6)
 
     def test_drawdown_uses_closed_pnls_even_when_returns_are_empty(self) -> None:
         fills = [
@@ -113,7 +126,7 @@ class MetricsComputationTests(unittest.TestCase):
         ]
         stats = self.service._compute_period_stats(fills=fills, account_value=None)
         self.assertIsNotNone(stats["max_drawdown_pct"])
-        self.assertAlmostEqual(float(stats["max_drawdown_pct"] or 0.0), 33.333333, places=3)
+        self.assertAlmostEqual(float(stats["max_drawdown_pct"] or 0.0), 25.0, places=3)
 
 
 class MetricsFetchPipelineTests(unittest.IsolatedAsyncioTestCase):

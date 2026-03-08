@@ -331,6 +331,8 @@ class HyperliquidDiscoveryService:
         *,
         fills: list[dict[str, Any]],
         account_value: float | None,
+        period_days: int = 30,
+        unrealized_pnl_end: float | None = None,
     ) -> dict[str, float | int | None]:
         trades = self._aggregate_trades(fills)
         notionals = [
@@ -372,16 +374,18 @@ class HyperliquidDiscoveryService:
         if account_value is not None and abs(account_value) > 1e-9:
             start_equity_estimate = abs(account_value - realized_pnl)
             current_equity = abs(account_value)
-            candidates = [value for value in (start_equity_estimate, current_equity) if value > 1e-9]
-            # Keep denominator conservative to avoid overstating ROI after withdrawals/transfers.
-            roi_base = max(candidates) if candidates else None
-        else:
-            volume = sum(notionals)
-            if volume > 1e-9:
-                roi_base = max(volume / max(1, len(notionals)), 1.0)
+            if start_equity_estimate > 1e-9:
+                # Use estimated period-start equity to avoid under-reporting profitable accounts.
+                roi_base = start_equity_estimate
+            elif current_equity > 1e-9:
+                roi_base = current_equity
         roi_pct = ((realized_pnl / roi_base) * 100.0) if roi_base else None
 
-        equity_base = roi_base or max(1.0, sum(notionals) / max(1, len(notionals)))
+        equity_base = roi_base or max(
+            1.0,
+            abs(realized_pnl),
+            sum(notionals) / max(1, len(notionals)),
+        )
         equity = equity_base
         peak_equity = equity_base
         max_drawdown = 0.0
@@ -392,18 +396,25 @@ class HyperliquidDiscoveryService:
                 drawdown = (peak_equity - equity) / peak_equity
                 max_drawdown = max(max_drawdown, drawdown)
 
+        unrealized_end = float(unrealized_pnl_end or 0.0)
+        if abs(unrealized_end) > 1e-12 and peak_equity > 0:
+            equity_with_unrealized = equity + unrealized_end
+            drawdown = (peak_equity - equity_with_unrealized) / peak_equity
+            max_drawdown = max(max_drawdown, drawdown)
+
         mean_return = (sum(returns) / len(returns)) if returns else 0.0
         volatility = self._population_std(returns) if returns else 0.0
         roi_volatility_pct = (volatility * 100.0) if returns else None
+        annualizer = math.sqrt(365.0 / max(1, int(period_days)))
         sharpe = (
-            (mean_return / volatility) * math.sqrt(len(returns))
+            (mean_return / volatility) * annualizer
             if volatility > 1e-12
             else None
         )
 
         downside_vol = self._downside_deviation(returns)
         sortino = (
-            (mean_return / downside_vol) * math.sqrt(len(returns))
+            (mean_return / downside_vol) * annualizer
             if downside_vol > 1e-12
             else None
         )
@@ -449,6 +460,49 @@ class HyperliquidDiscoveryService:
         if not times:
             return None
         return min(times)
+
+    def _extract_unrealized_pnl(self, clearinghouse_state: Any) -> float | None:
+        if not isinstance(clearinghouse_state, dict):
+            return None
+
+        total = 0.0
+        found = False
+
+        margin_summary = clearinghouse_state.get("marginSummary")
+        if isinstance(margin_summary, dict):
+            for key in ("unrealizedPnl", "unrealized_pnl", "totalUnrealizedPnl"):
+                if key in margin_summary:
+                    total += self._to_float(margin_summary.get(key))
+                    found = True
+                    break
+
+        asset_positions = clearinghouse_state.get("assetPositions")
+        if isinstance(asset_positions, list):
+            for item in asset_positions:
+                if not isinstance(item, dict):
+                    continue
+                position = item.get("position")
+                candidate_values: list[Any] = [
+                    item.get("unrealizedPnl"),
+                    item.get("unrealized_pnl"),
+                    item.get("unrealizedPnlUsd"),
+                ]
+                if isinstance(position, dict):
+                    candidate_values.extend(
+                        [
+                            position.get("unrealizedPnl"),
+                            position.get("unrealized_pnl"),
+                            position.get("unrealizedPnlUsd"),
+                        ]
+                    )
+                for raw in candidate_values:
+                    if raw is None:
+                        continue
+                    total += self._to_float(raw)
+                    found = True
+                    break
+
+        return total if found else None
 
     async def _fetch_hyperliquid_candidates(self) -> list[dict[str, Any]]:
         try:
@@ -905,9 +959,25 @@ class HyperliquidDiscoveryService:
         total_ntl_pos = self._to_float(margin_summary.get("totalNtlPos")) if margin_summary else None
         total_margin_used = self._to_float(margin_summary.get("totalMarginUsed")) if margin_summary else None
 
-        period_1d = self._compute_period_stats(fills=fills_24h, account_value=account_value)
-        period_7d = self._compute_period_stats(fills=fills_7d, account_value=account_value)
-        period_30d = self._compute_period_stats(fills=fills_30d, account_value=account_value)
+        unrealized_pnl_end = self._extract_unrealized_pnl(clearinghouse_state)
+        period_1d = self._compute_period_stats(
+            fills=fills_24h,
+            account_value=account_value,
+            period_days=1,
+            unrealized_pnl_end=unrealized_pnl_end,
+        )
+        period_7d = self._compute_period_stats(
+            fills=fills_7d,
+            account_value=account_value,
+            period_days=7,
+            unrealized_pnl_end=unrealized_pnl_end,
+        )
+        period_30d = self._compute_period_stats(
+            fills=fills_30d,
+            account_value=account_value,
+            period_days=30,
+            unrealized_pnl_end=unrealized_pnl_end,
+        )
 
         fees_30d = sum(abs(self._to_float(item.get("fee"))) for item in fills_30d)
         long_count = sum(
@@ -974,11 +1044,11 @@ class HyperliquidDiscoveryService:
         fee_risk = min(1.0, fees_30d / 10_000.0)
 
         weighted_base = (
-            (roi_score * 0.26)
-            + (sharpe_score * 0.16)
-            + (sortino_score * 0.16)
-            + (win_score * 0.20)
-            + (activity_score * 0.22)
+            (roi_score * 0.30)
+            + (sharpe_score * 0.22)
+            + (sortino_score * 0.20)
+            + (win_score * 0.16)
+            + (activity_score * 0.12)
         )
         risk_penalty = (
             (drawdown_risk * 0.60)
@@ -1090,6 +1160,7 @@ class HyperliquidDiscoveryService:
             "account_value": account_value,
             "total_ntl_pos": total_ntl_pos,
             "total_margin_used": total_margin_used,
+            "unrealized_pnl_end": unrealized_pnl_end,
             "score": round(score, 4),
             "stats_json": json.dumps(stats_payload, ensure_ascii=True, separators=(",", ":")),
         }
