@@ -860,9 +860,9 @@ def _render_public_directory(
     .hero-card {{ background:linear-gradient(180deg,rgba(255,180,60,.07),rgba(255,255,255,.01)); }}
     .brand-row {{ display:flex; gap:12px; align-items:center; margin-bottom:8px; }}
     .brand-mark {{
-      width:74px;
-      height:74px;
-      border-radius:18px;
+      width:148px;
+      height:148px;
+      border-radius:36px;
       background:#0a0f16;
       border:1px solid #2c3442;
       padding:6px;
@@ -1081,7 +1081,7 @@ def _render_public_directory(
       .tab {{ font-size:17px; }}
       h1 {{ font-size:25px; }}
       .card {{ padding:12px; }}
-      .brand-mark {{ width:62px; height:62px; border-radius:14px; }}
+      .brand-mark {{ width:124px; height:124px; border-radius:28px; }}
       .brand-name {{ font-size:48px; }}
       .hero-btn {{
         padding:12px 20px;
