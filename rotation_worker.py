@@ -134,6 +134,20 @@ class LightweightRotationWorker:
         return True
 
     @staticmethod
+    def _passes_soft_filters(item: dict[str, Any], *, now_ms: int) -> bool:
+        age_days = item.get("age_days")
+        if age_days is None or float(age_days) < 7.0:
+            return False
+        if int(item.get("trades_30d") or 0) < 30:
+            return False
+        last_fill_time = int(item.get("last_fill_time") or 0)
+        if last_fill_time <= 0:
+            return False
+        if last_fill_time < (now_ms - (24 * 60 * 60 * 1000)):
+            return False
+        return True
+
+    @staticmethod
     def _upsert_discovered_from_metrics(*, store: TraderStore, item: dict[str, Any]) -> None:
         store.upsert_discovered(
             address=str(item["address"]),
@@ -273,11 +287,16 @@ class LightweightRotationWorker:
             metrics = await asyncio.gather(*(gather_one(item) for item in selected))
 
         qualified: list[dict[str, Any]] = []
+        soft_pool: list[dict[str, Any]] = []
         for item in metrics:
             if not item:
                 continue
             if self._passes_hard_filters(item, now_ms=now_ms):
                 qualified.append(item)
+                continue
+            if self._passes_soft_filters(item, now_ms=now_ms):
+                soft_pool.append(item)
+
         qualified.sort(
             key=lambda item: (
                 float(item.get("score") or 0.0),
@@ -285,6 +304,32 @@ class LightweightRotationWorker:
             ),
             reverse=True,
         )
+        soft_pool.sort(
+            key=lambda item: (
+                float(item.get("score") or 0.0),
+                int(item.get("last_fill_time") or 0),
+            ),
+            reverse=True,
+        )
+        hard_count = len(qualified)
+        if len(qualified) < int(limit):
+            seen = {str(item.get("address")) for item in qualified}
+            for candidate in soft_pool:
+                address = str(candidate.get("address"))
+                if not address or address in seen:
+                    continue
+                qualified.append(candidate)
+                seen.add(address)
+                if len(qualified) >= int(limit):
+                    break
+            if soft_pool:
+                self._logger.info(
+                    "Rotation fallback expanded candidate pool hard=%s soft=%s target=%s final=%s",
+                    hard_count,
+                    len(soft_pool),
+                    limit,
+                    len(qualified),
+                )
         return qualified
 
     async def _bootstrap_if_needed(self) -> int:
