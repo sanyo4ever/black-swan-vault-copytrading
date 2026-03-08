@@ -24,6 +24,9 @@ from bot.trader_store import (
     TraderStore,
 )
 
+_START_LOCKS: dict[str, asyncio.Lock] = {}
+_START_LOCKS_GUARD = asyncio.Lock()
+
 
 def _short(address: str) -> str:
     if len(address) < 12:
@@ -74,6 +77,16 @@ def _fmt_remaining(value: str) -> str:
     hours = seconds // 3600
     minutes = (seconds % 3600) // 60
     return f"{hours}h {minutes}m"
+
+
+async def _get_start_lock(*, chat_id: int, trader_address: str) -> asyncio.Lock:
+    key = f"{int(chat_id)}:{str(trader_address).strip().lower()}"
+    async with _START_LOCKS_GUARD:
+        lock = _START_LOCKS.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _START_LOCKS[key] = lock
+        return lock
 
 
 async def _send_welcome(*, session: aiohttp.ClientSession, settings, chat_id: int) -> None:
@@ -150,154 +163,156 @@ async def _handle_start_with_payload(
         )
         return
 
-    with TraderStore(settings.database_dsn) as store:
-        trader = store.get_trader(address=address)
-        if trader is None:
-            await send_message(
-                session,
-                bot_token=settings.telegram_bot_token,
-                chat_id=chat_id,
-                text="Trader not found in database.",
-            )
-            return
-        if trader.moderation_state == MODERATION_BLACKLIST:
-            await send_message(
-                session,
-                bot_token=settings.telegram_bot_token,
-                chat_id=chat_id,
-                text="Trader is not available for subscription.",
-            )
-            return
-        if trader.status in {STATUS_STALE, STATUS_ARCHIVED}:
-            await send_message(
-                session,
-                bot_token=settings.telegram_bot_token,
-                chat_id=chat_id,
-                text=(
-                    "Trader is currently not eligible for new subscriptions.\n"
-                    "Pick another trader from the listed catalog."
-                ),
-            )
-            return
-
-        # Each new subscription starts a clean session for this trader in this chat.
-        previous_sessions = store.cancel_chat_trader_subscriptions(
-            chat_id=chat_id,
-            trader_address=trader.address,
-        )
-
-    await _delete_topics_best_effort(
-        session=session,
-        settings=settings,
-        chat_id=chat_id,
-        sessions=previous_sessions,
-        logger=logger,
-    )
-
-    topic_name = f"{_short(address)} | Live"
-    topic_result = None
-    thread_id: int | None = None
-    feed_mode = "chat"
-    try:
-        try:
-            topic_result = await create_forum_topic(
-                session,
-                bot_token=settings.telegram_bot_token,
-                chat_id=chat_id,
-                name=topic_name,
-            )
-            candidate_thread_id = int(topic_result.get("message_thread_id", 0))
-            if candidate_thread_id <= 0:
-                raise RuntimeError(f"Invalid forum topic response: {topic_result}")
-            thread_id = candidate_thread_id
-            feed_mode = "thread"
-        except TelegramClientError as exc:
-            if exc.is_forum_not_supported():
-                logger.info(
-                    "Forum topics unsupported for chat %s; falling back to direct chat mode",
-                    chat_id,
-                )
-                thread_id = None
-                topic_name = None
-                feed_mode = "chat"
-            else:
-                raise
-
+    start_lock = await _get_start_lock(chat_id=chat_id, trader_address=address)
+    async with start_lock:
         with TraderStore(settings.database_dsn) as store:
-            session_info = store.create_subscription_with_session(
-                chat_id=chat_id,
-                trader_address=address,
-                message_thread_id=thread_id,
-                topic_name=topic_name,
-                lifetime_hours=settings.subscription_lifetime_hours,
-            )
-        logger.info(
-            "Subscription started trader=%s chat_id=%s feed_mode=%s thread=%s expires_at=%s",
-            address,
-            chat_id,
-            feed_mode,
-            thread_id,
-            session_info.expires_at,
-        )
-
-        if thread_id is not None:
-            await send_message(
-                session,
-                bot_token=settings.telegram_bot_token,
-                chat_id=chat_id,
-                message_thread_id=thread_id,
-                text=(
-                    "<b>Session started ✅</b>\n"
-                    f"Trader: <code>{_short(address)}</code>\n"
-                    "<b>Status:</b> Active until cancellation\n\n"
-                    "New trades from this trader will be posted in this thread."
-                ),
-            )
-        else:
-            await send_message(
-                session,
-                bot_token=settings.telegram_bot_token,
-                chat_id=chat_id,
-                text=(
-                    "<b>Session started ✅</b>\n"
-                    f"Trader: <code>{_short(address)}</code>\n"
-                    "<b>Status:</b> Active until cancellation\n\n"
-                    "This chat does not support forum threads, so new trades will be posted directly here."
-                ),
-            )
-
-        await send_message(
-            session,
-            bot_token=settings.telegram_bot_token,
-            chat_id=chat_id,
-            text=(
-                "<b>Done ✅</b>\n"
-                f"Subscription is active for <code>{_short(address)}</code>.\n"
-                "It stays active until you send <code>/stop</code>.\n\n"
-                "View active subscriptions: <code>/my</code>"
-            ),
-        )
-    except Exception as exc:
-        logger.exception("Failed to start subscription for chat %s: %s", chat_id, exc)
-        if topic_result and topic_result.get("message_thread_id"):
-            try:
-                await delete_forum_topic(
+            trader = store.get_trader(address=address)
+            if trader is None:
+                await send_message(
                     session,
                     bot_token=settings.telegram_bot_token,
                     chat_id=chat_id,
-                    message_thread_id=int(topic_result["message_thread_id"]),
+                    text="Trader not found in database.",
                 )
-            except Exception:
-                pass
-        await send_message(
-            session,
-            bot_token=settings.telegram_bot_token,
-            chat_id=chat_id,
-            text=(
-                "Failed to start the subscription.\n"
-                "Please try again in 10-20 seconds."
-            ),
-        )
+                return
+            if trader.moderation_state == MODERATION_BLACKLIST:
+                await send_message(
+                    session,
+                    bot_token=settings.telegram_bot_token,
+                    chat_id=chat_id,
+                    text="Trader is not available for subscription.",
+                )
+                return
+            if trader.status in {STATUS_STALE, STATUS_ARCHIVED}:
+                await send_message(
+                    session,
+                    bot_token=settings.telegram_bot_token,
+                    chat_id=chat_id,
+                    text=(
+                        "Trader is currently not eligible for new subscriptions.\n"
+                        "Pick another trader from the listed catalog."
+                    ),
+                )
+                return
+            previous_sessions = [
+                item
+                for item in store.list_delivery_sessions_for_chat(chat_id=chat_id)
+                if item.trader_address == trader.address
+            ]
+
+        topic_name = f"{_short(address)} | Live"
+        topic_result = None
+        thread_id: int | None = None
+        feed_mode = "chat"
+        try:
+            try:
+                topic_result = await create_forum_topic(
+                    session,
+                    bot_token=settings.telegram_bot_token,
+                    chat_id=chat_id,
+                    name=topic_name,
+                )
+                candidate_thread_id = int(topic_result.get("message_thread_id", 0))
+                if candidate_thread_id <= 0:
+                    raise RuntimeError(f"Invalid forum topic response: {topic_result}")
+                thread_id = candidate_thread_id
+                feed_mode = "thread"
+            except TelegramClientError as exc:
+                if exc.is_forum_not_supported():
+                    logger.info(
+                        "Forum topics unsupported for chat %s; falling back to direct chat mode",
+                        chat_id,
+                    )
+                    thread_id = None
+                    topic_name = None
+                    feed_mode = "chat"
+                else:
+                    raise
+
+            with TraderStore(settings.database_dsn) as store:
+                session_info = store.create_subscription_with_session(
+                    chat_id=chat_id,
+                    trader_address=address,
+                    message_thread_id=thread_id,
+                    topic_name=topic_name,
+                    lifetime_hours=settings.subscription_lifetime_hours,
+                )
+            logger.info(
+                "Subscription started trader=%s chat_id=%s feed_mode=%s thread=%s expires_at=%s",
+                address,
+                chat_id,
+                feed_mode,
+                thread_id,
+                session_info.expires_at,
+            )
+
+            if thread_id is not None:
+                await send_message(
+                    session,
+                    bot_token=settings.telegram_bot_token,
+                    chat_id=chat_id,
+                    message_thread_id=thread_id,
+                    text=(
+                        "<b>Session started ✅</b>\n"
+                        f"Trader: <code>{_short(address)}</code>\n"
+                        "<b>Status:</b> Active until cancellation\n\n"
+                        "New trades from this trader will be posted in this thread."
+                    ),
+                )
+            else:
+                await send_message(
+                    session,
+                    bot_token=settings.telegram_bot_token,
+                    chat_id=chat_id,
+                    text=(
+                        "<b>Session started ✅</b>\n"
+                        f"Trader: <code>{_short(address)}</code>\n"
+                        "<b>Status:</b> Active until cancellation\n\n"
+                        "This chat does not support forum threads, so new trades will be posted directly here."
+                    ),
+                )
+
+            await send_message(
+                session,
+                bot_token=settings.telegram_bot_token,
+                chat_id=chat_id,
+                text=(
+                    "<b>Done ✅</b>\n"
+                    f"Subscription is active for <code>{_short(address)}</code>.\n"
+                    "It stays active until you send <code>/stop</code>.\n\n"
+                    "View active subscriptions: <code>/my</code>"
+                ),
+            )
+
+            if previous_sessions:
+                await _delete_topics_best_effort(
+                    session=session,
+                    settings=settings,
+                    chat_id=chat_id,
+                    sessions=previous_sessions,
+                    logger=logger,
+                )
+        except Exception as exc:
+            logger.exception("Failed to start subscription for chat %s: %s", chat_id, exc)
+            if topic_result and topic_result.get("message_thread_id"):
+                try:
+                    await delete_forum_topic(
+                        session,
+                        bot_token=settings.telegram_bot_token,
+                        chat_id=chat_id,
+                        message_thread_id=int(topic_result["message_thread_id"]),
+                    )
+                except Exception:
+                    pass
+            await send_message(
+                session,
+                bot_token=settings.telegram_bot_token,
+                chat_id=chat_id,
+                text=(
+                    "Failed to start the subscription.\n"
+                    "Please try again in 10-20 seconds."
+                ),
+            )
 
 
 async def _handle_message(
@@ -362,7 +377,8 @@ async def _handle_message(
         return
 
     if command == "stop":
-        address = arg.strip().lower()
+        parts = arg.strip().split()
+        address = parts[0].strip().lower() if parts else ""
         if not address:
             await send_message(
                 session,

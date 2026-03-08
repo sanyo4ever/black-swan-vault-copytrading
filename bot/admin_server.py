@@ -389,6 +389,48 @@ async def _admin_auth_middleware(request: web.Request, handler):
     return await handler(request)
 
 
+def _is_same_origin(request: web.Request) -> bool:
+    expected = _request_origin(request).rstrip("/").lower()
+    if not expected:
+        return False
+    for header in ("Origin", "Referer"):
+        value = (request.headers.get(header, "") or "").strip().lower()
+        if value:
+            return value.startswith(expected)
+    return False
+
+
+@web.middleware
+async def _admin_csrf_middleware(request: web.Request, handler):
+    if request.path.startswith("/admin") and request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
+        if not _is_same_origin(request):
+            request.app["logger"].warning(
+                "Admin CSRF blocked remote=%s path=%s origin=%s referer=%s",
+                _client_ip(request),
+                request.path,
+                request.headers.get("Origin", "-"),
+                request.headers.get("Referer", "-"),
+            )
+            raise web.HTTPForbidden(text="CSRF validation failed")
+    return await handler(request)
+
+
+@web.middleware
+async def _security_headers_middleware(request: web.Request, handler):
+    response = await handler(request)
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' https://www.googletagmanager.com https://www.google-analytics.com; connect-src 'self' https://www.google-analytics.com https://region1.google-analytics.com;",
+    )
+    response.headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+    if request.secure or request.headers.get("X-Forwarded-Proto", "").split(",")[0].strip() == "https":
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
+
+
 _CATALOG_PERIODS = {"1d", "7d", "30d"}
 _CATALOG_PERIOD_METRIC_FIELDS = {"roi", "drawdown", "pnl", "win", "pl", "sharpe", "trades"}
 _CATALOG_STATIC_FIELDS = {"activity", "recent", "score", "age"}
@@ -1424,7 +1466,7 @@ def _render_subscribe_landing(
     </div>
     <div class='cta'>
       <a class='btn' href='{escape(go_link)}'>Create Chat in Telegram</a>
-      <a class='btn' href='{escape(deep_link)}' target='_blank' rel='noopener'>Open Bot Directly</a>
+      <a class='btn' href='{escape(go_link)}' target='_blank' rel='noopener'>Open Bot Directly</a>
       <span class='note'>Auto-open in <span id='count'>5</span>s...</span>
     </div>
     <p class='note'>After <code>/start</code> in Telegram, bot creates a dedicated thread and posts trades until you cancel with <code>/stop 0x...</code>.</p>
@@ -1542,13 +1584,19 @@ async def traders_api(request: web.Request) -> web.Response:
         value = request.query.get(name)
         if value is None or str(value).strip() == "":
             return default
-        return _to_float(value, default if default is not None else 0.0)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
 
     def _opt_int(name: str, default: int | None = None) -> int | None:
         value = request.query.get(name)
         if value is None or str(value).strip() == "":
             return default
-        return _to_int(value, default if default is not None else 0)
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
 
     with TraderStore(settings.database_dsn) as store:
         traders = store.list_catalog_traders(
@@ -1584,33 +1632,37 @@ async def traders_api(request: web.Request) -> web.Response:
         )
         traders = visible
 
+    is_admin = _is_admin_authorized(request)
+    items: list[dict[str, Any]] = []
+    for trader in traders:
+        item = {
+            "address": trader.address,
+            "label": trader.label,
+            "source": trader.source,
+            "status": trader.status,
+            "age_days": trader.age_days,
+            "trades_24h": trader.trades_24h,
+            "active_hours_24h": trader.active_hours_24h,
+            "trades_7d": trader.trades_7d,
+            "trades_30d": trader.trades_30d,
+            "active_days_30d": trader.active_days_30d,
+            "win_rate_30d": trader.win_rate_30d,
+            "realized_pnl_30d": trader.realized_pnl_30d,
+            "volume_usd_30d": trader.volume_usd_30d,
+            "score": trader.score,
+            "activity_score": trader.activity_score,
+            "last_fill_time": trader.last_fill_time,
+            "refreshed_at": trader.refreshed_at,
+            **_extract_stat_metrics(trader.stats_json),
+        }
+        if is_admin:
+            item["moderation_state"] = trader.moderation_state
+            item["moderation_note"] = trader.moderation_note
+        items.append(item)
+
     return web.json_response(
         {
-            "items": [
-                {
-                    "address": trader.address,
-                    "label": trader.label,
-                    "source": trader.source,
-                    "status": trader.status,
-                    "moderation_state": trader.moderation_state,
-                    "moderation_note": trader.moderation_note,
-                    "age_days": trader.age_days,
-                    "trades_24h": trader.trades_24h,
-                    "active_hours_24h": trader.active_hours_24h,
-                    "trades_7d": trader.trades_7d,
-                    "trades_30d": trader.trades_30d,
-                    "active_days_30d": trader.active_days_30d,
-                    "win_rate_30d": trader.win_rate_30d,
-                    "realized_pnl_30d": trader.realized_pnl_30d,
-                    "volume_usd_30d": trader.volume_usd_30d,
-                    "score": trader.score,
-                    "activity_score": trader.activity_score,
-                    "last_fill_time": trader.last_fill_time,
-                    "refreshed_at": trader.refreshed_at,
-                    **_extract_stat_metrics(trader.stats_json),
-                }
-                for trader in traders
-            ],
+            "items": items,
             "next_cursor": next_cursor,
             "sort": sort_by,
             "period": selected_period,
@@ -1776,6 +1828,8 @@ async def moderate_trader(request: web.Request) -> web.Response:
         raise web.HTTPFound("/admin?msg=Unsupported+moderation+state")
 
     with TraderStore(settings.database_dsn) as store:
+        if store.get_trader(address=address) is None:
+            raise web.HTTPFound("/admin?msg=Trader+not+found")
         store.set_moderation(address=address, moderation_state=moderation_state)
     logger.info("Trader moderation updated address=%s state=%s", address.lower(), moderation_state)
 
@@ -1799,14 +1853,18 @@ async def run_discovery(request: web.Request) -> web.Response:
     session = request.app["http_session"]
     logger: logging.Logger = request.app["logger"]
 
-    with TraderStore(settings.database_dsn) as store:
-        service = HyperliquidDiscoveryService(
-            http_session=session,
-            store=store,
-            config=_discovery_config_from_settings(settings),
-            logger=logger,
-        )
-        summary = await service.discover()
+    discovery_lock: asyncio.Lock = request.app["discovery_lock"]
+    if discovery_lock.locked():
+        raise web.HTTPFound("/admin?msg=Discovery+already+running")
+    async with discovery_lock:
+        with TraderStore(settings.database_dsn) as store:
+            service = HyperliquidDiscoveryService(
+                http_session=session,
+                store=store,
+                config=_discovery_config_from_settings(settings),
+                logger=logger,
+            )
+            summary = await service.discover()
     logger.info(
         "Discovery triggered from admin: candidates=%s qualified=%s upserted=%s unlisted=%s",
         summary["candidates"],
@@ -1840,9 +1898,17 @@ async def _on_cleanup(app: web.Application) -> None:
 def create_app(*, settings=None, logger: logging.Logger | None = None) -> web.Application:
     resolved_settings = settings or load_settings(require_telegram=False, require_admin_password=True)
     resolved_logger = logger or logging.getLogger("cryptoinsider.admin")
-    app = web.Application(middlewares=[_request_logging_middleware, _admin_auth_middleware])
+    app = web.Application(
+        middlewares=[
+            _request_logging_middleware,
+            _admin_auth_middleware,
+            _admin_csrf_middleware,
+            _security_headers_middleware,
+        ]
+    )
     app["settings"] = resolved_settings
     app["logger"] = resolved_logger
+    app["discovery_lock"] = asyncio.Lock()
 
     assets_dir = Path(__file__).resolve().parents[1] / "assets"
     if assets_dir.exists():

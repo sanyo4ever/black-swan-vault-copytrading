@@ -30,7 +30,10 @@ class DeliveryDispatcher:
         self._chat_min_interval_seconds = max(0.0, int(config.chat_min_interval_ms) / 1000.0)
         self._chat_locks: dict[str, asyncio.Lock] = {}
         self._chat_next_allowed_at: dict[str, float] = {}
+        self._chat_last_used_at: dict[str, float] = {}
         self._registry_lock = asyncio.Lock()
+        self._max_tracked_chats = 5000
+        self._stale_chat_seconds = 3600.0
 
     async def _get_chat_lock(self, *, chat_key: str) -> asyncio.Lock:
         async with self._registry_lock:
@@ -38,7 +41,27 @@ class DeliveryDispatcher:
             if lock is None:
                 lock = asyncio.Lock()
                 self._chat_locks[chat_key] = lock
+            self._chat_last_used_at[chat_key] = time.monotonic()
+            if len(self._chat_locks) > self._max_tracked_chats:
+                self._gc_chat_state()
             return lock
+
+    def _gc_chat_state(self) -> None:
+        now = time.monotonic()
+        stale_keys = [
+            key
+            for key, used_at in self._chat_last_used_at.items()
+            if now - used_at >= self._stale_chat_seconds
+        ]
+        if not stale_keys:
+            return
+        for key in stale_keys:
+            lock = self._chat_locks.get(key)
+            if lock is not None and lock.locked():
+                continue
+            self._chat_locks.pop(key, None)
+            self._chat_next_allowed_at.pop(key, None)
+            self._chat_last_used_at.pop(key, None)
 
     async def _wait_for_chat_window(self, *, chat_key: str) -> None:
         if self._chat_min_interval_seconds <= 0:
@@ -52,6 +75,7 @@ class DeliveryDispatcher:
     def _mark_chat_sent(self, *, chat_key: str) -> None:
         if self._chat_min_interval_seconds <= 0:
             return
+        self._chat_last_used_at[chat_key] = time.monotonic()
         self._chat_next_allowed_at[chat_key] = (
             time.monotonic() + self._chat_min_interval_seconds
         )

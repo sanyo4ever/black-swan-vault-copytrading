@@ -91,9 +91,9 @@ class HyperliquidFuturesSource(Source):
 
         direction = str(fill.get("dir", "")).lower()
         if "long" in direction:
-            return "LONG"
+            return "BUY"
         if "short" in direction:
-            return "SHORT"
+            return "SELL"
         return None
 
     @staticmethod

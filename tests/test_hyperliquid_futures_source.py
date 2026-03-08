@@ -42,7 +42,7 @@ class HyperliquidFuturesSourceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             HyperliquidFuturesSource._build_side({"dir": "Open Long"}),
-            "LONG",
+            "BUY",
         )
         self.assertEqual(
             HyperliquidFuturesSource._build_side({"side": "A"}),

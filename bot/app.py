@@ -323,9 +323,15 @@ async def _process_retry_queue(
         return 0
 
     sent = 0
+    skipped = 0
     rescheduled = 0
     dead = 0
     for job in jobs:
+        if dedup_store.seen(job.dedup_key):
+            with TraderStore(settings.database_dsn) as store:
+                store.mark_delivery_retry_sent(retry_id=job.id)
+            skipped += 1
+            continue
         try:
             await dispatcher.send(
                 http_session,
@@ -354,9 +360,10 @@ async def _process_retry_queue(
                 dead += 1
 
     logger.info(
-        "Retry queue processed due=%s sent=%s rescheduled=%s dead=%s",
+        "Retry queue processed due=%s sent=%s skipped=%s rescheduled=%s dead=%s",
         len(jobs),
         sent,
+        skipped,
         rescheduled,
         dead,
     )
@@ -536,7 +543,15 @@ async def _run_cycle(
             continue
 
         if delivered <= 0:
-            logger.warning("Signal %s had no successful deliveries", dedup_key)
+            if queued > 0:
+                dedup_store.remember(dedup_key)
+                logger.info(
+                    "Signal %s queued for retry without live success queued=%s; dedup marked",
+                    dedup_key,
+                    queued,
+                )
+            else:
+                logger.warning("Signal %s had no successful deliveries", dedup_key)
             continue
 
         dedup_store.remember(dedup_key)

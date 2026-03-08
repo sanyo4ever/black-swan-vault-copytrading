@@ -7,6 +7,7 @@ import math
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import aiohttp
@@ -78,6 +79,25 @@ class HyperliquidDiscoveryService:
     def _record_client_retry(self, *, payload_type: str, error_name: str) -> None:
         key = f"{payload_type or 'unknown'}:{error_name or 'ClientError'}"
         self._client_retry_counts[key] = self._client_retry_counts.get(key, 0) + 1
+
+    @staticmethod
+    def _parse_retry_after(raw: str) -> float:
+        value = str(raw or "").strip()
+        if not value:
+            return 0.0
+        try:
+            parsed = float(value)
+            return max(0.0, parsed)
+        except (TypeError, ValueError):
+            pass
+        try:
+            ts = parsedate_to_datetime(value)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            delta = (ts - datetime.now(tz=UTC)).total_seconds()
+            return max(0.0, delta)
+        except Exception:
+            return 0.0
 
     def _log_retry_summary(self) -> None:
         rate_total = sum(self._rate_limit_counts.values())
@@ -168,7 +188,7 @@ class HyperliquidDiscoveryService:
                 async with self._http_session.post(self._config.info_url, json=payload) as response:
                     if response.status == 429 and attempt < attempts - 1:
                         retry_after_raw = response.headers.get("Retry-After", "").strip()
-                        retry_after = float(retry_after_raw) if retry_after_raw else 0.0
+                        retry_after = self._parse_retry_after(retry_after_raw)
                         self._record_rate_limit(payload_type=payload_type, retry_after=retry_after)
                         self._logger.debug(
                             "Hyperliquid rate limit payload_type=%s attempt=%s retry_after=%s",
@@ -313,7 +333,7 @@ class HyperliquidDiscoveryService:
             else None
         )
 
-        downside = [value for value in returns if value < 0]
+        downside = [min(0.0, value) for value in returns]
         downside_vol = self._population_std(downside) if downside else 0.0
         sortino = (
             (mean_return / downside_vol) * math.sqrt(len(returns))
@@ -336,7 +356,7 @@ class HyperliquidDiscoveryService:
             "sortino": sortino,
             "roi_volatility_pct": roi_volatility_pct,
             "volume_usd": sum(notionals),
-            "avg_notional": ((sum(notionals) / len(fills)) if fills else None),
+            "avg_notional": ((sum(notionals) / len(notionals)) if notionals else None),
             "max_notional": (max(notionals) if notionals else None),
         }
 
@@ -391,7 +411,7 @@ class HyperliquidDiscoveryService:
 
         dedup: dict[str, dict[str, Any]] = {}
         for item in prepared:
-            dedup[item["address"]] = item
+            dedup.setdefault(item["address"], item)
         vault_candidates = list(dedup.values())[: self._config.candidate_limit]
         if vault_candidates:
             self._logger.info("Using vault candidates count=%s", len(vault_candidates))
@@ -700,7 +720,14 @@ class HyperliquidDiscoveryService:
                     if ts > item["last_time"]:
                         item["last_time"] = float(ts)
 
-        await asyncio.gather(*(scan_coin(coin) for coin in selected), return_exceptions=True)
+        results = await asyncio.gather(*(scan_coin(coin) for coin in selected), return_exceptions=True)
+        failures = [result for result in results if isinstance(result, Exception)]
+        if failures:
+            self._logger.warning(
+                "Recent trade candidate scan failures count=%s sample=%s",
+                len(failures),
+                failures[0],
+            )
 
         ranked = sorted(
             stats.items(),
@@ -818,8 +845,7 @@ class HyperliquidDiscoveryService:
         long_count = 0
         for item in fills_30d:
             direction = str(item.get("dir", "")).lower()
-            side = str(item.get("side", "")).upper()
-            if "long" in direction or side == "B":
+            if "long" in direction:
                 long_count += 1
 
         volume_usd_30d = float(period_30d["volume_usd"] or 0.0)
@@ -943,7 +969,7 @@ class HyperliquidDiscoveryService:
                 "losses": period_30d["losses"],
                 "profit_to_loss_ratio": period_30d["profit_to_loss_ratio"],
                 "trade_count": period_30d["trade_count"],
-                "weekly_trades": period_30d["trade_count"],
+                "weekly_trades": period_7d["trade_count"],
                 "avg_pnl_per_trade": period_30d["avg_pnl_per_trade"],
                 "max_drawdown_pct": period_30d["max_drawdown_pct"],
                 "sharpe": period_30d["sharpe"],

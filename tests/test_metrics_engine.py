@@ -76,7 +76,7 @@ class MetricsComputationTests(unittest.TestCase):
         self.assertAlmostEqual(float(stats["roi_pct"] or 0.0), 2.0, places=6)
         self.assertAlmostEqual(float(stats["max_drawdown_pct"] or 0.0), 10.0, places=3)
         self.assertGreater(float(stats["sharpe"] or 0.0), 0.0)
-        self.assertIsNone(stats["sortino"])  # downside sample contains one point -> 0 std
+        self.assertGreater(float(stats["sortino"] or 0.0), 0.0)
 
     def test_compute_period_stats_handles_empty_or_flat_trades(self) -> None:
         fills = [

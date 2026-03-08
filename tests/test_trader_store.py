@@ -225,7 +225,7 @@ class TraderStoreTests(unittest.TestCase):
             ).fetchone()
             self.assertIsNotNone(row)
             assert row is not None
-            self.assertEqual(row[0], 2)
+            self.assertEqual(row[0], 1)
             self.assertEqual(row[1], "second")
             self.assertEqual(row[2], "PENDING")
 
@@ -241,7 +241,7 @@ class TraderStoreTests(unittest.TestCase):
             due = store.list_due_delivery_retries(limit=10)
             self.assertEqual(len(due), 1)
             self.assertEqual(due[0].message_thread_id, 42)
-            self.assertEqual(due[0].attempt_count, 2)
+            self.assertEqual(due[0].attempt_count, 1)
             self.assertEqual(due[0].message_text, "second")
 
             store.reschedule_delivery_retry(
@@ -255,7 +255,7 @@ class TraderStoreTests(unittest.TestCase):
             ).fetchone()
             self.assertIsNotNone(row)
             assert row is not None
-            self.assertEqual(row[0], 3)
+            self.assertEqual(row[0], 2)
             self.assertEqual(row[1], "PENDING")
             self.assertEqual(row[2], "still failing")
 

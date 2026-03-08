@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import sqlite3
 from dataclasses import dataclass
@@ -236,6 +237,8 @@ class TraderStore:
             db_path.parent.mkdir(parents=True, exist_ok=True)
             self._connection = sqlite3.connect(db_path)
             self._connection.row_factory = sqlite3.Row
+            self._connection.execute("PRAGMA foreign_keys = ON")
+            self._connection.execute("PRAGMA busy_timeout = 5000")
         self._database_key = database_str
         self._ensure_schema_once_per_process()
         self._normalize_trader_status_values()
@@ -333,6 +336,7 @@ class TraderStore:
                     ELSE ?
                 END,
                 updated_at = CURRENT_TIMESTAMP
+                WHERE status IN ('ACTIVE', 'PAUSED')
                 """,
                 (
                     STATUS_ACTIVE_LISTED,
@@ -352,6 +356,7 @@ class TraderStore:
                     WHEN status = 'ARCHIVED' THEN ?
                     ELSE ?
                 END
+                WHERE status IN ('ACTIVE', 'PAUSED')
                 """,
                 (
                     STATUS_ACTIVE_LISTED,
@@ -2037,79 +2042,135 @@ class TraderStore:
         min_score: float,
         max_size: int = 3000,
     ) -> int:
-        if self._driver == "postgres":
-            drawdown_expr = (
-                "NULLIF((stats_json::jsonb -> 'metrics_30d' ->> 'max_drawdown_pct'), '')"
-                "::double precision"
-            )
-        else:
-            drawdown_expr = "CAST(json_extract(stats_json, '$.metrics_30d.max_drawdown_pct') AS REAL)"
         cutoff_ms = int(datetime.now(tz=UTC).timestamp() * 1000) - (
             max(1, int(max_last_activity_minutes)) * 60 * 1000
         )
+        if self._driver == "postgres":
+            rows = self._execute(
+                """
+                SELECT
+                    address,
+                    label,
+                    source,
+                    score,
+                    win_rate_30d,
+                    realized_pnl_30d,
+                    volume_usd_30d,
+                    trades_30d,
+                    active_days_30d,
+                    age_days,
+                    last_fill_time,
+                    stats_json
+                FROM tracked_traders
+                WHERE
+                    status <> ?
+                    AND COALESCE(moderation_state, ?) <> ?
+                    AND COALESCE(age_days, 0) >= ?
+                    AND COALESCE(trades_30d, 0) >= ?
+                    AND COALESCE(active_days_30d, 0) >= ?
+                    AND COALESCE(win_rate_30d, 0) >= ?
+                    AND COALESCE(realized_pnl_30d, -1000000000) >= ?
+                    AND COALESCE(last_fill_time, 0) >= ?
+                    AND COALESCE(score, -1000000000) >= ?
+                ORDER BY COALESCE(score, -1000000000) DESC, COALESCE(last_fill_time, 0) DESC
+                LIMIT ?
+                """,
+                (
+                    STATUS_ARCHIVED,
+                    MODERATION_NEUTRAL,
+                    MODERATION_BLACKLIST,
+                    float(min_age_days),
+                    int(min_trades_30d),
+                    int(min_active_days_30d),
+                    float(min_win_rate_30d),
+                    float(min_realized_pnl_30d),
+                    int(cutoff_ms),
+                    float(min_score),
+                    int(max_size),
+                ),
+            ).fetchall()
+        else:
+            drawdown_expr = "CAST(json_extract(stats_json, '$.metrics_30d.max_drawdown_pct') AS REAL)"
+            rows = self._execute(
+                f"""
+                SELECT
+                    address,
+                    label,
+                    source,
+                    score,
+                    win_rate_30d,
+                    realized_pnl_30d,
+                    volume_usd_30d,
+                    trades_30d,
+                    active_days_30d,
+                    age_days,
+                    last_fill_time,
+                    stats_json
+                FROM tracked_traders
+                WHERE
+                    status <> ?
+                    AND COALESCE(moderation_state, ?) <> ?
+                    AND
+                    COALESCE(age_days, 0) >= ?
+                    AND COALESCE(trades_30d, 0) >= ?
+                    AND COALESCE(active_days_30d, 0) >= ?
+                    AND COALESCE(win_rate_30d, 0) >= ?
+                    AND COALESCE(realized_pnl_30d, -1000000000) >= ?
+                    AND COALESCE(last_fill_time, 0) >= ?
+                    AND COALESCE({drawdown_expr}, 1000000000) <= ?
+                    AND COALESCE(score, -1000000000) >= ?
+                ORDER BY COALESCE(score, -1000000000) DESC, COALESCE(last_fill_time, 0) DESC
+                LIMIT ?
+                """,
+                (
+                    STATUS_ARCHIVED,
+                    MODERATION_NEUTRAL,
+                    MODERATION_BLACKLIST,
+                    float(min_age_days),
+                    int(min_trades_30d),
+                    int(min_active_days_30d),
+                    float(min_win_rate_30d),
+                    float(min_realized_pnl_30d),
+                    int(cutoff_ms),
+                    float(max_drawdown_30d_pct),
+                    float(min_score),
+                    int(max_size),
+                ),
+            ).fetchall()
 
-        rows = self._execute(
-            f"""
-            SELECT
-                address,
-                label,
-                source,
-                score,
-                win_rate_30d,
-                realized_pnl_30d,
-                volume_usd_30d,
-                trades_30d,
-                active_days_30d,
-                age_days,
-                last_fill_time
-            FROM tracked_traders
-            WHERE
-                status <> ?
-                AND COALESCE(moderation_state, ?) <> ?
-                AND
-                COALESCE(age_days, 0) >= ?
-                AND COALESCE(trades_30d, 0) >= ?
-                AND COALESCE(active_days_30d, 0) >= ?
-                AND COALESCE(win_rate_30d, 0) >= ?
-                AND COALESCE(realized_pnl_30d, -1000000000) > ?
-                AND COALESCE(last_fill_time, 0) >= ?
-                AND COALESCE({drawdown_expr}, 1000000000) <= ?
-                AND COALESCE(score, -1000000000) >= ?
-            ORDER BY COALESCE(score, -1000000000) DESC, COALESCE(last_fill_time, 0) DESC
-            LIMIT ?
-            """,
-            (
-                STATUS_ARCHIVED,
-                MODERATION_NEUTRAL,
-                MODERATION_BLACKLIST,
-                float(min_age_days),
-                int(min_trades_30d),
-                int(min_active_days_30d),
-                float(min_win_rate_30d),
-                float(min_realized_pnl_30d),
-                int(cutoff_ms),
-                float(max_drawdown_30d_pct),
-                float(min_score),
-                int(max_size),
-            ),
-        ).fetchall()
+        payload: list[tuple[Any, ...]] = []
+        for row in rows:
+            if self._driver == "postgres":
+                drawdown = None
+                stats_raw = row.get("stats_json")
+                if stats_raw:
+                    try:
+                        stats_payload = json.loads(str(stats_raw))
+                        metrics_30d = stats_payload.get("metrics_30d", {})
+                        if isinstance(metrics_30d, dict):
+                            drawdown_raw = metrics_30d.get("max_drawdown_pct")
+                            if drawdown_raw is not None:
+                                drawdown = float(drawdown_raw)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        drawdown = None
+                if drawdown is None or drawdown > float(max_drawdown_30d_pct):
+                    continue
 
-        payload = [
-            (
-                str(row["address"]),
-                row["label"],
-                str(row["source"]),
-                row["score"],
-                row["win_rate_30d"],
-                row["realized_pnl_30d"],
-                row["volume_usd_30d"],
-                row["trades_30d"],
-                row["active_days_30d"],
-                row["age_days"],
-                row["last_fill_time"],
+            payload.append(
+                (
+                    str(row["address"]),
+                    row["label"],
+                    str(row["source"]),
+                    row["score"],
+                    row["win_rate_30d"],
+                    row["realized_pnl_30d"],
+                    row["volume_usd_30d"],
+                    row["trades_30d"],
+                    row["active_days_30d"],
+                    row["age_days"],
+                    row["last_fill_time"],
+                )
             )
-            for row in rows
-        ]
 
         keep = [item[0] for item in payload]
         try:
@@ -3181,7 +3242,7 @@ class TraderStore:
             ON CONFLICT(dedup_key, chat_id, message_thread_id) DO UPDATE SET
                 trader_address = excluded.trader_address,
                 message_text = excluded.message_text,
-                attempt_count = delivery_retry_queue.attempt_count + 1,
+                attempt_count = delivery_retry_queue.attempt_count,
                 next_attempt_at = excluded.next_attempt_at,
                 status = excluded.status,
                 last_error = excluded.last_error,
@@ -3523,61 +3584,64 @@ class TraderStore:
 
         note_value = (note or "").strip() or None
         placeholders = ",".join("?" for _ in normalized)
-        cursor = self._execute(
-            f"""
-            UPDATE tracked_traders
-            SET moderation_state = ?,
-                moderation_note = ?,
-                moderated_at = CURRENT_TIMESTAMP,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE address IN ({placeholders})
-            """,
-            (moderation_state, note_value, *normalized),
-        )
-
-        # Blacklisted traders are detached from delivery flows.
-        if moderation_state == MODERATION_BLACKLIST:
-            self._execute(
+        try:
+            cursor = self._execute(
                 f"""
-                UPDATE subscriptions
-                SET status = ?,
+                UPDATE tracked_traders
+                SET moderation_state = ?,
+                    moderation_note = ?,
+                    moderated_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE trader_address IN ({placeholders})
-                  AND status = ?
+                WHERE address IN ({placeholders})
                 """,
-                (SUBSCRIPTION_CANCELLED, *normalized, SUBSCRIPTION_ACTIVE),
-            )
-            self._execute(
-                f"""
-                UPDATE delivery_sessions
-                SET status = ?,
-                    closed_at = CURRENT_TIMESTAMP,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE trader_address IN ({placeholders})
-                  AND status = ?
-                """,
-                (SESSION_EXPIRED, *normalized, SESSION_ACTIVE),
-            )
-            self._execute(
-                f"""
-                UPDATE telegram_trader_subscriptions
-                SET status = ?,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE trader_address IN ({placeholders})
-                """,
-                (STATUS_PAUSED, *normalized),
-            )
-            self._execute(
-                f"""
-                DELETE FROM delivery_retry_queue
-                WHERE trader_address IN ({placeholders})
-                  AND status = ?
-                """,
-                (*normalized, RETRY_PENDING),
+                (moderation_state, note_value, *normalized),
             )
 
-        self._connection.commit()
-        return int(cursor.rowcount)
+            # Blacklisted traders are detached from delivery flows.
+            if moderation_state == MODERATION_BLACKLIST:
+                self._execute(
+                    f"""
+                    UPDATE subscriptions
+                    SET status = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE trader_address IN ({placeholders})
+                      AND status = ?
+                    """,
+                    (SUBSCRIPTION_CANCELLED, *normalized, SUBSCRIPTION_ACTIVE),
+                )
+                self._execute(
+                    f"""
+                    UPDATE delivery_sessions
+                    SET status = ?,
+                        closed_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE trader_address IN ({placeholders})
+                      AND status = ?
+                    """,
+                    (SESSION_EXPIRED, *normalized, SESSION_ACTIVE),
+                )
+                self._execute(
+                    f"""
+                    UPDATE telegram_trader_subscriptions
+                    SET status = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE trader_address IN ({placeholders})
+                    """,
+                    (STATUS_PAUSED, *normalized),
+                )
+                self._execute(
+                    f"""
+                    DELETE FROM delivery_retry_queue
+                    WHERE trader_address IN ({placeholders})
+                      AND status = ?
+                    """,
+                    (*normalized, RETRY_PENDING),
+                )
+            self._connection.commit()
+            return int(cursor.rowcount)
+        except Exception:
+            self._connection.rollback()
+            raise
 
     def delete(self, *, address: str) -> None:
         normalized = self.normalize_address(address)
