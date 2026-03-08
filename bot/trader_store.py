@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -46,6 +47,9 @@ TIER_WARM = "WARM"
 TIER_COLD = "COLD"
 TIER_PRIORITY = {TIER_HOT: 0, TIER_WARM: 1, TIER_COLD: 2}
 PERMANENT_SUBSCRIPTION_EXPIRES_AT = "9999-12-31 23:59:59"
+SHOWCASE_STATUS_ACTIVE = "ACTIVE"
+SHOWCASE_STATUS_STALE = "STALE"
+SHOWCASE_STATUSES = (SHOWCASE_STATUS_ACTIVE, SHOWCASE_STATUS_STALE)
 
 
 @dataclass(frozen=True)
@@ -216,6 +220,34 @@ class DeliveryMonitorTarget:
     consecutive_errors: int
 
 
+@dataclass(frozen=True)
+class ShowcaseWallet:
+    address: str
+    status: str
+    idle_hours: float
+    idle_cycles: int
+    added_at: str
+    rotated_in_at: str | None
+    metrics_at: str | None
+    stale_since: str | None
+    updated_at: str
+    label: str | None
+    source: str | None
+    score: float | None
+    last_fill_time: int | None
+
+
+@dataclass(frozen=True)
+class RotationLogEntry:
+    id: int
+    old_address: str | None
+    new_address: str | None
+    old_score: float | None
+    new_score: float | None
+    reason: str
+    rotated_at: str
+
+
 class TraderStore:
     _bootstrap_lock = Lock()
     _bootstrapped_databases: set[str] = set()
@@ -249,6 +281,9 @@ class TraderStore:
             self._connection.row_factory = sqlite3.Row
             self._connection.execute("PRAGMA foreign_keys = ON")
             self._connection.execute("PRAGMA busy_timeout = 5000")
+        self._showcase_mode_enabled = str(
+            os.getenv("SHOWCASE_MODE_ENABLED", "")
+        ).strip().lower() in {"1", "true", "yes", "on"}
         self._database_key = database_str
         self._ensure_schema_once_per_process()
         self._normalize_trader_status_values()
@@ -1191,6 +1226,49 @@ class TraderStore:
             ON delivery_retry_queue(chat_id, status)
             """
         )
+        self._execute(
+            """
+            CREATE TABLE IF NOT EXISTS showcase_wallets (
+                address TEXT PRIMARY KEY,
+                status TEXT NOT NULL
+                    CHECK(status IN ('ACTIVE', 'STALE'))
+                    DEFAULT 'ACTIVE',
+                idle_hours REAL NOT NULL DEFAULT 0,
+                idle_cycles INTEGER NOT NULL DEFAULT 0,
+                metrics_at TEXT,
+                stale_since TEXT,
+                added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                rotated_in_at TEXT,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(address) REFERENCES tracked_traders(address) ON DELETE CASCADE
+            )
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_showcase_wallets_status
+            ON showcase_wallets(status, idle_cycles DESC, idle_hours DESC)
+            """
+        )
+        self._execute(
+            """
+            CREATE TABLE IF NOT EXISTS rotation_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                old_address TEXT,
+                new_address TEXT,
+                old_score REAL,
+                new_score REAL,
+                reason TEXT NOT NULL,
+                rotated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_rotation_log_rotated_at
+            ON rotation_log(rotated_at DESC)
+            """
+        )
 
     def _ensure_common_tables_postgres(self) -> None:
         try:
@@ -1662,6 +1740,49 @@ class TraderStore:
             ON delivery_retry_queue(chat_id, status)
             """
         )
+        self._execute(
+            """
+            CREATE TABLE IF NOT EXISTS showcase_wallets (
+                address TEXT PRIMARY KEY,
+                status TEXT NOT NULL
+                    CHECK(status IN ('ACTIVE', 'STALE'))
+                    DEFAULT 'ACTIVE',
+                idle_hours DOUBLE PRECISION NOT NULL DEFAULT 0,
+                idle_cycles INTEGER NOT NULL DEFAULT 0,
+                metrics_at TIMESTAMP,
+                stale_since TIMESTAMP,
+                added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                rotated_in_at TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(address) REFERENCES tracked_traders(address) ON DELETE CASCADE
+            )
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_showcase_wallets_status
+            ON showcase_wallets(status, idle_cycles DESC, idle_hours DESC)
+            """
+        )
+        self._execute(
+            """
+            CREATE TABLE IF NOT EXISTS rotation_log (
+                id BIGSERIAL PRIMARY KEY,
+                old_address TEXT,
+                new_address TEXT,
+                old_score DOUBLE PRECISION,
+                new_score DOUBLE PRECISION,
+                reason TEXT NOT NULL,
+                rotated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_rotation_log_rotated_at
+            ON rotation_log(rotated_at DESC)
+            """
+        )
 
     @staticmethod
     def _format_datetime(value: Any) -> Any:
@@ -1883,6 +2004,28 @@ class TraderStore:
             consecutive_errors=int(row["consecutive_errors"] or 0),
         )
 
+    @staticmethod
+    def _row_to_showcase_wallet(row: Mapping[str, Any]) -> ShowcaseWallet:
+        return ShowcaseWallet(
+            address=str(row["address"]),
+            status=str(row["status"]),
+            idle_hours=float(row["idle_hours"] or 0.0),
+            idle_cycles=int(row["idle_cycles"] or 0),
+            metrics_at=TraderStore._format_datetime(row["metrics_at"]),
+            stale_since=TraderStore._format_datetime(row["stale_since"]),
+            added_at=TraderStore._format_datetime(row["added_at"]),
+            rotated_in_at=TraderStore._format_datetime(row["rotated_in_at"]),
+            updated_at=TraderStore._format_datetime(row["updated_at"]),
+            label=(str(row["label"]) if row["label"] is not None else None),
+            source=(str(row["source"]) if row["source"] is not None else None),
+            score=(float(row["score"]) if row["score"] is not None else None),
+            last_fill_time=(
+                int(row["last_fill_time"])
+                if row["last_fill_time"] is not None
+                else None
+            ),
+        )
+
     def list_traders(self, *, limit: int = 500) -> list[TrackedTrader]:
         rows = self._execute(
             """
@@ -1897,7 +2040,377 @@ class TraderStore:
         ).fetchall()
         return [self._row_to_model(row) for row in rows]
 
-    def list_active_addresses(self, *, limit: int = 100) -> list[str]:
+    def count_showcase_wallets(self, *, active_only: bool = False) -> int:
+        if active_only:
+            row = self._execute(
+                """
+                SELECT COUNT(*) AS cnt
+                FROM showcase_wallets
+                WHERE status = ?
+                """,
+                (SHOWCASE_STATUS_ACTIVE,),
+            ).fetchone()
+        else:
+            row = self._execute(
+                """
+                SELECT COUNT(*) AS cnt
+                FROM showcase_wallets
+                """
+            ).fetchone()
+        if row is None:
+            return 0
+        return int(row["cnt"] if isinstance(row, Mapping) else row[0])
+
+    def list_showcase_wallets(
+        self,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[ShowcaseWallet]:
+        where_clauses: list[str] = []
+        params: list[Any] = []
+        if status is not None:
+            normalized_status = str(status).strip().upper()
+            if normalized_status not in SHOWCASE_STATUSES:
+                raise ValueError(f"Unsupported showcase status: {status}")
+            where_clauses.append("sw.status = ?")
+            params.append(normalized_status)
+
+        where_sql = ""
+        if where_clauses:
+            where_sql = "WHERE " + " AND ".join(where_clauses)
+        rows = self._execute(
+            f"""
+            SELECT
+                sw.address,
+                sw.status,
+                sw.idle_hours,
+                sw.idle_cycles,
+                sw.metrics_at,
+                sw.stale_since,
+                sw.added_at,
+                sw.rotated_in_at,
+                sw.updated_at,
+                t.label,
+                t.source,
+                t.score,
+                t.last_fill_time
+            FROM showcase_wallets sw
+            LEFT JOIN tracked_traders t ON t.address = sw.address
+            {where_sql}
+            ORDER BY
+                CASE sw.status WHEN '{SHOWCASE_STATUS_ACTIVE}' THEN 0 ELSE 1 END ASC,
+                COALESCE(t.score, -1) DESC,
+                COALESCE(sw.rotated_in_at, sw.added_at) DESC,
+                sw.address ASC
+            LIMIT ?
+            """,
+            (*params, int(limit)),
+        ).fetchall()
+        return [self._row_to_showcase_wallet(row) for row in rows]
+
+    def list_showcase_addresses(
+        self,
+        *,
+        limit: int = 100,
+        include_stale: bool = False,
+    ) -> list[str]:
+        where = [
+            "t.status <> ?",
+            "COALESCE(t.moderation_state, ?) <> ?",
+        ]
+        params: list[Any] = [STATUS_ARCHIVED, MODERATION_NEUTRAL, MODERATION_BLACKLIST]
+        if not include_stale:
+            where.append("sw.status = ?")
+            params.append(SHOWCASE_STATUS_ACTIVE)
+        rows = self._execute(
+            f"""
+            SELECT sw.address
+            FROM showcase_wallets sw
+            JOIN tracked_traders t ON t.address = sw.address
+            WHERE {' AND '.join(where)}
+            ORDER BY COALESCE(t.score, -1) DESC, sw.address ASC
+            LIMIT ?
+            """,
+            (*params, int(limit)),
+        ).fetchall()
+        return [str(row["address"]) for row in rows]
+
+    def upsert_showcase_wallet(
+        self,
+        *,
+        address: str,
+        status: str = SHOWCASE_STATUS_ACTIVE,
+        metrics_at: str | None = None,
+        rotated_in_at: str | None = None,
+    ) -> None:
+        normalized = self.normalize_address(address)
+        normalized_status = str(status).strip().upper()
+        if normalized_status not in SHOWCASE_STATUSES:
+            raise ValueError(f"Unsupported showcase status: {status}")
+        stale_since = None
+        if normalized_status == SHOWCASE_STATUS_STALE:
+            stale_since = datetime.now(tz=UTC).strftime("%Y-%m-%d %H:%M:%S")
+        rotated_ts = rotated_in_at or datetime.now(tz=UTC).strftime("%Y-%m-%d %H:%M:%S")
+        self._execute(
+            """
+            INSERT INTO showcase_wallets(
+                address,
+                status,
+                idle_hours,
+                idle_cycles,
+                metrics_at,
+                stale_since,
+                rotated_in_at,
+                updated_at
+            )
+            VALUES (?, ?, 0, 0, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(address) DO UPDATE SET
+                status = excluded.status,
+                idle_hours = excluded.idle_hours,
+                idle_cycles = excluded.idle_cycles,
+                metrics_at = COALESCE(excluded.metrics_at, showcase_wallets.metrics_at),
+                stale_since = excluded.stale_since,
+                rotated_in_at = COALESCE(excluded.rotated_in_at, showcase_wallets.rotated_in_at),
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (normalized, normalized_status, metrics_at, stale_since, rotated_ts),
+        )
+        self._connection.commit()
+
+    def remove_showcase_wallet(self, *, address: str) -> int:
+        normalized = self.normalize_address(address)
+        cursor = self._execute(
+            """
+            DELETE FROM showcase_wallets
+            WHERE address = ?
+            """,
+            (normalized,),
+        )
+        self._connection.commit()
+        return int(cursor.rowcount or 0)
+
+    def update_showcase_health(
+        self,
+        *,
+        address: str,
+        idle_hours: float,
+        idle_cycles: int,
+        status: str,
+    ) -> None:
+        normalized = self.normalize_address(address)
+        normalized_status = str(status).strip().upper()
+        if normalized_status not in SHOWCASE_STATUSES:
+            raise ValueError(f"Unsupported showcase status: {status}")
+        row = self._execute(
+            """
+            SELECT stale_since
+            FROM showcase_wallets
+            WHERE address = ?
+            """,
+            (normalized,),
+        ).fetchone()
+        if row is None:
+            return
+        stale_since = None
+        if normalized_status == SHOWCASE_STATUS_STALE:
+            existing = TraderStore._format_datetime(row["stale_since"])
+            stale_since = existing or datetime.now(tz=UTC).strftime("%Y-%m-%d %H:%M:%S")
+        self._execute(
+            """
+            UPDATE showcase_wallets
+            SET
+                status = ?,
+                idle_hours = ?,
+                idle_cycles = ?,
+                stale_since = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE address = ?
+            """,
+            (
+                normalized_status,
+                float(max(0.0, idle_hours)),
+                int(max(0, idle_cycles)),
+                stale_since,
+                normalized,
+            ),
+        )
+        self._connection.commit()
+
+    def touch_showcase_metrics(self, *, address: str) -> None:
+        normalized = self.normalize_address(address)
+        self._execute(
+            """
+            UPDATE showcase_wallets
+            SET
+                metrics_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE address = ?
+            """,
+            (normalized,),
+        )
+        self._connection.commit()
+
+    def log_rotation(
+        self,
+        *,
+        old_address: str | None,
+        new_address: str | None,
+        old_score: float | None,
+        new_score: float | None,
+        reason: str,
+    ) -> None:
+        self._execute(
+            """
+            INSERT INTO rotation_log(
+                old_address,
+                new_address,
+                old_score,
+                new_score,
+                reason
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                self.normalize_address(old_address) if old_address else None,
+                self.normalize_address(new_address) if new_address else None,
+                (float(old_score) if old_score is not None else None),
+                (float(new_score) if new_score is not None else None),
+                str(reason or "").strip() or "unknown",
+            ),
+        )
+        self._connection.commit()
+
+    def refresh_catalog_current_from_showcase(
+        self,
+        *,
+        activity_window_minutes: int = 60,
+    ) -> int:
+        now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
+        rows = self._execute(
+            """
+            SELECT
+                t.address,
+                t.label,
+                t.source,
+                t.status,
+                t.moderation_state,
+                t.moderation_note,
+                t.age_days,
+                t.trades_24h,
+                t.active_hours_24h,
+                t.trades_7d,
+                t.trades_30d,
+                t.active_days_30d,
+                t.win_rate_30d,
+                t.realized_pnl_30d,
+                t.volume_usd_30d,
+                t.score,
+                t.last_fill_time,
+                t.stats_json,
+                sw.status AS showcase_status
+            FROM showcase_wallets sw
+            JOIN tracked_traders t ON t.address = sw.address
+            WHERE COALESCE(t.moderation_state, ?) <> ?
+              AND t.status <> ?
+            ORDER BY COALESCE(t.score, -1) DESC, t.address ASC
+            """,
+            (MODERATION_NEUTRAL, MODERATION_BLACKLIST, STATUS_ARCHIVED),
+        ).fetchall()
+
+        payload: list[tuple[Any, ...]] = []
+        for row in rows:
+            score = float(row["score"] or 0.0)
+            trades_30d = int(row["trades_30d"] or 0)
+            last_fill = int(row["last_fill_time"]) if row["last_fill_time"] is not None else None
+            if last_fill is None:
+                recency_component = 0.0
+            else:
+                age_minutes = max(0.0, (now_ms - last_fill) / 60000.0)
+                recency_component = (
+                    max(0.0, 1.0 - (age_minutes / max(1, activity_window_minutes))) * 40.0
+                )
+            frequency_component = min(30.0, trades_30d / 12.0)
+            quality_component = min(30.0, max(0.0, score))
+            activity_score = round(recency_component + frequency_component + quality_component, 4)
+            status = (
+                STATUS_STALE
+                if str(row["showcase_status"]) == SHOWCASE_STATUS_STALE
+                else str(row["status"])
+            )
+            payload.append(
+                (
+                    str(row["address"]),
+                    row["label"],
+                    str(row["source"]),
+                    status,
+                    str(row["moderation_state"]),
+                    row["moderation_note"],
+                    row["age_days"],
+                    row["trades_24h"],
+                    row["active_hours_24h"],
+                    row["trades_7d"],
+                    row["trades_30d"],
+                    row["active_days_30d"],
+                    row["win_rate_30d"],
+                    row["realized_pnl_30d"],
+                    row["volume_usd_30d"],
+                    row["score"],
+                    activity_score,
+                    last_fill,
+                    row["stats_json"],
+                )
+            )
+
+        try:
+            self._execute("DELETE FROM catalog_current")
+            if payload:
+                self._executemany(
+                    """
+                    INSERT INTO catalog_current(
+                        address,
+                        label,
+                        source,
+                        status,
+                        moderation_state,
+                        moderation_note,
+                        age_days,
+                        trades_24h,
+                        active_hours_24h,
+                        trades_7d,
+                        trades_30d,
+                        active_days_30d,
+                        win_rate_30d,
+                        realized_pnl_30d,
+                        volume_usd_30d,
+                        score,
+                        activity_score,
+                        last_fill_time,
+                        stats_json,
+                        refreshed_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """,
+                    payload,
+                )
+            self._connection.commit()
+        except Exception:
+            self._connection.rollback()
+            raise
+
+        return len(payload)
+
+    def list_active_addresses(
+        self,
+        *,
+        limit: int = 100,
+        showcase_only: bool | None = None,
+    ) -> list[str]:
+        effective_showcase_only = (
+            self._showcase_mode_enabled if showcase_only is None else bool(showcase_only)
+        )
+        if effective_showcase_only:
+            return self.list_showcase_addresses(limit=limit, include_stale=False)
         rows = self._execute(
             """
             SELECT address
@@ -1927,11 +2440,26 @@ class TraderStore:
         ).fetchall()
         return [str(row["address"]) for row in rows]
 
-    def list_monitored_addresses(self, *, limit: int = 200) -> list[str]:
+    def list_monitored_addresses(
+        self,
+        *,
+        limit: int = 200,
+        showcase_only: bool | None = None,
+    ) -> list[str]:
+        effective_showcase_only = (
+            self._showcase_mode_enabled if showcase_only is None else bool(showcase_only)
+        )
+        if effective_showcase_only:
+            return self.list_showcase_addresses(limit=limit, include_stale=False)
         addresses: list[str] = []
         addresses.extend(self.list_active_subscription_addresses(limit=limit))
         if len(addresses) < limit:
-            addresses.extend(self.list_active_addresses(limit=limit))
+            addresses.extend(
+                self.list_active_addresses(
+                    limit=limit,
+                    showcase_only=effective_showcase_only,
+                )
+            )
         dedup: list[str] = []
         seen: set[str] = set()
         for address in addresses:

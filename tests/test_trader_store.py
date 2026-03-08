@@ -11,6 +11,8 @@ from bot.trader_store import (
     MODERATION_NEUTRAL,
     MODERATION_WHITELIST,
     PERMANENT_SUBSCRIPTION_EXPIRES_AT,
+    SHOWCASE_STATUS_ACTIVE,
+    SHOWCASE_STATUS_STALE,
     STATUS_ACTIVE,
     STATUS_ACTIVE_UNLISTED,
     STATUS_ARCHIVED,
@@ -390,6 +392,112 @@ class TraderStoreTests(unittest.TestCase):
             self.assertIsNotNone(pending)
             assert pending is not None
             self.assertEqual(pending[0], 0)
+
+    def test_showcase_wallet_lifecycle_and_catalog_refresh(self) -> None:
+        now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
+        active = "0x1010101010101010101010101010101010101010"
+        stale = "0x2020202020202020202020202020202020202020"
+        with TraderStore(self.db_path) as store:
+            store.upsert_discovered(
+                address=active,
+                label="Active",
+                source="hyperliquid_recent_trades",
+                trades_24h=8,
+                active_hours_24h=5,
+                trades_7d=40,
+                trades_30d=160,
+                active_days_30d=20,
+                first_fill_time=now_ms - (100 * 86_400_000),
+                last_fill_time=now_ms - (5 * 60_000),
+                age_days=100.0,
+                volume_usd_30d=220_000.0,
+                realized_pnl_30d=8_500.0,
+                fees_30d=500.0,
+                win_rate_30d=0.64,
+                long_ratio_30d=0.49,
+                avg_notional_30d=1800.0,
+                max_notional_30d=9000.0,
+                account_value=120_000.0,
+                total_ntl_pos=18_000.0,
+                total_margin_used=6_000.0,
+                score=71.0,
+                stats_json='{"metrics_30d":{"roi_pct":12.3}}',
+            )
+            store.upsert_discovered(
+                address=stale,
+                label="Stale",
+                source="hyperliquid_recent_trades",
+                trades_24h=0,
+                active_hours_24h=0,
+                trades_7d=8,
+                trades_30d=130,
+                active_days_30d=13,
+                first_fill_time=now_ms - (120 * 86_400_000),
+                last_fill_time=now_ms - (72 * 60 * 60 * 1000),
+                age_days=120.0,
+                volume_usd_30d=90_000.0,
+                realized_pnl_30d=1_500.0,
+                fees_30d=190.0,
+                win_rate_30d=0.55,
+                long_ratio_30d=0.45,
+                avg_notional_30d=1200.0,
+                max_notional_30d=5500.0,
+                account_value=45_000.0,
+                total_ntl_pos=8_000.0,
+                total_margin_used=2_500.0,
+                score=33.0,
+                stats_json='{"metrics_30d":{"roi_pct":4.1}}',
+            )
+
+            store.upsert_showcase_wallet(address=active, status=SHOWCASE_STATUS_ACTIVE)
+            store.upsert_showcase_wallet(address=stale, status=SHOWCASE_STATUS_STALE)
+            self.assertEqual(store.count_showcase_wallets(active_only=False), 2)
+            self.assertEqual(store.count_showcase_wallets(active_only=True), 1)
+
+            active_only = store.list_showcase_addresses(limit=10, include_stale=False)
+            self.assertEqual(active_only, [active])
+
+            filtered_active = store.list_active_addresses(limit=10, showcase_only=True)
+            self.assertEqual(filtered_active, [active])
+
+            store.update_showcase_health(
+                address=active,
+                idle_hours=97.0,
+                idle_cycles=4,
+                status=SHOWCASE_STATUS_STALE,
+            )
+            showcase_rows = store.list_showcase_wallets(status=SHOWCASE_STATUS_STALE, limit=10)
+            self.assertEqual(len(showcase_rows), 2)
+
+            refreshed = store.refresh_catalog_current_from_showcase(activity_window_minutes=60)
+            self.assertEqual(refreshed, 2)
+
+            count = store._connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM catalog_current
+                """
+            ).fetchone()
+            self.assertIsNotNone(count)
+            assert count is not None
+            self.assertEqual(int(count[0]), 2)
+
+            store.log_rotation(
+                old_address=active,
+                new_address=stale,
+                old_score=71.0,
+                new_score=33.0,
+                reason="test",
+            )
+            log_count = store._connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM rotation_log
+                """
+            ).fetchone()
+            self.assertIsNotNone(log_count)
+            assert log_count is not None
+            self.assertEqual(int(log_count[0]), 1)
 
     def test_bulk_status_and_moderation_actions(self) -> None:
         a1 = "0x5555555555555555555555555555555555555555"

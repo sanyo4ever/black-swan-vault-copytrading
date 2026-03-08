@@ -288,6 +288,7 @@ class HyperliquidFuturesSource(Source):
         max_fills_per_trader = int(self.config.get("max_fills_per_trader", 5))
         lookback_minutes = int(self.config.get("lookback_minutes", 90))
         delivery_only_subscribed = bool(self.config.get("delivery_only_subscribed", True))
+        showcase_mode = bool(self.config.get("showcase_mode", False))
 
         max_traders_per_cycle = int(self.config.get("max_traders_per_cycle", self.config.get("trader_limit", 120)))
         base_poll_seconds = int(self.config.get("base_poll_seconds", 60))
@@ -326,7 +327,10 @@ class HyperliquidFuturesSource(Source):
                     only_subscribed=False,
                 )
                 if not legacy_targets:
-                    fallback_addresses = store.list_active_addresses(limit=max_traders_per_cycle)
+                    fallback_addresses = store.list_active_addresses(
+                        limit=max_traders_per_cycle,
+                        showcase_only=showcase_mode,
+                    )
                     legacy_targets = [
                         MonitoringTarget(
                             address=address,

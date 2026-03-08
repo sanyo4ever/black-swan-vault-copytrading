@@ -94,6 +94,40 @@ class ConfigTests(unittest.TestCase):
                 os.environ.clear()
                 os.environ.update(old)
 
+    def test_showcase_rotation_env_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old = dict(os.environ)
+            try:
+                os.environ["TELEGRAM_BOT_TOKEN"] = "123:abc"
+                os.environ["TELEGRAM_CHANNEL_ID"] = "-1001"
+                os.environ["DATABASE_PATH"] = str(Path(tmpdir) / "db.sqlite")
+                os.environ["SOURCES_CONFIG_PATH"] = str(Path(tmpdir) / "sources.yaml")
+                os.environ["SHOWCASE_MODE_ENABLED"] = "true"
+                os.environ["SHOWCASE_SLOTS"] = "25"
+                os.environ["ROTATION_SCOUT_INTERVAL_HOURS"] = "8"
+                os.environ["ROTATION_HEALTH_INTERVAL_MINUTES"] = "45"
+                os.environ["ROTATION_STALE_HOURS"] = "96"
+                os.environ["ROTATION_STALE_CYCLES"] = "4"
+                os.environ["ROTATION_SCORE_THRESHOLD_PCT"] = "6.5"
+                os.environ["ROTATION_SCOUT_CANDIDATES"] = "40"
+                os.environ["ROTATION_BOOTSTRAP_CANDIDATES"] = "70"
+                os.environ["ROTATION_METRICS_REFRESH_HOURS"] = "12"
+
+                settings = load_settings()
+                self.assertTrue(settings.showcase_mode_enabled)
+                self.assertEqual(settings.showcase_slots, 25)
+                self.assertEqual(settings.rotation_scout_interval_hours, 8)
+                self.assertEqual(settings.rotation_health_interval_minutes, 45)
+                self.assertEqual(settings.rotation_stale_hours, 96)
+                self.assertEqual(settings.rotation_stale_cycles, 4)
+                self.assertEqual(settings.rotation_score_threshold_pct, 6.5)
+                self.assertEqual(settings.rotation_scout_candidates, 40)
+                self.assertEqual(settings.rotation_bootstrap_candidates, 70)
+                self.assertEqual(settings.rotation_metrics_refresh_hours, 12)
+            finally:
+                os.environ.clear()
+                os.environ.update(old)
+
 
 if __name__ == "__main__":
     unittest.main()

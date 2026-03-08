@@ -13,6 +13,7 @@ Primary goals:
 3. Let users join one shared Telegram channel in one click.
 4. Deliver trader fills to Telegram with bounded latency and resilient retries.
 5. Keep operations simple for a single-server setup.
+6. Optionally run a lightweight fixed-slot showcase set (default 25 wallets).
 
 ## 2. Product Model (Current)
 
@@ -29,9 +30,10 @@ Internet -> Nginx (80/443) -> cryptoinsider-admin (127.0.0.1:8080)
                                        |
                                        +-> PostgreSQL (127.0.0.1:5432)
 
-Hyperliquid/Nansen -> cryptoinsider-discovery
-                         -> cryptoinsider-universe
-                         -> cryptoinsider-top100
+Hyperliquid/Nansen -> cryptoinsider-discovery (standard mode only)
+                         -> cryptoinsider-universe (standard mode only)
+                         -> cryptoinsider-top100 (standard mode only)
+                         -> cryptoinsider-rotation (showcase mode only)
                          -> cryptoinsider-poster -> Telegram sendMessage
 ```
 
@@ -49,6 +51,12 @@ Hyperliquid/Nansen -> cryptoinsider-discovery
 
 - `cryptoinsider-top100`
   - refreshes `traders_top100_live`, monitoring pools, and `catalog_current` projection.
+
+- `cryptoinsider-rotation` (optional showcase mode)
+  - bootstraps fixed showcase slots (`SHOWCASE_SLOTS`, default 25).
+  - runs health checks, scout rotations, and periodic metric refresh.
+  - keeps `showcase_wallets` + `rotation_log` current.
+  - refreshes `catalog_current` directly from showcase wallets.
 
 - `cryptoinsider-poster`
   - scans due traders (`userFillsByTime`) using per-trader watermarks.
@@ -71,6 +79,8 @@ Key tables:
 - `traders_universe`
 - `traders_top100_live`
 - `trader_monitoring_pool`
+- `showcase_wallets` (showcase mode)
+- `rotation_log` (showcase mode)
 - `delivery_monitor_state`
 - `catalog_current`
 - `trader_forum_topics`
@@ -153,6 +163,7 @@ sudo systemctl is-active \
   cryptoinsider-discovery \
   cryptoinsider-universe \
   cryptoinsider-top100 \
+  cryptoinsider-rotation \
   cryptoinsider-poster
 ```
 

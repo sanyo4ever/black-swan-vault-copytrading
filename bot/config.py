@@ -41,6 +41,16 @@ class Settings:
     nansen_api_key: str
     nansen_candidate_limit: int
     discovery_interval_seconds: int
+    showcase_mode_enabled: bool
+    showcase_slots: int
+    rotation_scout_interval_hours: int
+    rotation_health_interval_minutes: int
+    rotation_stale_hours: int
+    rotation_stale_cycles: int
+    rotation_score_threshold_pct: float
+    rotation_scout_candidates: int
+    rotation_bootstrap_candidates: int
+    rotation_metrics_refresh_hours: int
     admin_panel_username: str
     admin_panel_password: str
     google_analytics_measurement_id: str
@@ -196,6 +206,34 @@ def load_settings(
         nansen_api_key=os.getenv("NANSEN_API_KEY", "").strip(),
         nansen_candidate_limit=int(os.getenv("NANSEN_CANDIDATE_LIMIT", "60")),
         discovery_interval_seconds=int(os.getenv("DISCOVERY_INTERVAL_SECONDS", "900")),
+        showcase_mode_enabled=_get_bool_env("SHOWCASE_MODE_ENABLED", False),
+        showcase_slots=max(1, int(os.getenv("SHOWCASE_SLOTS", "25"))),
+        rotation_scout_interval_hours=max(
+            1,
+            int(os.getenv("ROTATION_SCOUT_INTERVAL_HOURS", "12")),
+        ),
+        rotation_health_interval_minutes=max(
+            1,
+            int(os.getenv("ROTATION_HEALTH_INTERVAL_MINUTES", "60")),
+        ),
+        rotation_stale_hours=max(1, int(os.getenv("ROTATION_STALE_HOURS", "72"))),
+        rotation_stale_cycles=max(1, int(os.getenv("ROTATION_STALE_CYCLES", "3"))),
+        rotation_score_threshold_pct=max(
+            0.0,
+            float(os.getenv("ROTATION_SCORE_THRESHOLD_PCT", "5")),
+        ),
+        rotation_scout_candidates=max(
+            1,
+            int(os.getenv("ROTATION_SCOUT_CANDIDATES", "30")),
+        ),
+        rotation_bootstrap_candidates=max(
+            1,
+            int(os.getenv("ROTATION_BOOTSTRAP_CANDIDATES", "60")),
+        ),
+        rotation_metrics_refresh_hours=max(
+            1,
+            int(os.getenv("ROTATION_METRICS_REFRESH_HOURS", "24")),
+        ),
         admin_panel_username=admin_panel_username,
         admin_panel_password=admin_panel_password,
         google_analytics_measurement_id=os.getenv(

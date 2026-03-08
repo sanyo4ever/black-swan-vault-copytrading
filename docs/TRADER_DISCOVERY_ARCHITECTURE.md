@@ -2,6 +2,18 @@
 
 Last updated: 2026-03-08
 
+## Lightweight Showcase Mode (Optional)
+
+When `SHOWCASE_MODE_ENABLED=true`, the runtime can operate in a lightweight
+25-wallet mode:
+
+- active delivery set is sourced from `showcase_wallets` (default 25 rows)
+- `rotation_worker.py` performs bootstrap, health checks, scout, and swaps
+- discovery/universe/top100 workers are disabled (or can be stopped via systemd)
+- `catalog_current` is refreshed from showcase rows only
+
+This mode is designed to reduce API/DB pressure while keeping fast Telegram delivery.
+
 ## 1. Objectives
 
 - Continuously discover active futures traders.

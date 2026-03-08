@@ -59,6 +59,10 @@ Most copytrading tools are closed, expensive, or difficult to self-host. Black S
   - HOT (frequent)
   - WARM (medium)
   - COLD (slow)
+- Optional lightweight showcase mode:
+  - fixed `SHOWCASE_SLOTS` wallet set (default 25)
+  - in-memory scout + periodic rotation worker (`rotation_worker.py`)
+  - substantially lower discovery API pressure
 - Shared-forum delivery mode:
   - scans tracked trader pools and posts signals into per-trader forum topics
   - adaptive polling scheduler keeps API load bounded while prioritizing active traders

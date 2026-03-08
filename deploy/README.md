@@ -53,8 +53,18 @@ sudo systemctl enable --now cryptoinsider-discovery.service
 sudo systemctl enable --now cryptoinsider-universe.service
 sudo systemctl enable --now cryptoinsider-top100.service
 sudo systemctl enable --now cryptoinsider-poster.service
+sudo systemctl enable --now cryptoinsider-rotation.service
 # optional legacy DM flow only:
 # sudo systemctl enable --now cryptoinsider-subscriberbot.service
+```
+
+If `SHOWCASE_MODE_ENABLED=true`, keep `cryptoinsider-rotation` enabled and
+disable heavy ranking workers:
+
+```bash
+sudo systemctl disable --now cryptoinsider-discovery.service
+sudo systemctl disable --now cryptoinsider-universe.service
+sudo systemctl disable --now cryptoinsider-top100.service
 ```
 
 ## 5. Deploy update (recommended workflow)
@@ -104,9 +114,7 @@ Check services:
 ```bash
 sudo systemctl is-active \
   cryptoinsider-admin \
-  cryptoinsider-discovery \
-  cryptoinsider-universe \
-  cryptoinsider-top100 \
+  cryptoinsider-rotation \
   cryptoinsider-poster
 ```
 
@@ -115,9 +123,7 @@ sudo systemctl is-active \
 ```bash
 sudo journalctl -u cryptoinsider-admin -f
 sudo journalctl -u cryptoinsider-poster -f
-sudo journalctl -u cryptoinsider-discovery -f
-sudo journalctl -u cryptoinsider-universe -f
-sudo journalctl -u cryptoinsider-top100 -f
+sudo journalctl -u cryptoinsider-rotation -f
 ```
 
 Optional file logs (if `LOG_DIRECTORY` configured):

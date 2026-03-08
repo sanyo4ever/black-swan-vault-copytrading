@@ -33,6 +33,12 @@ async def _run() -> None:
     )
     logger = logging.getLogger("cryptoinsider.top100-worker")
     interval_seconds = args.interval_seconds or settings.live_top100_interval_seconds
+    if settings.showcase_mode_enabled:
+        logger.info("SHOWCASE_MODE_ENABLED=true, top100 worker disabled")
+        if args.once:
+            return
+        while True:
+            await asyncio.sleep(max(30, interval_seconds))
     lease_holder = f"{socket.gethostname()}:{os.getpid()}:top100"
     lease_ttl_seconds = max(30, int(interval_seconds) * 2)
     logger.info(
