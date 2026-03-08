@@ -2560,26 +2560,56 @@ class TraderStore:
         safety_lookback_seconds: int = 90,
         bootstrap_lookback_minutes: int = 180,
         max_targets_per_cycle: int = 120,
+        showcase_only: bool | None = None,
     ) -> dict[str, int]:
-        rows = self._execute(
-            """
-            SELECT
-                ds.trader_address AS address,
-                COUNT(*) AS subscriber_count,
-                MAX(COALESCE(t.last_fill_time, 0)) AS last_fill_time,
-                MAX(COALESCE(t.score, 0)) AS score
-            FROM delivery_sessions ds
-            JOIN subscriptions s ON s.id = ds.subscription_id
-            JOIN tracked_traders t ON t.address = ds.trader_address
-            WHERE ds.status = 'ACTIVE'
-              AND s.status = 'ACTIVE'
-              AND s.expires_at > CURRENT_TIMESTAMP
-              AND t.status <> ?
-              AND COALESCE(t.moderation_state, ?) <> ?
-            GROUP BY ds.trader_address
-            """,
-            (STATUS_ARCHIVED, MODERATION_NEUTRAL, MODERATION_BLACKLIST),
-        ).fetchall()
+        effective_showcase_only = (
+            self._showcase_mode_enabled if showcase_only is None else bool(showcase_only)
+        )
+
+        if effective_showcase_only:
+            rows = self._execute(
+                """
+                SELECT
+                    sw.address AS address,
+                    1 AS subscriber_count,
+                    COALESCE(t.last_fill_time, 0) AS last_fill_time,
+                    COALESCE(t.score, 0) AS score
+                FROM showcase_wallets sw
+                JOIN tracked_traders t ON t.address = sw.address
+                WHERE sw.status = ?
+                  AND t.status <> ?
+                  AND COALESCE(t.moderation_state, ?) <> ?
+                ORDER BY COALESCE(t.score, -1) DESC, sw.address ASC
+                LIMIT ?
+                """,
+                (
+                    SHOWCASE_STATUS_ACTIVE,
+                    STATUS_ARCHIVED,
+                    MODERATION_NEUTRAL,
+                    MODERATION_BLACKLIST,
+                    max(1, int(max_targets_per_cycle)),
+                ),
+            ).fetchall()
+        else:
+            rows = self._execute(
+                """
+                SELECT
+                    ds.trader_address AS address,
+                    COUNT(*) AS subscriber_count,
+                    MAX(COALESCE(t.last_fill_time, 0)) AS last_fill_time,
+                    MAX(COALESCE(t.score, 0)) AS score
+                FROM delivery_sessions ds
+                JOIN subscriptions s ON s.id = ds.subscription_id
+                JOIN tracked_traders t ON t.address = ds.trader_address
+                WHERE ds.status = 'ACTIVE'
+                  AND s.status = 'ACTIVE'
+                  AND s.expires_at > CURRENT_TIMESTAMP
+                  AND t.status <> ?
+                  AND COALESCE(t.moderation_state, ?) <> ?
+                GROUP BY ds.trader_address
+                """,
+                (STATUS_ARCHIVED, MODERATION_NEUTRAL, MODERATION_BLACKLIST),
+            ).fetchall()
 
         now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
         payload: list[tuple[Any, ...]] = []

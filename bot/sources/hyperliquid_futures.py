@@ -312,6 +312,7 @@ class HyperliquidFuturesSource(Source):
                     safety_lookback_seconds=safety_lookback_seconds,
                     bootstrap_lookback_minutes=bootstrap_lookback_minutes,
                     max_targets_per_cycle=max_traders_per_cycle,
+                    showcase_only=showcase_mode,
                 )
                 self._logger.info(
                     "Delivery monitor state refreshed total=%s high_demand=%s over_capacity=%s",

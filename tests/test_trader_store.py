@@ -460,6 +460,20 @@ class TraderStoreTests(unittest.TestCase):
             filtered_active = store.list_active_addresses(limit=10, showcase_only=True)
             self.assertEqual(filtered_active, [active])
 
+            monitor_stats = store.refresh_delivery_monitor_state(
+                max_targets_per_cycle=10,
+                showcase_only=True,
+            )
+            self.assertEqual(monitor_stats["total"], 1)
+            dms_rows = store._connection.execute(
+                """
+                SELECT address
+                FROM delivery_monitor_state
+                ORDER BY address ASC
+                """
+            ).fetchall()
+            self.assertEqual([str(row[0]) for row in dms_rows], [active])
+
             store.update_showcase_health(
                 address=active,
                 idle_hours=97.0,
