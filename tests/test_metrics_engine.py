@@ -115,6 +115,60 @@ class MetricsComputationTests(unittest.TestCase):
         # sortino = mean/downside * annualizer = 1.6547...
         self.assertAlmostEqual(float(stats["sortino"] or 0.0), 1.654539, places=5)
 
+    def test_sharpe_uses_period_annualizer(self) -> None:
+        fills = [
+            {"oid": "1", "time": 1, "px": "100", "sz": "1", "closedPnl": "10"},
+            {"oid": "2", "time": 2, "px": "100", "sz": "1", "closedPnl": "-5"},
+            {"oid": "3", "time": 3, "px": "100", "sz": "1", "closedPnl": "5"},
+            {"oid": "4", "time": 4, "px": "100", "sz": "1", "closedPnl": "-2"},
+        ]
+        stats_30d = self.service._compute_period_stats(
+            fills=fills,
+            account_value=1000.0,
+            period_days=30,
+        )
+        stats_7d = self.service._compute_period_stats(
+            fills=fills,
+            account_value=1000.0,
+            period_days=7,
+        )
+        returns = [0.10, -0.05, 0.05, -0.02]
+        mean_return = sum(returns) / len(returns)
+        std = self.service._population_std(returns)
+        expected_30d = (mean_return / std) * ((365.0 / 30.0) ** 0.5)
+        expected_7d = (mean_return / std) * ((365.0 / 7.0) ** 0.5)
+        self.assertAlmostEqual(float(stats_30d["sharpe"] or 0.0), expected_30d, places=6)
+        self.assertAlmostEqual(float(stats_7d["sharpe"] or 0.0), expected_7d, places=6)
+        self.assertGreater(float(stats_7d["sharpe"] or 0.0), float(stats_30d["sharpe"] or 0.0))
+
+    def test_sortino_annualization_varies_with_period_days(self) -> None:
+        fills = [
+            {"oid": "1", "time": 1, "px": "100", "sz": "1", "closedPnl": "5"},
+            {"oid": "2", "time": 2, "px": "100", "sz": "1", "closedPnl": "-3"},
+            {"oid": "3", "time": 3, "px": "100", "sz": "1", "closedPnl": "2"},
+            {"oid": "4", "time": 4, "px": "100", "sz": "1", "closedPnl": "-1"},
+        ]
+        stats_1d = self.service._compute_period_stats(
+            fills=fills,
+            account_value=1000.0,
+            period_days=1,
+        )
+        stats_7d = self.service._compute_period_stats(
+            fills=fills,
+            account_value=1000.0,
+            period_days=7,
+        )
+        stats_30d = self.service._compute_period_stats(
+            fills=fills,
+            account_value=1000.0,
+            period_days=30,
+        )
+        sortino_1d = float(stats_1d["sortino"] or 0.0)
+        sortino_7d = float(stats_7d["sortino"] or 0.0)
+        sortino_30d = float(stats_30d["sortino"] or 0.0)
+        self.assertGreater(sortino_1d, sortino_7d)
+        self.assertGreater(sortino_7d, sortino_30d)
+
     def test_roi_uses_estimated_start_equity_not_current_equity(self) -> None:
         fills = [
             {"oid": "1", "time": 1, "px": "100", "sz": "1", "closedPnl": "40"},
@@ -197,6 +251,32 @@ class MetricsComputationTests(unittest.TestCase):
         stats = self.service._compute_period_stats(fills=fills, account_value=None)
         self.assertIsNotNone(stats["max_drawdown_pct"])
         self.assertAlmostEqual(float(stats["max_drawdown_pct"] or 0.0), 25.0, places=3)
+
+    def test_drawdown_includes_unrealized_pnl_end_point(self) -> None:
+        fills = [
+            {"oid": "1", "time": 1, "px": "100", "sz": "1", "closedPnl": "100"},
+            {"oid": "2", "time": 2, "px": "100", "sz": "1", "closedPnl": "-50"},
+        ]
+        baseline = self.service._compute_period_stats(
+            fills=fills,
+            account_value=None,
+        )
+        with_unrealized = self.service._compute_period_stats(
+            fills=fills,
+            account_value=None,
+            unrealized_pnl_end=-300.0,
+        )
+        self.assertGreater(
+            float(with_unrealized["max_drawdown_pct"] or 0.0),
+            float(baseline["max_drawdown_pct"] or 0.0),
+        )
+        # baseline (no unrealized): equity 100 -> 200 -> 150 => 25%
+        # with unrealized -300 final: equity 100 -> 200 -> 150 -> -150 => 175%
+        self.assertAlmostEqual(
+            float(with_unrealized["max_drawdown_pct"] or 0.0),
+            175.0,
+            places=5,
+        )
 
 
 class MetricsFetchPipelineTests(unittest.IsolatedAsyncioTestCase):
