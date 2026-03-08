@@ -14,7 +14,8 @@ from bot.logging_setup import bind_log_context, build_logging_options, new_trace
 from bot.telegram_client import (
     TelegramClientError,
     create_forum_topic,
-    delete_forum_topic,
+    get_chat_member,
+    get_me,
     get_updates,
     send_message,
     set_telegram_http_logging,
@@ -251,63 +252,218 @@ async def _send_welcome(
     chat_id: int,
     logger: logging.Logger,
 ) -> None:
+    join_url = str(getattr(settings, "telegram_join_url", "") or "").strip()
+    join_line = (
+        f"Join channel: <a href=\"{html.escape(join_url, quote=True)}\">Open Channel</a>\n"
+        if join_url
+        else "Join link is not configured yet. Ask admin for channel invite.\n"
+    )
     await _send_message_safe(
         session=session,
         settings=settings,
         logger=logger,
         chat_id=chat_id,
         text=(
-            "<b>CryptoInsider Bot</b>\n\n"
-            "1) Open the traders catalog\n"
-            "2) Click <b>Open Trader Chat</b>\n"
-            "3) The bot starts your trader feed (thread when supported, otherwise this chat)\n\n"
+            "<b>Black Swan Vault Bot</b>\n\n"
+            "Signals are posted in shared forum topics inside the main Telegram group.\n"
+            f"{join_line}\n"
+            "Deep-link format:\n"
+            "<code>/start sub_0x...</code> to open a trader topic.\n\n"
             "Commands:\n"
-            "<code>/my</code> - list active trader subscriptions\n"
-            "<code>/stop 0x...</code> - stop trader subscription"
+            "<code>/my</code> - show your access and usage tips\n"
+            "<code>/stop</code> - deprecated (no personal subscriptions in shared mode)"
         ),
     )
 
 
-async def _delete_topics_best_effort(
+def _forum_chat_id(settings) -> str:
+    return str(getattr(settings, "telegram_forum_chat_id", "") or "").strip()
+
+
+def _normalize_address(value: str) -> str:
+    return str(value or "").strip().lower()
+
+
+def _forum_topic_name(address: str) -> str:
+    normalized = _normalize_address(address)
+    if not normalized:
+        return "Trader"
+    if len(normalized) <= 18:
+        return normalized
+    return f"{normalized[:10]}...{normalized[-6:]}"
+
+
+def _build_forum_topic_link(*, forum_chat_id: str, message_thread_id: int) -> str | None:
+    chat = str(forum_chat_id or "").strip()
+    if not chat:
+        return None
+    thread_id = int(message_thread_id or 0)
+    if thread_id <= 0:
+        return None
+    if chat.startswith("-100") and chat[4:].isdigit():
+        return f"https://t.me/c/{chat[4:]}/{thread_id}"
+    if chat.startswith("@"):
+        username = chat.removeprefix("@").strip()
+        if username:
+            return f"https://t.me/{username}/{thread_id}"
+    return None
+
+
+async def _ensure_shared_forum_topic(
+    *,
+    session: aiohttp.ClientSession,
+    settings,
+    trader_address: str,
+    logger: logging.Logger,
+) -> tuple[int | None, str | None]:
+    forum_chat_id = _forum_chat_id(settings)
+    if not forum_chat_id:
+        return None, None
+
+    normalized = _normalize_address(trader_address)
+    existing = await _store_call(
+        settings,
+        lambda store: store.get_trader_forum_topic(
+            trader_address=normalized,
+            forum_chat_id=forum_chat_id,
+        ),
+    )
+    if existing is not None and int(existing.message_thread_id or 0) > 0:
+        return int(existing.message_thread_id), existing.topic_name
+
+    topic_name = _forum_topic_name(normalized)
+    topic_result = await _telegram_call_with_retry(
+        logger=logger,
+        label="createForumTopic",
+        max_attempts=_retry_attempts(settings),
+        call=lambda: create_forum_topic(
+            session,
+            bot_token=settings.telegram_bot_token,
+            chat_id=forum_chat_id,
+            name=topic_name,
+        ),
+    )
+    thread_id = int(topic_result.get("message_thread_id", 0))
+    if thread_id <= 0:
+        raise RuntimeError(f"Invalid forum topic response: {topic_result}")
+    await _store_call(
+        settings,
+        lambda store: store.upsert_trader_forum_topic(
+            trader_address=normalized,
+            forum_chat_id=forum_chat_id,
+            message_thread_id=thread_id,
+            topic_name=topic_name,
+        ),
+    )
+    logger.info(
+        "Created shared forum topic forum_chat_id=%s trader=%s thread=%s",
+        forum_chat_id,
+        normalized,
+        thread_id,
+    )
+    return thread_id, topic_name
+
+
+async def _send_trader_topic_link(
     *,
     session: aiohttp.ClientSession,
     settings,
     chat_id: int,
-    sessions,
+    trader_address: str,
+    thread_id: int,
     logger: logging.Logger,
-) -> int:
-    failed = 0
-    for item in sessions:
-        if item.message_thread_id is None:
-            continue
-        try:
-            await _telegram_call_with_retry(
-                logger=logger,
-                label="deleteForumTopic",
-                max_attempts=_retry_attempts(settings),
-                call=lambda: delete_forum_topic(
-                    session,
-                    bot_token=settings.telegram_bot_token,
-                    chat_id=chat_id,
-                    message_thread_id=item.message_thread_id,
-                ),
-            )
-        except Exception as exc:
-            failed += 1
-            logger.warning(
-                "Failed to delete forum topic chat_id=%s thread=%s: %s",
-                chat_id,
-                item.message_thread_id,
-                exc,
-            )
-            await _store_call(
-                settings,
-                lambda store: store.set_delivery_session_cleanup_error(
-                    session_id=item.session_id,
-                    error=str(exc),
-                ),
-            )
-    return failed
+) -> None:
+    forum_chat_id = _forum_chat_id(settings)
+    join_url = str(getattr(settings, "telegram_join_url", "") or "").strip()
+    topic_url = _build_forum_topic_link(
+        forum_chat_id=forum_chat_id,
+        message_thread_id=thread_id,
+    )
+    lines = [
+        "<b>Trader topic is ready ✅</b>",
+        f"Trader: <code>{_short(trader_address)}</code>",
+    ]
+    if join_url:
+        lines.append(
+            f"1) Join the group: <a href=\"{html.escape(join_url, quote=True)}\">Open Group</a>"
+        )
+    else:
+        lines.append("1) Join link is missing. Ask admin for group invite.")
+    if topic_url:
+        lines.append(
+            f"2) Open topic: <a href=\"{html.escape(topic_url, quote=True)}\">Trader Thread</a>"
+        )
+    else:
+        lines.append(
+            "2) Open the group and select the topic by wallet label."
+        )
+    lines.append("This is a shared channel mode. No personal subscription is created.")
+    await _send_message_safe(
+        session=session,
+        settings=settings,
+        logger=logger,
+        chat_id=chat_id,
+        text="\n".join(lines),
+    )
+
+
+async def _validate_forum_permissions(
+    *,
+    session: aiohttp.ClientSession,
+    settings,
+    logger: logging.Logger,
+) -> None:
+    forum_chat_id = _forum_chat_id(settings)
+    if not forum_chat_id:
+        logger.error("TELEGRAM_FORUM_CHAT_ID is not configured")
+        return
+    try:
+        me = await _telegram_call_with_retry(
+            logger=logger,
+            label="getMe",
+            max_attempts=_retry_attempts(settings),
+            call=lambda: get_me(session, bot_token=settings.telegram_bot_token),
+        )
+        bot_id = int(me.get("id", 0) or 0)
+        if bot_id <= 0:
+            logger.error("Could not resolve bot id from getMe response")
+            return
+        member = await _telegram_call_with_retry(
+            logger=logger,
+            label="getChatMember",
+            max_attempts=_retry_attempts(settings),
+            call=lambda: get_chat_member(
+                session,
+                bot_token=settings.telegram_bot_token,
+                chat_id=forum_chat_id,
+                user_id=bot_id,
+            ),
+        )
+    except Exception as exc:
+        logger.error(
+            "Forum permission preflight failed chat_id=%s error=%s",
+            forum_chat_id,
+            exc,
+        )
+        return
+
+    status = str(member.get("status", "")).strip().lower()
+    can_manage_topics = bool(member.get("can_manage_topics"))
+    is_ok = status == "creator" or (status == "administrator" and can_manage_topics)
+    if is_ok:
+        logger.info(
+            "Forum preflight ok chat_id=%s bot_status=%s can_manage_topics=%s",
+            forum_chat_id,
+            status,
+            can_manage_topics,
+        )
+        return
+    logger.error(
+        "Forum preflight failed: bot requires admin + Manage Topics in chat_id=%s (status=%s can_manage_topics=%s)",
+        forum_chat_id,
+        status or "-",
+        can_manage_topics,
+    )
 
 
 async def _handle_start_with_payload(
@@ -322,14 +478,14 @@ async def _handle_start_with_payload(
         await _send_welcome(session=session, settings=settings, chat_id=chat_id, logger=logger)
         return
 
-    address = payload.removeprefix("sub_").strip().lower()
+    address = _normalize_address(payload.removeprefix("sub_"))
     if not address:
         await _send_message_safe(
             session=session,
             settings=settings,
             logger=logger,
             chat_id=chat_id,
-            text="Invalid subscription payload.",
+            text="Invalid trader payload.",
         )
         return
 
@@ -351,7 +507,7 @@ async def _handle_start_with_payload(
                 settings=settings,
                 logger=logger,
                 chat_id=chat_id,
-                text="Trader is not available for subscription.",
+                text="Trader is not available.",
             )
             return
         if trader.status in {STATUS_STALE, STATUS_ARCHIVED}:
@@ -361,146 +517,90 @@ async def _handle_start_with_payload(
                 logger=logger,
                 chat_id=chat_id,
                 text=(
-                    "Trader is currently not eligible for new subscriptions.\n"
+                    "Trader is currently not eligible for listing.\n"
                     "Pick another trader from the listed catalog."
                 ),
             )
             return
-        previous_sessions = await _store_call(
-            settings,
-            lambda store: [
-                item
-                for item in store.list_delivery_sessions_for_chat(chat_id=chat_id)
-                if item.trader_address == trader.address
-            ],
-        )
 
-        topic_name = f"{_short(address)} | Live"
-        topic_result = None
-        thread_id: int | None = None
-        feed_mode = "chat"
         try:
-            try:
-                topic_result = await _telegram_call_with_retry(
+            thread_id, _topic_name = await _ensure_shared_forum_topic(
+                session=session,
+                settings=settings,
+                trader_address=address,
+                logger=logger,
+            )
+            if thread_id is None:
+                await _send_message_safe(
+                    session=session,
+                    settings=settings,
                     logger=logger,
-                    label="createForumTopic",
-                    max_attempts=_retry_attempts(settings),
-                    call=lambda: create_forum_topic(
-                        session,
-                        bot_token=settings.telegram_bot_token,
-                        chat_id=chat_id,
-                        name=topic_name,
+                    chat_id=chat_id,
+                    text=(
+                        "Shared forum chat is not configured yet.\n"
+                        "Ask admin to set <code>TELEGRAM_FORUM_CHAT_ID</code> and grant bot Manage Topics."
                     ),
                 )
-                candidate_thread_id = int(topic_result.get("message_thread_id", 0))
-                if candidate_thread_id <= 0:
-                    raise RuntimeError(f"Invalid forum topic response: {topic_result}")
-                thread_id = candidate_thread_id
-                feed_mode = "thread"
-            except TelegramClientError as exc:
-                if exc.is_forum_not_supported():
-                    logger.info(
-                        "Forum topics unsupported for chat %s; falling back to direct chat mode",
-                        chat_id,
-                    )
-                    thread_id = None
-                    topic_name = None
-                    feed_mode = "chat"
-                else:
-                    raise
-
-            session_info = await _store_call(
-                settings,
-                lambda store: store.create_subscription_with_session(
-                    chat_id=chat_id,
-                    trader_address=address,
-                    message_thread_id=thread_id,
-                    topic_name=topic_name,
-                    lifetime_hours=settings.subscription_lifetime_hours,
-                ),
-            )
+                return
             logger.info(
-                "Subscription started trader=%s chat_id=%s feed_mode=%s thread=%s expires_at=%s",
+                "Resolved shared topic trader=%s forum_chat_id=%s thread=%s",
                 address,
-                chat_id,
-                feed_mode,
+                _forum_chat_id(settings),
                 thread_id,
-                session_info.expires_at,
             )
-
-            if thread_id is not None:
-                await _send_message_safe(
-                    session=session,
-                    settings=settings,
-                    logger=logger,
-                    chat_id=chat_id,
-                    message_thread_id=thread_id,
-                    text=(
-                        "<b>Session started ✅</b>\n"
-                        f"Trader: <code>{_short(address)}</code>\n"
-                        "<b>Status:</b> Active until cancellation\n\n"
-                        "New trades from this trader will be posted in this thread."
-                    ),
-                )
-            else:
+            await _send_trader_topic_link(
+                session=session,
+                settings=settings,
+                chat_id=chat_id,
+                trader_address=address,
+                thread_id=thread_id,
+                logger=logger,
+            )
+        except TelegramClientError as exc:
+            if exc.is_forum_not_supported():
                 await _send_message_safe(
                     session=session,
                     settings=settings,
                     logger=logger,
                     chat_id=chat_id,
                     text=(
-                        "<b>Session started ✅</b>\n"
-                        f"Trader: <code>{_short(address)}</code>\n"
-                        "<b>Status:</b> Active until cancellation\n\n"
-                        "This chat does not support forum threads, so new trades will be posted directly here."
+                        "The configured group is not a forum.\n"
+                        "Enable Topics in the Telegram supergroup settings."
                     ),
                 )
-
+                return
+            if exc.is_chat_unavailable():
+                await _send_message_safe(
+                    session=session,
+                    settings=settings,
+                    logger=logger,
+                    chat_id=chat_id,
+                    text=(
+                        "Bot cannot access the forum group.\n"
+                        "Ensure the bot is admin with <b>Manage Topics</b> permission."
+                    ),
+                )
+                return
+            logger.exception("Failed to resolve shared topic for chat %s: %s", chat_id, exc)
             await _send_message_safe(
                 session=session,
                 settings=settings,
                 logger=logger,
                 chat_id=chat_id,
                 text=(
-                    "<b>Done ✅</b>\n"
-                    f"Subscription is active for <code>{_short(address)}</code>.\n"
-                    "It stays active until you send <code>/stop</code>.\n\n"
-                    "View active subscriptions: <code>/my</code>"
+                    "Failed to open trader topic.\n"
+                    "Please try again in 10-20 seconds."
                 ),
             )
-
-            if previous_sessions:
-                await _delete_topics_best_effort(
-                    session=session,
-                    settings=settings,
-                    chat_id=chat_id,
-                    sessions=previous_sessions,
-                    logger=logger,
-                )
         except Exception as exc:
-            logger.exception("Failed to start subscription for chat %s: %s", chat_id, exc)
-            if topic_result and topic_result.get("message_thread_id"):
-                try:
-                    await _telegram_call_with_retry(
-                        logger=logger,
-                        label="deleteForumTopic",
-                        max_attempts=_retry_attempts(settings),
-                        call=lambda: delete_forum_topic(
-                            session,
-                            bot_token=settings.telegram_bot_token,
-                            chat_id=chat_id,
-                            message_thread_id=int(topic_result["message_thread_id"]),
-                        ),
-                    )
-                except Exception:
-                    pass
+            logger.exception("Failed to resolve shared topic for chat %s: %s", chat_id, exc)
             await _send_message_safe(
                 session=session,
                 settings=settings,
                 logger=logger,
                 chat_id=chat_id,
                 text=(
-                    "Failed to start the subscription.\n"
+                    "Failed to open trader topic.\n"
                     "Please try again in 10-20 seconds."
                 ),
             )
@@ -534,34 +634,18 @@ async def _handle_message(
         return
 
     if command == "my":
-        sessions = await _store_call(
-            settings,
-            lambda store: store.list_delivery_sessions_for_chat(chat_id=chat_id),
-        )
-
-        if not sessions:
-            await _send_message_safe(
-                session=session,
-                settings=settings,
-                logger=logger,
-                chat_id=chat_id,
-                text="No active trader subscriptions yet. Pick a trader in the catalog.",
-            )
-            return
-
-        lines = ["<b>Your active trader subscriptions</b>"]
-        for item in sessions:
-            topic = item.topic_name or "Direct chat feed"
-            thread = (
-                f"thread={item.message_thread_id}"
-                if item.message_thread_id is not None
-                else "mode=chat"
-            )
+        join_url = str(getattr(settings, "telegram_join_url", "") or "").strip()
+        forum_chat = _forum_chat_id(settings)
+        lines = [
+            "<b>Shared channel mode</b>",
+            "There are no personal subscriptions in DM.",
+            "All listed traders are posted to shared forum topics in the group.",
+        ]
+        if join_url:
             lines.append(
-                f"• <code>{_short(item.trader_address)}</code> | {topic} | {thread} | active until cancellation"
+                f"Join group: <a href=\"{html.escape(join_url, quote=True)}\">Open Channel</a>"
             )
-        lines.append("\nStop a trader: <code>/stop 0x...</code>")
-
+        lines.append(f"Forum chat id: <code>{html.escape(forum_chat, quote=False) or '-'}</code>")
         await _send_message_safe(
             session=session,
             settings=settings,
@@ -572,58 +656,15 @@ async def _handle_message(
         return
 
     if command == "stop":
-        parts = arg.strip().split()
-        address = parts[0].strip().lower() if parts else ""
-        if not address:
-            await _send_message_safe(
-                session=session,
-                settings=settings,
-                logger=logger,
-                chat_id=chat_id,
-                text="Usage: <code>/stop 0x...</code>",
-            )
-            return
-
-        sessions = await _store_call(
-            settings,
-            lambda store: store.cancel_chat_trader_subscriptions(
-                chat_id=chat_id,
-                trader_address=address,
-            ),
-        )
-
-        if not sessions:
-            await _send_message_safe(
-                session=session,
-                settings=settings,
-                logger=logger,
-                chat_id=chat_id,
-                text="No active subscription found for this trader.",
-            )
-            return
-
-        failed = await _delete_topics_best_effort(
-            session=session,
-            settings=settings,
-            chat_id=chat_id,
-            sessions=sessions,
-            logger=logger,
-        )
-
-        suffix = "" if failed == 0 else f" (topic delete failed: {failed})"
-        logger.info(
-            "Subscription stopped trader=%s chat_id=%s sessions=%s cleanup_failed=%s",
-            address,
-            chat_id,
-            len(sessions),
-            failed,
-        )
         await _send_message_safe(
             session=session,
             settings=settings,
             logger=logger,
             chat_id=chat_id,
-            text=f"Subscription for <code>{_short(address)}</code> has been stopped{suffix}.",
+            text=(
+                "Command <code>/stop</code> is deprecated in shared channel mode.\n"
+                "Use channel mute/hide settings in Telegram if you want fewer notifications."
+            ),
         )
         return
 
@@ -704,6 +745,11 @@ async def run_bot() -> None:
             logger.exception("Failed to process update %s: %s", update_id, exc)
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
+        await _validate_forum_permissions(
+            session=session,
+            settings=settings,
+            logger=logger,
+        )
         inflight: set[asyncio.Task[None]] = set()
         while True:
             cycle += 1

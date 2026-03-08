@@ -128,7 +128,7 @@ python discovery_worker.py
 python universe_worker.py
 python top100_worker.py
 python main.py
-# optional legacy DM flow only:
+# optional DM helper bot (opens shared forum topic links):
 # python subscriber_bot.py
 ```
 

@@ -272,6 +272,55 @@ async def get_updates(
     return [item for item in result if isinstance(item, dict)]
 
 
+async def get_me(
+    session: aiohttp.ClientSession,
+    *,
+    bot_token: str,
+) -> dict[str, Any]:
+    data = await _telegram_request(
+        session,
+        bot_token=bot_token,
+        method="getMe",
+        payload={},
+    )
+    result = data.get("result")
+    if not isinstance(result, dict):
+        raise TelegramClientError(
+            method="getMe",
+            status_code=200,
+            description=f"Unexpected getMe result: {data}",
+            payload=data,
+        )
+    return result
+
+
+async def get_chat_member(
+    session: aiohttp.ClientSession,
+    *,
+    bot_token: str,
+    chat_id: str | int,
+    user_id: int,
+) -> dict[str, Any]:
+    data = await _telegram_request(
+        session,
+        bot_token=bot_token,
+        method="getChatMember",
+        payload={
+            "chat_id": chat_id,
+            "user_id": int(user_id),
+        },
+    )
+    result = data.get("result")
+    if not isinstance(result, dict):
+        raise TelegramClientError(
+            method="getChatMember",
+            status_code=200,
+            description=f"Unexpected getChatMember result: {data}",
+            payload=data,
+        )
+    return result
+
+
 async def create_forum_topic(
     session: aiohttp.ClientSession,
     *,

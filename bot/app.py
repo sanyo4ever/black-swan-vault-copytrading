@@ -19,6 +19,8 @@ from bot.telegram_client import (
     TelegramClientError,
     create_forum_topic,
     delete_forum_topic,
+    get_chat_member,
+    get_me,
     set_telegram_http_logging,
 )
 from bot.trader_store import TraderStore
@@ -110,6 +112,52 @@ def _forum_topic_name(trader_address: str) -> str:
 
 def _forum_chat_id(settings) -> str:
     return str(getattr(settings, "telegram_forum_chat_id", "") or "").strip()
+
+
+async def _validate_forum_permissions(*, settings, http_session, logger: logging.Logger) -> None:
+    forum_chat_id = _forum_chat_id(settings)
+    if not forum_chat_id:
+        logger.warning("Forum mode disabled: TELEGRAM_FORUM_CHAT_ID is empty")
+        return
+    try:
+        me = await get_me(
+            http_session,
+            bot_token=settings.telegram_bot_token,
+        )
+        bot_id = int(me.get("id", 0) or 0)
+        if bot_id <= 0:
+            logger.error("Forum preflight: failed to resolve bot id from getMe response")
+            return
+        member = await get_chat_member(
+            http_session,
+            bot_token=settings.telegram_bot_token,
+            chat_id=forum_chat_id,
+            user_id=bot_id,
+        )
+    except Exception as exc:
+        logger.error(
+            "Forum preflight failed chat_id=%s error=%s",
+            forum_chat_id,
+            exc,
+        )
+        return
+
+    status = str(member.get("status", "")).strip().lower()
+    can_manage_topics = bool(member.get("can_manage_topics"))
+    if status == "creator" or (status == "administrator" and can_manage_topics):
+        logger.info(
+            "Forum preflight ok chat_id=%s bot_status=%s can_manage_topics=%s",
+            forum_chat_id,
+            status,
+            can_manage_topics,
+        )
+        return
+    logger.error(
+        "Forum preflight failed: bot requires admin + Manage Topics in chat_id=%s (status=%s can_manage_topics=%s)",
+        forum_chat_id,
+        status or "-",
+        can_manage_topics,
+    )
 
 
 def _is_forum_topic_delivery(
@@ -935,6 +983,11 @@ async def _run() -> None:
 
     try:
         async with aiohttp.ClientSession(timeout=timeout) as http_session:
+            await _validate_forum_permissions(
+                settings=settings,
+                http_session=http_session,
+                logger=logger,
+            )
             while True:
                 cycle += 1
                 cycle_started = time.monotonic()

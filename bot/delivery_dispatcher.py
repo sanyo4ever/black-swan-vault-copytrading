@@ -19,7 +19,7 @@ class DeliveryDispatcherConfig:
 
 
 class DeliveryDispatcher:
-    """Telegram sender with global concurrency and per-chat pacing."""
+    """Telegram sender with global concurrency and per-target pacing."""
 
     def __init__(
         self,
@@ -127,7 +127,8 @@ class DeliveryDispatcher:
         text: str,
         message_thread_id: int | None = None,
     ) -> None:
-        chat_key = str(chat_id)
+        thread_key = int(message_thread_id or 0)
+        chat_key = f"{chat_id}:{thread_key}"
         chat_lock = await self._get_chat_lock(chat_key=chat_key)
         await self._wait_for_global_window()
         async with self._global_sem:

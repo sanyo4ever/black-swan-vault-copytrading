@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 from bot.app import _process_retry_queue, _send_live_target
 from bot.dedup import DedupStore
-from bot.subscriber_bot import _handle_message, _handle_start_with_payload
+from bot.subscriber_bot import _handle_start_with_payload
 from bot.telegram_client import TelegramClientError
 from bot.trader_store import TraderStore
 
@@ -36,61 +36,53 @@ class _RecordingDispatcher:
 
 
 class SubscriptionDeliveryE2ETests(unittest.IsolatedAsyncioTestCase):
-    async def test_subscribe_stop_keeps_other_trader_active(self) -> None:
+    async def test_shared_topic_reused_for_multiple_users(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "e2e.db"
-            a1 = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            a2 = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            address = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             with TraderStore(db_path) as store:
-                store.add_manual(address=a1, label="A1")
-                store.add_manual(address=a2, label="A2")
+                store.add_manual(address=address, label="A1")
 
             settings = SimpleNamespace(
                 telegram_bot_token="123:abc",
                 database_dsn=str(db_path),
-                subscription_lifetime_hours=0,
+                telegram_forum_chat_id="-1001234567890",
+                telegram_join_url="https://t.me/blackswanvaultcopytrading",
                 subscriber_telegram_retry_attempts=1,
             )
             logger = logging.getLogger("test.e2e.sub")
             send_mock = AsyncMock()
+            create_mock = AsyncMock(return_value={"message_thread_id": 101})
             with (
-                patch(
-                    "bot.subscriber_bot.create_forum_topic",
-                    AsyncMock(side_effect=[{"message_thread_id": 101}, {"message_thread_id": 202}]),
-                ),
-                patch("bot.subscriber_bot.delete_forum_topic", AsyncMock()),
+                patch("bot.subscriber_bot.create_forum_topic", create_mock),
                 patch("bot.subscriber_bot.send_message", send_mock),
             ):
                 await _handle_start_with_payload(
                     session=None,
                     settings=settings,
                     chat_id=7001,
-                    payload=f"sub_{a1}",
+                    payload=f"sub_{address}",
                     logger=logger,
                 )
                 await _handle_start_with_payload(
                     session=None,
                     settings=settings,
-                    chat_id=7001,
-                    payload=f"sub_{a2}",
-                    logger=logger,
-                )
-
-                await _handle_message(
-                    session=None,
-                    settings=settings,
-                    message={
-                        "chat": {"id": 7001, "type": "private"},
-                        "text": f"/stop {a1}",
-                    },
+                    chat_id=7002,
+                    payload=f"sub_{address}",
                     logger=logger,
                 )
 
             with TraderStore(db_path) as store:
-                sessions = store.list_delivery_sessions_for_chat(chat_id=7001)
-            self.assertEqual(len(sessions), 1)
-            self.assertEqual(sessions[0].trader_address, a2)
-            self.assertGreaterEqual(send_mock.await_count, 3)
+                topic = store.get_trader_forum_topic(
+                    trader_address=address,
+                    forum_chat_id=settings.telegram_forum_chat_id,
+                )
+            self.assertIsNotNone(topic)
+            self.assertEqual(topic.message_thread_id, 101)
+            create_mock.assert_awaited_once()
+            self.assertGreaterEqual(send_mock.await_count, 2)
+            texts = [str(call.kwargs.get("text", "")) for call in send_mock.await_args_list]
+            self.assertTrue(any("Trader Thread" in text for text in texts))
 
     async def test_fanout_mapping_for_multiple_chats_same_trader(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

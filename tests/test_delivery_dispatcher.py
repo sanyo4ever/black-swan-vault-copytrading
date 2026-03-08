@@ -53,6 +53,28 @@ class DeliveryDispatcherTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertLess(elapsed, 0.14)
 
+    async def test_same_chat_different_threads_can_send_in_parallel(self) -> None:
+        dispatcher = DeliveryDispatcher(
+            config=DeliveryDispatcherConfig(
+                bot_token="123:abc",
+                send_concurrency=8,
+                chat_min_interval_ms=0,
+            )
+        )
+
+        async def _fake_send(*_args, **_kwargs) -> None:
+            await asyncio.sleep(0.05)
+
+        with patch("bot.delivery_dispatcher.send_message", side_effect=_fake_send):
+            started = time.perf_counter()
+            await asyncio.gather(
+                dispatcher.send(None, chat_id=777, message_thread_id=11, text="a"),
+                dispatcher.send(None, chat_id=777, message_thread_id=22, text="b"),
+            )
+            elapsed = time.perf_counter() - started
+
+        self.assertLess(elapsed, 0.14)
+
     async def test_chat_min_interval_is_enforced(self) -> None:
         dispatcher = DeliveryDispatcher(
             config=DeliveryDispatcherConfig(

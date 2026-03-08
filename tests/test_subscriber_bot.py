@@ -15,7 +15,6 @@ from bot.subscriber_bot import (
     _handle_start_with_payload,
     _short,
 )
-from bot.telegram_client import TelegramClientError
 from bot.trader_store import PERMANENT_SUBSCRIPTION_EXPIRES_AT, TraderStore
 
 
@@ -60,7 +59,7 @@ class SubscriberBotTests(unittest.TestCase):
 
 
 class SubscriberBotFlowTests(unittest.IsolatedAsyncioTestCase):
-    async def test_forum_unsupported_chat_falls_back_to_direct_chat_mode(self) -> None:
+    async def test_start_payload_creates_shared_topic_in_forum_group(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
             trader_address = "0xabcabcabcabcabcabcabcabcabcabcabcabcabca"
@@ -70,20 +69,16 @@ class SubscriberBotFlowTests(unittest.IsolatedAsyncioTestCase):
             settings = SimpleNamespace(
                 telegram_bot_token="123:abc",
                 database_dsn=str(db_path),
-                subscription_lifetime_hours=24,
+                telegram_forum_chat_id="-1001234567890",
+                telegram_join_url="https://t.me/blackswanvaultcopytrading",
                 subscriber_telegram_retry_attempts=1,
             )
             logger = logging.getLogger("test.subscriber-bot")
 
-            forum_error = TelegramClientError(
-                method="createForumTopic",
-                status_code=400,
-                error_code=400,
-                description="Bad Request: the chat is not a forum",
-            )
             send_mock = AsyncMock()
+            create_mock = AsyncMock(return_value={"message_thread_id": 4433})
             with (
-                patch("bot.subscriber_bot.create_forum_topic", AsyncMock(side_effect=forum_error)),
+                patch("bot.subscriber_bot.create_forum_topic", create_mock),
                 patch("bot.subscriber_bot.send_message", send_mock),
             ):
                 await _handle_start_with_payload(
@@ -95,15 +90,61 @@ class SubscriberBotFlowTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             with TraderStore(db_path) as store:
-                sessions = store.list_delivery_sessions_for_chat(chat_id=777001)
-            self.assertEqual(len(sessions), 1)
-            self.assertIsNone(sessions[0].message_thread_id)
+                topic = store.get_trader_forum_topic(
+                    trader_address=trader_address,
+                    forum_chat_id=settings.telegram_forum_chat_id,
+                )
+            self.assertIsNotNone(topic)
+            self.assertEqual(topic.message_thread_id, 4433)
+            create_mock.assert_awaited_once()
+            self.assertEqual(create_mock.await_args.kwargs.get("chat_id"), settings.telegram_forum_chat_id)
             self.assertGreaterEqual(send_mock.await_count, 1)
             texts = [
                 str(call.kwargs.get("text", ""))
                 for call in send_mock.await_args_list
             ]
-            self.assertTrue(any("posted directly here" in text for text in texts))
+            self.assertTrue(any("Open Group" in text for text in texts))
+            self.assertTrue(any("Trader Thread" in text for text in texts))
+
+    async def test_start_payload_reuses_existing_shared_topic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            trader_address = "0xdefdefdefdefdefdefdefdefdefdefdefdefdefd"
+            with TraderStore(db_path) as store:
+                store.add_manual(address=trader_address, label="Reuse")
+                store.upsert_trader_forum_topic(
+                    trader_address=trader_address,
+                    forum_chat_id="-1005566778899",
+                    message_thread_id=9901,
+                    topic_name="reuse-topic",
+                )
+
+            settings = SimpleNamespace(
+                telegram_bot_token="123:abc",
+                database_dsn=str(db_path),
+                telegram_forum_chat_id="-1005566778899",
+                telegram_join_url="https://t.me/blackswanvaultcopytrading",
+                subscriber_telegram_retry_attempts=1,
+            )
+            logger = logging.getLogger("test.subscriber-bot")
+
+            send_mock = AsyncMock()
+            create_mock = AsyncMock(return_value={"message_thread_id": 1})
+            with (
+                patch("bot.subscriber_bot.create_forum_topic", create_mock),
+                patch("bot.subscriber_bot.send_message", send_mock),
+            ):
+                await _handle_start_with_payload(
+                    session=None,  # not used by mocked telegram helpers
+                    settings=settings,
+                    chat_id=888002,
+                    payload=f"sub_{trader_address}",
+                    logger=logger,
+                )
+
+            create_mock.assert_not_awaited()
+            texts = [str(call.kwargs.get("text", "")) for call in send_mock.await_args_list]
+            self.assertTrue(any("/9901" in text for text in texts))
 
 
 if __name__ == "__main__":

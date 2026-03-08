@@ -17,6 +17,7 @@ Entry point:
 1. User clicks `Join Channel` in catalog.
 2. User is redirected to configured Telegram join URL.
 3. Poster auto-creates forum topics when new trader signals appear.
+4. Optional `subscriber_bot` DM deep-links (`/start sub_0x...`) reuse the same shared topic mapping and return direct topic links.
 
 Current lifecycle model:
 
@@ -73,8 +74,8 @@ Per cycle:
 - Retry queue unique key: `(dedup_key, chat_id, message_thread_id)` for idempotent resend.
 - Dispatcher:
   - global send concurrency limit,
-  - per-chat serialization,
-  - per-chat minimum interval.
+  - per-topic pacing key (`chat_id:message_thread_id`),
+  - minimum interval per topic.
 - Monitor backoff:
   - faster polling when fresh fills appear,
   - slower polling on idle/error streaks.

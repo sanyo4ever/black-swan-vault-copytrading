@@ -14,7 +14,7 @@ sources:
     safety_lookback_seconds: 90
     bootstrap_lookback_minutes: 180
     http_concurrency: 8
-    delivery_only_subscribed: true
+    delivery_only_subscribed: false
 
   - id: elite_rss_signals
     type: rss

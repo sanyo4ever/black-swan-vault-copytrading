@@ -57,8 +57,8 @@ Hyperliquid/Nansen -> cryptoinsider-discovery
   - handles dedup, retry queue, and Telegram topic recovery rules.
 
 - `cryptoinsider-subscriberbot` (legacy/optional)
-  - kept for backward compatibility with old DM subscription flow.
-  - not required for shared forum-channel production mode.
+  - optional DM helper for opening shared trader topics from `/start sub_0x...`.
+  - does not own delivery routing in shared forum-channel production mode.
 
 ## 5. Data Stores
 
@@ -91,8 +91,8 @@ Key tables:
   - `chat_unavailable`/bot blocked -> drop failed target and keep DB consistent.
 - Dispatcher enforces:
   - global send concurrency,
-  - per-chat serialization,
-  - per-chat minimum interval.
+  - per-topic pacing (`chat_id:message_thread_id`),
+  - per-topic minimum interval.
 
 ## 7. Security Baseline
 
