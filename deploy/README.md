@@ -29,7 +29,8 @@ sudo chmod 640 /etc/cryptoinsider/env
 ```env
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_CHANNEL_ID=...
-TELEGRAM_BOT_USERNAME=...
+TELEGRAM_FORUM_CHAT_ID=...
+TELEGRAM_JOIN_URL=https://t.me/YourChannelOrInvite
 DATABASE_URL=postgresql://cryptoinsider:strong_password@127.0.0.1:5432/cryptoinsider
 ADMIN_PANEL_USERNAME=admin
 ADMIN_PANEL_PASSWORD=strong_password
@@ -52,7 +53,8 @@ sudo systemctl enable --now cryptoinsider-discovery.service
 sudo systemctl enable --now cryptoinsider-universe.service
 sudo systemctl enable --now cryptoinsider-top100.service
 sudo systemctl enable --now cryptoinsider-poster.service
-sudo systemctl enable --now cryptoinsider-subscriberbot.service
+# optional legacy DM flow only:
+# sudo systemctl enable --now cryptoinsider-subscriberbot.service
 ```
 
 ## 5. Deploy update (recommended workflow)
@@ -74,7 +76,6 @@ Restart only changed services (common web/bot update):
 
 ```bash
 sudo systemctl restart cryptoinsider-admin
-sudo systemctl restart cryptoinsider-subscriberbot
 sudo systemctl restart cryptoinsider-poster
 ```
 
@@ -106,8 +107,7 @@ sudo systemctl is-active \
   cryptoinsider-discovery \
   cryptoinsider-universe \
   cryptoinsider-top100 \
-  cryptoinsider-poster \
-  cryptoinsider-subscriberbot
+  cryptoinsider-poster
 ```
 
 ## 7. Logs and debugging
@@ -115,7 +115,6 @@ sudo systemctl is-active \
 ```bash
 sudo journalctl -u cryptoinsider-admin -f
 sudo journalctl -u cryptoinsider-poster -f
-sudo journalctl -u cryptoinsider-subscriberbot -f
 sudo journalctl -u cryptoinsider-discovery -f
 sudo journalctl -u cryptoinsider-universe -f
 sudo journalctl -u cryptoinsider-top100 -f

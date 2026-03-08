@@ -6,7 +6,7 @@ Start here if you are new to the project.
 
 - [`../README.md`](../README.md): project overview, quick start, data model, QA gate commands.
 - [`TRADER_DISCOVERY_ARCHITECTURE.md`](./TRADER_DISCOVERY_ARCHITECTURE.md): how discovery, scoring, lifecycle, and catalog projection work.
-- [`SUBSCRIBED_DELIVERY_ARCHITECTURE.md`](./SUBSCRIBED_DELIVERY_ARCHITECTURE.md): subscription lifecycle, demand-driven scanning, Telegram delivery/retry behavior.
+- [`SUBSCRIBED_DELIVERY_ARCHITECTURE.md`](./SUBSCRIBED_DELIVERY_ARCHITECTURE.md): shared forum-topic delivery, adaptive scanning, Telegram delivery/retry behavior.
 - [`PRODUCTION_ARCHITECTURE_UBUNTU.md`](./PRODUCTION_ARCHITECTURE_UBUNTU.md): production deployment and runtime architecture on Ubuntu.
 
 ## Quality and Testing

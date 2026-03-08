@@ -10,7 +10,7 @@ Primary goals:
 
 1. Continuously discover and rank futures traders.
 2. Expose a public catalog with fast filtering/sorting/search.
-3. Let users subscribe to trader feeds in one click.
+3. Let users join one shared Telegram channel in one click.
 4. Deliver trader fills to Telegram with bounded latency and resilient retries.
 5. Keep operations simple for a single-server setup.
 
@@ -18,8 +18,9 @@ Primary goals:
 
 - The project is open-source and donation-supported.
 - There is no mandatory paywall in the current production flow.
-- Telegram subscription sessions remain active until explicit cancellation (`/stop 0x...`).
-- If Telegram forum topics are unsupported in the user chat, delivery automatically falls back to direct private chat mode.
+- Public catalog action is `Join Channel` (redirect via `/subscribe/{address}/go`).
+- Poster creates/uses one forum topic per trader wallet in the configured forum chat.
+- If forum topics are unsupported in that chat, poster falls back to root channel posting (no per-wallet thread isolation).
 
 ## 3. Runtime Topology
 
@@ -27,8 +28,6 @@ Primary goals:
 Internet -> Nginx (80/443) -> cryptoinsider-admin (127.0.0.1:8080)
                                        |
                                        +-> PostgreSQL (127.0.0.1:5432)
-
-Telegram <-> cryptoinsider-subscriberbot (long polling)
 
 Hyperliquid/Nansen -> cryptoinsider-discovery
                          -> cryptoinsider-universe
@@ -42,11 +41,6 @@ Hyperliquid/Nansen -> cryptoinsider-discovery
   - serves `/`, `/api/traders`, `/subscribe/{address}`, `/admin`.
   - public catalog + password-protected admin panel.
 
-- `cryptoinsider-subscriberbot`
-  - handles `/start sub_<address>`, `/my`, `/stop`.
-  - creates/updates `subscriptions` and `delivery_sessions`.
-  - attempts `createForumTopic`; falls back to direct chat mode when unsupported.
-
 - `cryptoinsider-discovery`
   - fetches candidate traders, enriches metrics, applies hard filters, upserts `tracked_traders`.
 
@@ -57,15 +51,19 @@ Hyperliquid/Nansen -> cryptoinsider-discovery
   - refreshes `traders_top100_live`, monitoring pools, and `catalog_current` projection.
 
 - `cryptoinsider-poster`
-  - refreshes demand-driven monitor state (`delivery_monitor_state`).
-  - scans due subscribed traders (`userFillsByTime`) using per-trader watermarks.
+  - scans due traders (`userFillsByTime`) using per-trader watermarks.
+  - resolves/creates forum-topic mapping (`trader_forum_topics`) for each trader signal.
   - formats and delivers signals to active targets.
-  - handles dedup, retry queue, and Telegram error deactivation rules.
+  - handles dedup, retry queue, and Telegram topic recovery rules.
+
+- `cryptoinsider-subscriberbot` (legacy/optional)
+  - kept for backward compatibility with old DM subscription flow.
+  - not required for shared forum-channel production mode.
 
 ## 5. Data Stores
 
 - PostgreSQL (single-node, localhost only)
-  - source of truth for traders, catalog, subscriptions, delivery sessions, retries.
+  - source of truth for traders, catalog, topic mappings, retries.
 
 Key tables:
 
@@ -75,6 +73,7 @@ Key tables:
 - `trader_monitoring_pool`
 - `delivery_monitor_state`
 - `catalog_current`
+- `trader_forum_topics`
 - `subscriptions`
 - `delivery_sessions`
 - `delivery_retry_queue`
@@ -88,8 +87,8 @@ Key tables:
 - Retry queue: `delivery_retry_queue` with exponential backoff and `retry_after` support.
 - Error policies:
   - `flood/transient` -> queue retry + batch-level global flood backoff.
-  - `topic_missing` -> deactivate only affected chat+trader target.
-  - `chat_unavailable`/bot blocked -> deactivate only affected chat+trader target.
+  - `topic_missing` -> drop stale `trader_forum_topics` mapping and recreate later.
+  - `chat_unavailable`/bot blocked -> drop failed target and keep DB consistent.
 - Dispatcher enforces:
   - global send concurrency,
   - per-chat serialization,
@@ -123,7 +122,6 @@ Restart only changed services (typical web/bot changes):
 
 ```bash
 sudo systemctl restart cryptoinsider-admin
-sudo systemctl restart cryptoinsider-subscriberbot
 sudo systemctl restart cryptoinsider-poster
 ```
 
@@ -155,8 +153,7 @@ sudo systemctl is-active \
   cryptoinsider-discovery \
   cryptoinsider-universe \
   cryptoinsider-top100 \
-  cryptoinsider-poster \
-  cryptoinsider-subscriberbot
+  cryptoinsider-poster
 ```
 
 Check logs:
@@ -164,7 +161,6 @@ Check logs:
 ```bash
 sudo journalctl -u cryptoinsider-admin -f
 sudo journalctl -u cryptoinsider-poster -f
-sudo journalctl -u cryptoinsider-subscriberbot -f
 ```
 
 ## 10. Backups and Recovery

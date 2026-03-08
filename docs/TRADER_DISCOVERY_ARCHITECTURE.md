@@ -87,12 +87,12 @@ Result is normalized to `0..100` and stored in `tracked_traders.score`.
 
 Statuses are soft-state, not deletion:
 
-- `ACTIVE_LISTED`: visible and open for new subscriptions.
+- `ACTIVE_LISTED`: visible and eligible for shared-channel delivery.
 - `ACTIVE_UNLISTED`: hidden by default, retained for continuity/history.
-- `STALE`: blocked for new subscriptions.
+- `STALE`: hidden from actionable pool due to inactivity.
 - `ARCHIVED`: long-inactive historical state.
 
-Critical rule: traders with active subscriptions are not hard-deleted; transitions preserve continuity.
+Critical rule: discovered traders are not hard-deleted; transitions preserve continuity and history.
 
 ## 8. Catalog Projection
 

@@ -128,7 +128,8 @@ python discovery_worker.py
 python universe_worker.py
 python top100_worker.py
 python main.py
-python subscriber_bot.py
+# optional legacy DM flow only:
+# python subscriber_bot.py
 ```
 
 Delivery-monitor tuning (optional `.env`):
@@ -158,7 +159,7 @@ TRADER_ARCHIVE_AFTER_DAYS=180
 
 - [`docs/README.md`](./docs/README.md) -> complete documentation index
 - [`docs/TRADER_DISCOVERY_ARCHITECTURE.md`](./docs/TRADER_DISCOVERY_ARCHITECTURE.md) -> discovery/scoring/catalog internals
-- [`docs/SUBSCRIBED_DELIVERY_ARCHITECTURE.md`](./docs/SUBSCRIBED_DELIVERY_ARCHITECTURE.md) -> subscription/delivery internals
+- [`docs/SUBSCRIBED_DELIVERY_ARCHITECTURE.md`](./docs/SUBSCRIBED_DELIVERY_ARCHITECTURE.md) -> shared forum delivery internals
 - [`docs/PRODUCTION_ARCHITECTURE_UBUNTU.md`](./docs/PRODUCTION_ARCHITECTURE_UBUNTU.md) -> production runtime and operations
 
 ## Data Model
@@ -169,7 +170,7 @@ Core tables:
 - `traders_universe`: filtered qualified pool
 - `traders_top100_live`: rolling active shortlist
 - `trader_monitoring_pool`: HOT/WARM/COLD due-scan scheduling
-- `delivery_monitor_state`: subscription-driven adaptive scheduler + per-trader watermark state
+- `delivery_monitor_state`: adaptive scheduler + per-trader watermark state
 - `catalog_current`: denormalized public catalog view
 - `trader_forum_topics`: shared forum topic mapping (`trader_address -> message_thread_id`)
 - `subscriptions`, `delivery_sessions`: legacy DM-subscription lifecycle (kept for compatibility/migration)
@@ -184,7 +185,7 @@ Tracked traders are never hard-deleted in normal operation.
 - `STALE`: inactive beyond stale threshold, hidden from default actionable pool.
 - `ARCHIVED`: long-inactive historical record.
 
-Lifecycle transitions are automatic (`universe_worker`, coordinated with discovery via DB lease) and subscription-safe:
+Lifecycle transitions are automatic (`universe_worker`, coordinated with discovery via DB lease) and delivery-safe:
 
 - historically active records -> never hard-deleted
 - blacklisted trader -> delivery detached by moderation rules

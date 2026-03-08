@@ -16,10 +16,11 @@ This project uses a release gate that combines automated tests with live data-qu
 - end-to-end `_fetch_metrics` payload integrity checks
 
 3. Business E2E:
-- subscribe, stop, multiple subscriptions in one chat
-- fanout to multiple chats for one trader
-- retry queue lifecycle on transient Telegram failures
+- join redirect flow (`/subscribe/<address>/go` -> channel link)
+- forum topic mapping lifecycle (create/reuse/reset on `topic_missing`)
+- fanout and retry queue lifecycle on transient Telegram failures
 - edge-case handling (`message thread not found`, bot blocked)
+- legacy DM subscription compatibility tests remain in CI
 
 ## Gate Command
 
