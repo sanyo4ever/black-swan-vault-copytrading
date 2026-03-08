@@ -492,12 +492,13 @@ class LightweightRotationWorker:
                 )
 
         new_label = str(candidate.get("label") or "").strip() or None
+        with TraderStore(self._settings.database_dsn) as store:
+            self._upsert_discovered_from_metrics(store=store, item=candidate)
         await self._ensure_topic_for_wallet(address=new_address, label=new_label)
 
         old_score = old_wallet.score if old_wallet.score is not None else 0.0
         new_score = float(candidate.get("score") or 0.0)
         with TraderStore(self._settings.database_dsn) as store:
-            self._upsert_discovered_from_metrics(store=store, item=candidate)
             store.upsert_showcase_wallet(
                 address=new_address,
                 status=SHOWCASE_STATUS_ACTIVE,
