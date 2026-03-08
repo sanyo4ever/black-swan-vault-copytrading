@@ -809,6 +809,9 @@ def _render_public_directory(
   <meta property='og:description' content='{escape(page_description)}' />
   <meta property='og:url' content='{escape(canonical_url)}' />
   <meta property='og:image' content='{escape(logo_og_url)}' />
+  <meta property='og:image:width' content='1200' />
+  <meta property='og:image:height' content='630' />
+  <meta property='og:image:type' content='image/png' />
   <meta name='twitter:card' content='summary_large_image' />
   <meta name='twitter:title' content='{escape(page_title)}' />
   <meta name='twitter:description' content='{escape(page_description)}' />
@@ -2011,6 +2014,8 @@ async def robots_txt(request: web.Request) -> web.Response:
             "Allow: /",
             "Disallow: /admin",
             "Disallow: /api/",
+            "Disallow: /subscribe/",
+            "Disallow: /telegram/",
             f"Sitemap: {site_origin}/sitemap.xml",
             "",
         ]
@@ -2022,17 +2027,18 @@ async def sitemap_xml(request: web.Request) -> web.Response:
     site_origin = _public_site_origin(request)
     lastmod = datetime.now(tz=UTC).date().isoformat()
     urls = (
-        f"{site_origin}/",
-        f"{site_origin}/terms",
-        f"{site_origin}/privacy",
-        f"{site_origin}/disclaimer",
+        (f"{site_origin}/", "1.0"),
+        (f"{site_origin}/terms", "0.3"),
+        (f"{site_origin}/privacy", "0.3"),
+        (f"{site_origin}/disclaimer", "0.3"),
     )
     items = []
-    for url in urls:
+    for url, priority in urls:
         items.append(
             "<url>"
             f"<loc>{escape(url)}</loc>"
             f"<lastmod>{escape(lastmod)}</lastmod>"
+            f"<priority>{escape(priority)}</priority>"
             "</url>"
         )
     xml = (
