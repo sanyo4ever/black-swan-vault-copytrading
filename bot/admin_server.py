@@ -267,19 +267,6 @@ def _resolve_join_url(settings) -> str:
     return str(getattr(settings, "telegram_join_url", "") or "").strip()
 
 
-def _subscribe_button(*, trader_address: str, join_url: str, trader_status: str) -> str:
-    if not join_url:
-        return "<span style='opacity:.7'>Channel link not configured</span>"
-    if trader_status in {STATUS_STALE, STATUS_ARCHIVED}:
-        return "<span style='opacity:.7'>Unavailable</span>"
-    encoded = quote(trader_address, safe="")
-    return (
-        f"<a class='join-btn' href='/subscribe/{encoded}/go' target='_blank' rel='noopener'>"
-        "Join Channel"
-        "</a>"
-    )
-
-
 def _is_admin_authorized(request: web.Request) -> bool:
     settings = request.app["settings"]
     auth_header = request.headers.get("Authorization", "")
@@ -586,6 +573,12 @@ def _render_public_directory(
 
     period_title = selected_period
     trades_column_label = f"Trades {period_title}"
+    if join_url:
+        hero_join_button_html = (
+            f"<a class='hero-btn' href='{escape(join_url)}' target='_blank' rel='noopener'>Join Channel</a>"
+        )
+    else:
+        hero_join_button_html = "<span class='hero-btn hero-btn-disabled'>Join Channel Unavailable</span>"
     rows = []
     for index, trader in enumerate(traders, start=1):
         metrics = _extract_stat_metrics(trader.stats_json)
@@ -625,14 +618,13 @@ def _render_public_directory(
             f"<div>{escape(last_traded_at)}</div>"
             f"<div class='muted-mini'>{escape(freshness)}</div>"
             "</td>"
-            f"<td>{_subscribe_button(trader_address=trader.address, join_url=join_url, trader_status=trader.status)}</td>"
             "</tr>"
         )
 
     table_rows = (
         "\n".join(rows)
         if rows
-        else "<tr><td colspan='11'>No traders match your filters.</td></tr>"
+        else "<tr><td colspan='10'>No traders match your filters.</td></tr>"
     )
     table_headers = (
         "<th>#</th>"
@@ -645,7 +637,6 @@ def _render_public_directory(
         f"{_sortable_th(label=f'{period_title} Sharpe', field='sharpe')}"
         f"{_sortable_th(label=trades_column_label, field='trades')}"
         f"{_sortable_th(label='Last Traded At', field='recent')}"
-        "<th>Action</th>"
     )
     refreshed_at = traders[0].refreshed_at if traders else "-"
     pager = ""
@@ -914,6 +905,11 @@ def _render_public_directory(
       font-size:12px;
       font-weight:600;
     }}
+    .hero-btn-disabled {{
+      opacity:.65;
+      pointer-events:none;
+      cursor:not-allowed;
+    }}
     .hero-btn:hover {{ background:rgba(255,159,26,.2); }}
     .hero-thanks {{ margin-top:10px; color:#d5a556; font-size:12px; }}
     .filters-panel {{ display:grid; gap:12px; }}
@@ -1040,22 +1036,6 @@ def _render_public_directory(
     .metric-neg {{ color:var(--red); font-weight:700; }}
     .metric-flat {{ color:#b9c0d1; }}
     .muted-mini {{ color:var(--muted); font-size:11px; margin-top:3px; }}
-    .join-btn {{
-      display:inline-flex;
-      align-items:center;
-      justify-content:center;
-      min-width:98px;
-      padding:8px 12px;
-      border-radius:999px;
-      border:1px solid #9c650f;
-      color:#ffb23f;
-      background:rgba(255,159,26,.1);
-      text-decoration:none;
-      font-size:13px;
-      font-weight:700;
-      letter-spacing:.2px;
-    }}
-    .join-btn:hover {{ background:rgba(255,159,26,.2); }}
     .faq-item {{ border-top:1px solid var(--line); padding:10px 0; }}
     .faq-item:first-of-type {{ border-top:none; padding-top:0; }}
     .faq-item p {{ line-height:1.5; }}
@@ -1090,6 +1070,7 @@ def _render_public_directory(
         <span class='tab'>Subscribed</span>
       </div>
       <div class='hero-actions'>
+        {hero_join_button_html}
         <a class='hero-btn' href='{escape(PROJECT_REPO_URL)}' target='_blank' rel='noopener'>Contribute on GitHub</a>
         <a class='hero-btn' href='{escape(PROJECT_REPO_URL)}/issues/new' target='_blank' rel='noopener'>Report Issue / Idea</a>
       </div>
