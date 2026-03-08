@@ -20,6 +20,7 @@ from aiohttp import web
 from bot.config import load_settings
 from bot.discovery import HyperliquidDiscoveryConfig, HyperliquidDiscoveryService
 from bot.logging_setup import bind_log_context, build_logging_options, new_trace_id, setup_logging
+from bot.telegram_client import TelegramClientError, create_forum_topic
 from bot.trader_store import (
     CatalogTrader,
     MODERATION_BLACKLIST,
@@ -533,6 +534,7 @@ def _render_public_directory(
     traders: list[CatalogTrader],
     request: web.Request,
     join_url: str,
+    topic_links: dict[str, str],
     next_cursor: str | None,
     google_analytics_measurement_id: str,
 ) -> str:
@@ -600,6 +602,12 @@ def _render_public_directory(
         minutes_since = _minutes_since(trader.last_fill_time)
         freshness = f"{minutes_since}m ago" if minutes_since is not None else "-"
         trader_label = trader.label or trader.address[:10]
+        view_link = topic_links.get(trader.address)
+        action_html = (
+            f"<a class='row-action-btn' href='{escape(view_link)}' target='_blank' rel='noopener'>View in Telegram</a>"
+            if view_link
+            else "<span class='row-action-btn row-action-btn-disabled'>View in Telegram</span>"
+        )
         rows.append(
             "<tr>"
             f"<td>{_fmt(index, 0)}</td>"
@@ -618,13 +626,14 @@ def _render_public_directory(
             f"<div>{escape(last_traded_at)}</div>"
             f"<div class='muted-mini'>{escape(freshness)}</div>"
             "</td>"
+            f"<td>{action_html}</td>"
             "</tr>"
         )
 
     table_rows = (
         "\n".join(rows)
         if rows
-        else "<tr><td colspan='10'>No traders match your filters.</td></tr>"
+        else "<tr><td colspan='11'>No traders match your filters.</td></tr>"
     )
     table_headers = (
         "<th>#</th>"
@@ -637,6 +646,7 @@ def _render_public_directory(
         f"{_sortable_th(label=f'{period_title} Sharpe', field='sharpe')}"
         f"{_sortable_th(label=trades_column_label, field='trades')}"
         f"{_sortable_th(label='Last Traded At', field='recent')}"
+        "<th>Action</th>"
     )
     refreshed_at = traders[0].refreshed_at if traders else "-"
     pager = ""
@@ -1037,6 +1047,27 @@ def _render_public_directory(
     .metric-neg {{ color:var(--red); font-weight:700; }}
     .metric-flat {{ color:#b9c0d1; }}
     .muted-mini {{ color:var(--muted); font-size:11px; margin-top:3px; }}
+    .row-action-btn {{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      min-width:156px;
+      border-radius:999px;
+      border:1px solid #805215;
+      background:rgba(255,159,26,.12);
+      color:#ffc66a;
+      text-decoration:none;
+      padding:8px 12px;
+      font-size:12px;
+      font-weight:600;
+      line-height:1.1;
+    }}
+    .row-action-btn:hover {{ background:rgba(255,159,26,.2); }}
+    .row-action-btn-disabled {{
+      opacity:.65;
+      pointer-events:none;
+      cursor:not-allowed;
+    }}
     .faq-item {{ border-top:1px solid var(--line); padding:10px 0; }}
     .faq-item:first-of-type {{ border-top:none; padding-top:0; }}
     .faq-item p {{ line-height:1.5; }}
@@ -1412,6 +1443,111 @@ def _subscription_redirect_url(settings) -> str:
     return ""
 
 
+def _forum_chat_id(settings) -> str:
+    value = str(getattr(settings, "telegram_forum_chat_id", "") or "").strip()
+    if value:
+        return value
+    return str(getattr(settings, "telegram_channel_id", "") or "").strip()
+
+
+def _forum_topic_name(address: str) -> str:
+    normalized = str(address or "").strip().lower()
+    if len(normalized) <= 18:
+        return normalized or "Trader"
+    return f"{normalized[:10]}...{normalized[-6:]}"
+
+
+def _forum_topic_url(*, forum_chat_id: str, message_thread_id: int) -> str | None:
+    chat = str(forum_chat_id or "").strip()
+    thread_id = int(message_thread_id or 0)
+    if not chat or thread_id <= 0:
+        return None
+    if chat.startswith("@"):
+        username = chat.removeprefix("@").strip()
+        if username:
+            return f"https://t.me/{username}/{thread_id}"
+    if chat.startswith("-100") and chat[4:].isdigit():
+        return f"https://t.me/c/{chat[4:]}/{thread_id}"
+    return None
+
+
+async def telegram_topic_redirect(request: web.Request) -> web.Response:
+    settings = request.app["settings"]
+    session: aiohttp.ClientSession = request.app["http_session"]
+    logger: logging.Logger = request.app["logger"]
+    address = str(request.match_info.get("address", "")).strip().lower()
+
+    with TraderStore(settings.database_dsn) as store:
+        trader = store.get_trader(address=address)
+        if trader is None:
+            raise web.HTTPNotFound(text="Trader not found")
+        if trader.moderation_state == MODERATION_BLACKLIST:
+            raise web.HTTPForbidden(text="Trader is not available")
+        if trader.status in {STATUS_STALE, STATUS_ARCHIVED}:
+            raise web.HTTPServiceUnavailable(text="Trader is currently not eligible")
+
+    forum_chat_id = _forum_chat_id(settings)
+    join_url = _subscription_redirect_url(settings)
+    if not forum_chat_id:
+        if join_url:
+            raise web.HTTPFound(join_url)
+        return web.Response(status=503, text="Forum chat is not configured")
+
+    thread_id: int | None = None
+    with TraderStore(settings.database_dsn) as store:
+        existing = store.get_trader_forum_topic(
+            trader_address=address,
+            forum_chat_id=forum_chat_id,
+        )
+    if existing is not None and int(existing.message_thread_id or 0) > 0:
+        thread_id = int(existing.message_thread_id)
+    else:
+        try:
+            result = await create_forum_topic(
+                session,
+                bot_token=settings.telegram_bot_token,
+                chat_id=forum_chat_id,
+                name=_forum_topic_name(address),
+            )
+            candidate = int(result.get("message_thread_id") or 0)
+            if candidate <= 0:
+                raise RuntimeError(f"Invalid createForumTopic response: {result}")
+            thread_id = candidate
+            with TraderStore(settings.database_dsn) as store:
+                store.upsert_trader_forum_topic(
+                    trader_address=address,
+                    forum_chat_id=forum_chat_id,
+                    message_thread_id=thread_id,
+                    topic_name=_forum_topic_name(address),
+                )
+            logger.info(
+                "Created forum topic from web redirect trader=%s chat_id=%s thread=%s",
+                address,
+                forum_chat_id,
+                thread_id,
+            )
+        except TelegramClientError as exc:
+            logger.warning(
+                "Failed to create forum topic from web redirect trader=%s chat_id=%s: %s",
+                address,
+                forum_chat_id,
+                exc,
+            )
+            if join_url:
+                raise web.HTTPFound(join_url)
+            return web.Response(status=502, text="Failed to open Telegram topic")
+
+    topic_url = _forum_topic_url(
+        forum_chat_id=forum_chat_id,
+        message_thread_id=int(thread_id or 0),
+    )
+    if topic_url:
+        raise web.HTTPFound(topic_url)
+    if join_url:
+        raise web.HTTPFound(join_url)
+    return web.Response(status=503, text="Topic URL is unavailable")
+
+
 async def subscriber_directory(request: web.Request) -> web.Response:
     settings = request.app["settings"]
     selected_period = _normalize_catalog_period(request.query.get("period"))
@@ -1447,6 +1583,7 @@ async def subscriber_directory(request: web.Request) -> web.Response:
     min_activity_score = _opt_float("min_activity_score")
     active_within_minutes = _opt_int("active_within_minutes")
 
+    forum_chat_id = _forum_chat_id(settings)
     with TraderStore(settings.database_dsn) as store:
         traders = store.list_catalog_traders(
             limit=limit + 1,
@@ -1468,6 +1605,22 @@ async def subscriber_directory(request: web.Request) -> web.Response:
             cursor_value=cursor[0] if cursor else None,
             cursor_address=cursor[1] if cursor else None,
         )
+        topic_links: dict[str, str] = {}
+        for trader in traders[:limit]:
+            topic = store.get_trader_forum_topic(
+                trader_address=trader.address,
+                forum_chat_id=forum_chat_id,
+            )
+            if topic is not None and int(topic.message_thread_id or 0) > 0:
+                url = _forum_topic_url(
+                    forum_chat_id=forum_chat_id,
+                    message_thread_id=int(topic.message_thread_id),
+                )
+                if url:
+                    topic_links[trader.address] = url
+            else:
+                encoded = quote(trader.address, safe="")
+                topic_links[trader.address] = f"/telegram/{encoded}/view"
 
     next_cursor: str | None = None
     if len(traders) > limit:
@@ -1485,6 +1638,7 @@ async def subscriber_directory(request: web.Request) -> web.Response:
             traders=traders,
             request=request,
             join_url=_resolve_join_url(settings),
+            topic_links=topic_links,
             next_cursor=next_cursor,
             google_analytics_measurement_id=settings.google_analytics_measurement_id,
         ),
@@ -1808,6 +1962,7 @@ def create_app(*, settings=None, logger: logging.Logger | None = None) -> web.Ap
             web.get("/api/traders", traders_api),
             web.get("/subscribe/{address}", subscribe_landing),
             web.get("/subscribe/{address}/go", subscribe_redirect),
+            web.get("/telegram/{address}/view", telegram_topic_redirect),
             web.get("/admin", admin_index),
             web.post("/admin/discover", run_discovery),
             web.post("/admin/traders/add", add_trader),
