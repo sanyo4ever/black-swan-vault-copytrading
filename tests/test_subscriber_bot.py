@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import tempfile
 import unittest
@@ -8,7 +9,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from bot.subscriber_bot import _fmt_remaining, _handle_start_with_payload
+from bot.subscriber_bot import (
+    _fmt_remaining,
+    _gc_lock_registry,
+    _handle_start_with_payload,
+    _short,
+)
 from bot.telegram_client import TelegramClientError
 from bot.trader_store import PERMANENT_SUBSCRIPTION_EXPIRES_AT, TraderStore
 
@@ -31,6 +37,26 @@ class SubscriberBotTests(unittest.TestCase):
 
     def test_fmt_remaining_permanent(self) -> None:
         self.assertEqual(_fmt_remaining(PERMANENT_SUBSCRIPTION_EXPIRES_AT), "until cancellation")
+
+    def test_short_escapes_html(self) -> None:
+        rendered = _short("</code><b>evil</b>")
+        self.assertNotIn("<", rendered)
+        self.assertNotIn(">", rendered)
+        self.assertIn("&lt;", rendered)
+
+    def test_gc_lock_registry_prunes_stale_entries_when_over_limit(self) -> None:
+        locks = {f"k{i}": asyncio.Lock() for i in range(5)}
+        used = {key: 0.0 for key in locks}
+        removed = _gc_lock_registry(
+            locks,
+            used,
+            max_tracked=2,
+            stale_seconds=10.0,
+            now=100.0,
+        )
+        self.assertEqual(removed, 5)
+        self.assertEqual(locks, {})
+        self.assertEqual(used, {})
 
 
 class SubscriberBotFlowTests(unittest.IsolatedAsyncioTestCase):

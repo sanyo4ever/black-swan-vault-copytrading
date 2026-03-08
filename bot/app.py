@@ -91,25 +91,6 @@ async def _store_call(settings, fn):
     return await asyncio.to_thread(_store_call_sync, settings, fn)
 
 
-def _deactivate_chat_targets(
-    *,
-    settings,
-    chat_id: str | int,
-    logger: logging.Logger,
-    reason: str,
-) -> None:
-    with TraderStore(settings.database_dsn) as store:
-        sessions = store.cancel_all_chat_subscriptions(chat_id=chat_id)
-        dropped = store.delete_pending_retries_for_chat(chat_id=chat_id)
-    logger.warning(
-        "Deactivated chat targets chat_id=%s sessions=%s pending_retries_deleted=%s reason=%s",
-        chat_id,
-        len(sessions),
-        dropped,
-        reason,
-    )
-
-
 def _deactivate_trader_target(
     *,
     settings,

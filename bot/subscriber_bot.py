@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
+import time
 from datetime import UTC, datetime
-from typing import Awaitable, Callable, TypeVar
+from typing import Any, Awaitable, Callable, TypeVar
 
 import aiohttp
 
@@ -29,13 +31,18 @@ _START_LOCKS: dict[str, asyncio.Lock] = {}
 _START_LOCKS_GUARD = asyncio.Lock()
 _CHAT_LOCKS: dict[int, asyncio.Lock] = {}
 _CHAT_LOCKS_GUARD = asyncio.Lock()
+_START_LOCKS_LAST_USED: dict[str, float] = {}
+_CHAT_LOCKS_LAST_USED: dict[int, float] = {}
+_LOCK_MAX_TRACKED = 5000
+_LOCK_STALE_SECONDS = 3600.0
 _T = TypeVar("_T")
 
 
 def _short(address: str) -> str:
-    if len(address) < 12:
-        return address
-    return f"{address[:6]}...{address[-4:]}"
+    safe = html.escape(str(address), quote=False)
+    if len(safe) < 12:
+        return safe
+    return f"{safe[:6]}...{safe[-4:]}"
 
 
 def _normalize_command(raw_text: str) -> tuple[str, str]:
@@ -86,20 +93,68 @@ def _fmt_remaining(value: str) -> str:
 async def _get_start_lock(*, chat_id: int, trader_address: str) -> asyncio.Lock:
     key = f"{int(chat_id)}:{str(trader_address).strip().lower()}"
     async with _START_LOCKS_GUARD:
+        now = time.monotonic()
         lock = _START_LOCKS.get(key)
         if lock is None:
             lock = asyncio.Lock()
             _START_LOCKS[key] = lock
+        _START_LOCKS_LAST_USED[key] = now
+        _gc_lock_registry(
+            _START_LOCKS,
+            _START_LOCKS_LAST_USED,
+            max_tracked=_LOCK_MAX_TRACKED,
+            stale_seconds=_LOCK_STALE_SECONDS,
+            now=now,
+        )
         return lock
 
 
 async def _get_chat_lock(*, chat_id: int) -> asyncio.Lock:
     async with _CHAT_LOCKS_GUARD:
-        lock = _CHAT_LOCKS.get(int(chat_id))
+        key = int(chat_id)
+        now = time.monotonic()
+        lock = _CHAT_LOCKS.get(key)
         if lock is None:
             lock = asyncio.Lock()
-            _CHAT_LOCKS[int(chat_id)] = lock
+            _CHAT_LOCKS[key] = lock
+        _CHAT_LOCKS_LAST_USED[key] = now
+        _gc_lock_registry(
+            _CHAT_LOCKS,
+            _CHAT_LOCKS_LAST_USED,
+            max_tracked=_LOCK_MAX_TRACKED,
+            stale_seconds=_LOCK_STALE_SECONDS,
+            now=now,
+        )
         return lock
+
+
+def _gc_lock_registry(
+    lock_map: dict[Any, asyncio.Lock],
+    last_used_map: dict[Any, float],
+    *,
+    max_tracked: int,
+    stale_seconds: float,
+    now: float | None = None,
+) -> int:
+    if len(lock_map) <= max(1, int(max_tracked)):
+        return 0
+    current = float(now) if now is not None else time.monotonic()
+    stale_after = max(60.0, float(stale_seconds))
+    removed = 0
+    stale_keys = [
+        key
+        for key, used_at in list(last_used_map.items())
+        if current - float(used_at) >= stale_after
+    ]
+    for key in stale_keys:
+        lock = lock_map.get(key)
+        if lock is not None and lock.locked():
+            continue
+        if key in lock_map:
+            lock_map.pop(key, None)
+            last_used_map.pop(key, None)
+            removed += 1
+    return removed
 
 
 def _store_call_sync(settings, fn):

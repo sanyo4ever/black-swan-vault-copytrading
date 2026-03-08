@@ -93,6 +93,19 @@ class MetricsComputationTests(unittest.TestCase):
         self.assertIsNone(stats["max_drawdown_pct"])
         self.assertAlmostEqual(float(stats["realized_pnl"] or 0.0), 0.0, places=6)
 
+    def test_sortino_uses_downside_deviation_rms(self) -> None:
+        fills = [
+            {"oid": "1", "time": 1, "px": "100", "sz": "1", "closedPnl": "5"},
+            {"oid": "2", "time": 2, "px": "100", "sz": "1", "closedPnl": "-3"},
+            {"oid": "3", "time": 3, "px": "100", "sz": "1", "closedPnl": "2"},
+            {"oid": "4", "time": 4, "px": "100", "sz": "1", "closedPnl": "-1"},
+        ]
+        stats = self.service._compute_period_stats(fills=fills, account_value=1000.0)
+        # returns: [0.05, -0.03, 0.02, -0.01]
+        # downside deviation = sqrt((0^2 + 0.03^2 + 0^2 + 0.01^2) / 4) = 0.015811...
+        # mean_return = 0.0075, sortino = mean/downside * sqrt(4) = 0.948683...
+        self.assertAlmostEqual(float(stats["sortino"] or 0.0), 0.948683, places=5)
+
 
 class MetricsFetchPipelineTests(unittest.IsolatedAsyncioTestCase):
     async def test_fetch_metrics_builds_full_stats_payload(self) -> None:

@@ -261,6 +261,13 @@ class HyperliquidDiscoveryService:
         return math.sqrt(max(0.0, variance))
 
     @staticmethod
+    def _downside_deviation(returns: list[float]) -> float:
+        if not returns:
+            return 0.0
+        downside_sq_sum = sum((min(0.0, value) ** 2) for value in returns)
+        return math.sqrt(max(0.0, downside_sq_sum / len(returns)))
+
+    @staticmethod
     def _clamp(value: float, low: float, high: float) -> float:
         return max(low, min(high, value))
 
@@ -393,8 +400,7 @@ class HyperliquidDiscoveryService:
             else None
         )
 
-        downside = [min(0.0, value) for value in returns]
-        downside_vol = self._population_std(downside) if downside else 0.0
+        downside_vol = self._downside_deviation(returns)
         sortino = (
             (mean_return / downside_vol) * math.sqrt(len(returns))
             if downside_vol > 1e-12
