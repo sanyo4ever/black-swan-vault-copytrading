@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import signal
 import time
 from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable, TypeVar
@@ -92,6 +93,15 @@ def _fmt_remaining(value: str) -> str:
     hours = seconds // 3600
     minutes = (seconds % 3600) // 60
     return f"{hours}h {minutes}m"
+
+
+def _safe_chat_id(raw: Any) -> int | None:
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 async def _get_start_lock(*, chat_id: int, trader_address: str) -> asyncio.Lock:
@@ -643,7 +653,10 @@ async def _handle_message(
     if chat.get("type") != "private":
         return
 
-    chat_id = int(chat.get("id"))
+    chat_id = _safe_chat_id(chat.get("id"))
+    if chat_id is None:
+        logger.warning("Skipping update with invalid private chat id payload=%s", chat)
+        return
     text = str(message.get("text", "") or "")
     command, arg = _normalize_command(text)
 
@@ -720,6 +733,23 @@ async def run_bot() -> None:
     update_concurrency = max(1, int(settings.subscriber_update_concurrency))
     update_sem = asyncio.Semaphore(update_concurrency)
     max_inflight = max(update_concurrency * 4, 32)
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    registered_signals: list[signal.Signals] = []
+
+    def _request_shutdown(sig_name: str) -> None:
+        if stop_event.is_set():
+            return
+        logger.info("Shutdown signal received signal=%s", sig_name)
+        stop_event.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, _request_shutdown, sig.name)
+            registered_signals.append(sig)
+        except (NotImplementedError, RuntimeError, ValueError):
+            # add_signal_handler is unavailable on some platforms/event loops.
+            continue
 
     async def _process_update(update: dict) -> None:
         update_id = update.get("update_id")
@@ -727,8 +757,7 @@ async def run_bot() -> None:
         if not isinstance(message, dict):
             return
         chat = message.get("chat")
-        chat_id_raw = chat.get("id") if isinstance(chat, dict) else None
-        chat_id = int(chat_id_raw) if isinstance(chat_id_raw, (int, float)) else None
+        chat_id = _safe_chat_id(chat.get("id")) if isinstance(chat, dict) else None
         text = str(message.get("text", "") or "")
         command, _ = _normalize_command(text)
         lock: asyncio.Lock | None = None
@@ -768,61 +797,103 @@ async def run_bot() -> None:
         except Exception as exc:
             logger.exception("Failed to process update %s: %s", update_id, exc)
 
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        await _validate_forum_permissions(
-            session=session,
-            settings=settings,
-            logger=logger,
-        )
-        inflight: set[asyncio.Task[None]] = set()
-        while True:
-            cycle += 1
+    def _drain_finished_inflight(inflight: set[asyncio.Task[None]]) -> set[asyncio.Task[None]]:
+        if not inflight:
+            return inflight
+        done = {task for task in inflight if task.done()}
+        if not done:
+            return inflight
+        for completed in done:
             try:
-                with bind_log_context(poll_cycle=cycle, poll_id=new_trace_id("poll")):
-                    updates = await _telegram_call_with_retry(
-                        logger=logger,
-                        label="getUpdates",
-                        max_attempts=_retry_attempts(settings),
-                        call=lambda: get_updates(
-                            session,
-                            bot_token=settings.telegram_bot_token,
-                            offset=offset,
-                            timeout=long_poll_timeout,
-                        ),
-                    )
-            except asyncio.TimeoutError:
-                logger.warning("getUpdates timeout; retrying")
+                completed.result()
+            except asyncio.CancelledError:
                 continue
-            except Exception as exc:
-                logger.exception("Failed to fetch updates: %s", exc)
-                await asyncio.sleep(3)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.exception("Unhandled update task error: %s", exc)
+        return inflight.difference(done)
+
+    inflight: set[asyncio.Task[None]] = set()
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            await _validate_forum_permissions(
+                session=session,
+                settings=settings,
+                logger=logger,
+            )
+            while not stop_event.is_set():
+                cycle += 1
+                inflight = _drain_finished_inflight(inflight)
+                try:
+                    with bind_log_context(poll_cycle=cycle, poll_id=new_trace_id("poll")):
+                        updates = await _telegram_call_with_retry(
+                            logger=logger,
+                            label="getUpdates",
+                            max_attempts=_retry_attempts(settings),
+                            call=lambda: get_updates(
+                                session,
+                                bot_token=settings.telegram_bot_token,
+                                offset=offset,
+                                timeout=long_poll_timeout,
+                            ),
+                        )
+                except asyncio.TimeoutError:
+                    logger.warning("getUpdates timeout; retrying")
+                    continue
+                except asyncio.CancelledError:
+                    stop_event.set()
+                    break
+                except Exception as exc:
+                    if stop_event.is_set():
+                        break
+                    logger.exception("Failed to fetch updates: %s", exc)
+                    await asyncio.sleep(3)
+                    continue
+
+                if not updates:
+                    continue
+
+                max_update_id: int | None = None
+                for update in updates:
+                    update_id = update.get("update_id")
+                    if isinstance(update_id, int):
+                        if max_update_id is None or update_id > max_update_id:
+                            max_update_id = update_id
+                    task = asyncio.create_task(_process_update(update))
+                    inflight.add(task)
+                    if len(inflight) >= max_inflight:
+                        done, pending = await asyncio.wait(
+                            inflight,
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        inflight = set(pending)
+                        for completed in done:
+                            try:
+                                completed.result()
+                            except asyncio.CancelledError:
+                                continue
+                            except Exception as exc:  # pragma: no cover - defensive
+                                logger.exception("Unhandled update task error: %s", exc)
+
+                if max_update_id is not None:
+                    offset = max_update_id + 1
+    finally:
+        if inflight:
+            logger.info("Draining inflight updates count=%s", len(inflight))
+            for task in inflight:
+                if not task.done():
+                    task.cancel()
+            drained = await asyncio.gather(*inflight, return_exceptions=True)
+            for result in drained:
+                if isinstance(result, asyncio.CancelledError):
+                    continue
+                if isinstance(result, Exception):  # pragma: no cover - defensive
+                    logger.exception("Inflight task finished with error during shutdown: %s", result)
+        for sig in registered_signals:
+            try:
+                loop.remove_signal_handler(sig)
+            except Exception:
                 continue
-
-            if not updates:
-                continue
-
-            max_update_id: int | None = None
-            for update in updates:
-                update_id = update.get("update_id")
-                if isinstance(update_id, int):
-                    if max_update_id is None or update_id > max_update_id:
-                        max_update_id = update_id
-                task = asyncio.create_task(_process_update(update))
-                inflight.add(task)
-                if len(inflight) >= max_inflight:
-                    done, pending = await asyncio.wait(
-                        inflight,
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    inflight = set(pending)
-                    for completed in done:
-                        try:
-                            completed.result()
-                        except Exception as exc:  # pragma: no cover - defensive
-                            logger.exception("Unhandled update task error: %s", exc)
-
-            if max_update_id is not None:
-                offset = max_update_id + 1
+        logger.info("Subscriber bot shutdown complete")
 
 
 if __name__ == "__main__":

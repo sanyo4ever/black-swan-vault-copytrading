@@ -62,7 +62,7 @@ class TelegramClientError(RuntimeError):
             "message thread not found" in desc
             or "topic was deleted" in desc
             or "topic_deleted" in desc
-            or "forum topic" in desc and "not found" in desc
+            or ("forum topic" in desc and "not found" in desc)
         )
 
     def is_forum_not_supported(self) -> bool:
@@ -98,7 +98,7 @@ class TelegramClientError(RuntimeError):
         return (
             self.is_chat_blocked()
             or self.is_chat_not_found()
-            or "forbidden" in desc and "not a member" in desc
+            or ("forbidden" in desc and "not a member" in desc)
         )
 
 

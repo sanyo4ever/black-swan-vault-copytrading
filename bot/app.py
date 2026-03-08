@@ -920,12 +920,13 @@ async def _run_cycle(
             continue
 
         if delivered <= 0:
-            if queued > 0:
+            if queued > 0 or failed > 0:
                 await asyncio.to_thread(dedup_store.remember, dedup_key)
                 logger.info(
-                    "Signal %s queued for retry without live success queued=%s; dedup marked",
+                    "Signal %s had no live success queued=%s failed=%s; dedup marked",
                     dedup_key,
                     queued,
+                    failed,
                 )
             else:
                 logger.warning("Signal %s had no successful deliveries", dedup_key)

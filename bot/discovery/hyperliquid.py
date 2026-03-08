@@ -373,6 +373,7 @@ class HyperliquidDiscoveryService:
             start_equity_estimate = abs(account_value - realized_pnl)
             current_equity = abs(account_value)
             candidates = [value for value in (start_equity_estimate, current_equity) if value > 1e-9]
+            # Keep denominator conservative to avoid overstating ROI after withdrawals/transfers.
             roi_base = max(candidates) if candidates else None
         else:
             volume = sum(notionals)
@@ -417,7 +418,7 @@ class HyperliquidDiscoveryService:
             "profit_to_loss_ratio": profit_to_loss_ratio,
             "avg_pnl_per_trade": avg_pnl_per_trade,
             "roi_pct": roi_pct,
-            "max_drawdown_pct": (max_drawdown * 100.0) if returns else None,
+            "max_drawdown_pct": (max_drawdown * 100.0) if closed_pnls else None,
             "sharpe": sharpe,
             "sortino": sortino,
             "roi_volatility_pct": roi_volatility_pct,

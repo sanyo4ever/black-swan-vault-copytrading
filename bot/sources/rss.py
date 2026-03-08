@@ -11,19 +11,39 @@ from bot.sources.base import Source
 
 
 SIDE_PATTERNS = {
-    "LONG": re.compile(r"\\b(long|buy)\\b", re.IGNORECASE),
-    "SHORT": re.compile(r"\\b(short|sell)\\b", re.IGNORECASE),
+    "LONG": re.compile(r"\b(long|buy)\b", re.IGNORECASE),
+    "SHORT": re.compile(r"\b(short|sell)\b", re.IGNORECASE),
 }
-SYMBOL_PATTERN = re.compile(r"\\b([A-Z]{2,15}(?:/USDT|USDT)?)\\b")
-ENTRY_PATTERN = re.compile(r"\\b(entry|buy|sell)\\s*[:@]?\\s*([0-9]+(?:\\.[0-9]+)?)", re.IGNORECASE)
-SL_PATTERN = re.compile(r"\\b(sl|stop(?:[- ]?loss)?)\\s*[:@]?\\s*([0-9]+(?:\\.[0-9]+)?)", re.IGNORECASE)
-TP_PATTERN = re.compile(r"\\b(tp|take(?:[- ]?profit)?)\\s*[:@]?\\s*([0-9]+(?:\\.[0-9]+)?)", re.IGNORECASE)
-TF_PATTERN = re.compile(r"\\b(1m|3m|5m|15m|30m|1h|4h|12h|1d|1w)\\b", re.IGNORECASE)
+SYMBOL_PATTERN = re.compile(r"\b([A-Z]{2,15}(?:/USDT|USDT)?)\b")
+ENTRY_PATTERN = re.compile(r"\b(entry|buy|sell)\s*[:@]?\s*([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)
+SL_PATTERN = re.compile(r"\b(sl|stop(?:[- ]?loss)?)\s*[:@]?\s*([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)
+TP_PATTERN = re.compile(r"\b(tp|take(?:[- ]?profit)?)\s*[:@]?\s*([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)
+TF_PATTERN = re.compile(r"\b(1m|3m|5m|15m|30m|1h|4h|12h|1d|1w)\b", re.IGNORECASE)
 
 
 def _extract_signal_fields(text: str) -> dict[str, str | None]:
-    symbol_match = SYMBOL_PATTERN.search(text)
-    symbol = symbol_match.group(1) if symbol_match else None
+    symbol = None
+    skip_tokens = {
+        "LONG",
+        "SHORT",
+        "BUY",
+        "SELL",
+        "ENTRY",
+        "SL",
+        "TP",
+        "STOP",
+        "LOSS",
+        "TAKE",
+        "PROFIT",
+    }
+    for matched in SYMBOL_PATTERN.finditer(text):
+        candidate = str(matched.group(1) or "").strip().upper()
+        if not candidate:
+            continue
+        if candidate in skip_tokens:
+            continue
+        symbol = candidate
+        break
 
     side = None
     for label, pattern in SIDE_PATTERNS.items():

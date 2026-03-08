@@ -312,6 +312,68 @@ class AppCycleDedupTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 dedup_store.close()
 
+    async def test_dropped_only_delivery_marks_dedup_and_prevents_republish(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "cycle-dropped.db"
+            dedup_path = Path(tmpdir) / "dedup-dropped.db"
+            address = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+            with TraderStore(db_path) as store:
+                store.add_manual(address=address, label="A")
+                store.create_subscription_with_session(
+                    chat_id=5001,
+                    trader_address=address,
+                    message_thread_id=11,
+                    topic_name="A",
+                    lifetime_hours=0,
+                )
+
+            settings = SimpleNamespace(
+                sources_config_path=Path("config/sources.yaml"),
+                database_dsn=str(db_path),
+                max_signals_per_cycle=20,
+                telegram_channel_id="",
+                monitor_delivery_only_subscribed=True,
+            )
+            logger = logging.getLogger("test.app.cycle-dropped")
+            dedup_store = DedupStore(dedup_path)
+            dropped_dispatcher = _TopicMissingDispatcher()
+
+            try:
+                with (
+                    patch("bot.app.load_sources_config", return_value=[{"id": "source"}]),
+                    patch("bot.app.build_source", return_value=_SingleSignalSource()),
+                ):
+                    published_1 = await _run_cycle(
+                        settings=settings,
+                        http_session=None,
+                        dedup_store=dedup_store,
+                        dispatcher=dropped_dispatcher,
+                        logger=logger,
+                    )
+
+                self.assertEqual(published_1, 0)
+                self.assertEqual(dropped_dispatcher.calls, 1)
+                self.assertTrue(dedup_store.seen("hl_futures_feed:same-signal-1"))
+
+                recording_dispatcher = _RecordingDispatcher()
+                with (
+                    patch("bot.app.load_sources_config", return_value=[{"id": "source"}]),
+                    patch("bot.app.build_source", return_value=_SingleSignalSource()),
+                ):
+                    published_2 = await _run_cycle(
+                        settings=settings,
+                        http_session=None,
+                        dedup_store=dedup_store,
+                        dispatcher=recording_dispatcher,
+                        logger=logger,
+                    )
+
+                self.assertEqual(published_2, 0)
+                self.assertEqual(recording_dispatcher.calls, 0)
+            finally:
+                dedup_store.close()
+
     async def test_retry_queue_skips_jobs_with_known_dedup_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "retry.db"

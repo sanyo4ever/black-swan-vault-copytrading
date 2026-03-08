@@ -357,6 +357,25 @@ class SubscriberBotFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(topic)
             self.assertEqual(topic.message_thread_id, 9191)
 
+    async def test_handle_message_skips_invalid_private_chat_id(self) -> None:
+        settings = SimpleNamespace(
+            telegram_bot_token="123:abc",
+            database_dsn=":memory:",
+            telegram_forum_chat_id="-1004455667788",
+            telegram_join_url="https://t.me/blackswanvaultcopytrading",
+            subscriber_telegram_retry_attempts=1,
+        )
+        logger = logging.getLogger("test.subscriber-bot.invalid-chat-id")
+        send_mock = AsyncMock()
+        with patch("bot.subscriber_bot.send_message", send_mock):
+            await _handle_message(
+                session=None,
+                settings=settings,
+                message={"chat": {"id": None, "type": "private"}, "text": "/start"},
+                logger=logger,
+            )
+        send_mock.assert_not_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()

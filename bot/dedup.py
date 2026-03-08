@@ -40,7 +40,7 @@ class DedupStore:
                 raise RuntimeError(
                     "Postgres driver is not installed. Add `psycopg[binary]` to requirements."
                 )
-            self._connection = psycopg.connect(database_str, autocommit=False)
+            self._connection = psycopg.connect(database_str, autocommit=True)
             self._connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS published_signals (
@@ -73,7 +73,8 @@ class DedupStore:
                 ON published_signals(first_seen_at)
                 """
             )
-        self._connection.commit()
+        if self._driver != "postgres":
+            self._connection.commit()
 
     def seen(self, dedup_key: str) -> bool:
         with self._lock:
@@ -99,7 +100,8 @@ class DedupStore:
                 self._connection.execute(
                     "INSERT OR IGNORE INTO published_signals(dedup_key) VALUES (?)", (dedup_key,)
                 )
-            self._connection.commit()
+            if self._driver != "postgres":
+                self._connection.commit()
         self.cleanup_if_due()
 
     def cleanup_if_due(self) -> int:
@@ -132,7 +134,8 @@ class DedupStore:
                     """,
                     (cutoff.strftime("%Y-%m-%d %H:%M:%S"),),
                 )
-            self._connection.commit()
+            if self._driver != "postgres":
+                self._connection.commit()
             return int(cursor.rowcount or 0)
 
     def close(self) -> None:

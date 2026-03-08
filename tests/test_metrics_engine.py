@@ -106,6 +106,15 @@ class MetricsComputationTests(unittest.TestCase):
         # mean_return = 0.0075, sortino = mean/downside * sqrt(4) = 0.948683...
         self.assertAlmostEqual(float(stats["sortino"] or 0.0), 0.948683, places=5)
 
+    def test_drawdown_uses_closed_pnls_even_when_returns_are_empty(self) -> None:
+        fills = [
+            {"oid": "1", "time": 1, "px": "0", "sz": "0", "closedPnl": "5"},
+            {"oid": "2", "time": 2, "px": "0", "sz": "0", "closedPnl": "-2"},
+        ]
+        stats = self.service._compute_period_stats(fills=fills, account_value=None)
+        self.assertIsNotNone(stats["max_drawdown_pct"])
+        self.assertAlmostEqual(float(stats["max_drawdown_pct"] or 0.0), 33.333333, places=3)
+
 
 class MetricsFetchPipelineTests(unittest.IsolatedAsyncioTestCase):
     async def test_fetch_metrics_builds_full_stats_payload(self) -> None:
