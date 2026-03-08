@@ -264,45 +264,91 @@ class HyperliquidDiscoveryService:
     def _clamp(value: float, low: float, high: float) -> float:
         return max(low, min(high, value))
 
+    def _trade_key(self, item: dict[str, Any]) -> str:
+        oid = item.get("oid")
+        if oid is not None and str(oid).strip():
+            return f"oid:{str(oid).strip()}"
+        tid = item.get("tid")
+        if tid is not None and str(tid).strip():
+            return f"tid:{str(tid).strip()}"
+        coin = str(item.get("coin", "") or item.get("symbol", "")).strip().upper()
+        direction = str(item.get("dir", "")).strip().lower()
+        side = str(item.get("side", "")).strip().upper()
+        ts_bucket = self._to_int(item.get("time")) // 1000
+        px = round(self._to_float(item.get("px")), 8)
+        sz = round(abs(self._to_float(item.get("sz"))), 8)
+        return f"synthetic:{coin}:{direction}:{side}:{ts_bucket}:{px}:{sz}"
+
+    def _aggregate_trades(self, fills: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        grouped: dict[str, dict[str, Any]] = {}
+        for item in fills:
+            if not isinstance(item, dict):
+                continue
+            key = self._trade_key(item)
+            bucket = grouped.setdefault(
+                key,
+                {
+                    "notional": 0.0,
+                    "closed_pnl": 0.0,
+                    "direction": "",
+                    "first_time": 0,
+                    "last_time": 0,
+                },
+            )
+            ts = self._to_int(item.get("time"))
+            if bucket["first_time"] <= 0 or (ts > 0 and ts < int(bucket["first_time"])):
+                bucket["first_time"] = ts
+            if ts > int(bucket["last_time"]):
+                bucket["last_time"] = ts
+
+            px = self._to_float(item.get("px"))
+            sz = self._to_float(item.get("sz"))
+            notional = abs(px * sz) if px > 0 and sz > 0 else 0.0
+            if notional > 0:
+                bucket["notional"] = float(bucket["notional"]) + notional
+
+            closed_pnl = self._to_float(item.get("closedPnl"))
+            if abs(closed_pnl) > 1e-12:
+                bucket["closed_pnl"] = float(bucket["closed_pnl"]) + closed_pnl
+
+            direction = str(item.get("dir", "")).strip().lower()
+            if direction:
+                bucket["direction"] = direction
+
+        aggregated = list(grouped.values())
+        aggregated.sort(key=lambda trade: int(trade.get("last_time") or 0))
+        return aggregated
+
     def _compute_period_stats(
         self,
         *,
         fills: list[dict[str, Any]],
         account_value: float | None,
     ) -> dict[str, float | int | None]:
-        closed_pnls: list[float] = []
+        trades = self._aggregate_trades(fills)
+        notionals = [
+            float(item.get("notional") or 0.0)
+            for item in trades
+            if float(item.get("notional") or 0.0) > 0.0
+        ]
+        closed_trades = [
+            item
+            for item in trades
+            if abs(float(item.get("closed_pnl") or 0.0)) > 1e-12
+        ]
+        closed_pnls = [float(item.get("closed_pnl") or 0.0) for item in closed_trades]
+        realized_pnl = sum(closed_pnls)
+
         returns: list[float] = []
-        notionals: list[float] = []
-
-        equity = 1.0
-        peak_equity = 1.0
-        max_drawdown = 0.0
-
-        for item in fills:
-            px = self._to_float(item.get("px"))
-            sz = self._to_float(item.get("sz"))
-            notional = abs(px * sz) if px > 0 and sz > 0 else 0.0
-            if notional > 0:
-                notionals.append(notional)
-
-            closed_pnl = self._to_float(item.get("closedPnl"))
-            if abs(closed_pnl) <= 1e-12:
-                continue
-            closed_pnls.append(closed_pnl)
-
-            if notional <= 0:
+        for item in closed_trades:
+            notional = float(item.get("notional") or 0.0)
+            closed_pnl = float(item.get("closed_pnl") or 0.0)
+            if notional <= 1e-12:
                 continue
             trade_return = closed_pnl / notional
-            # Guard against extreme outliers from tiny notionals.
             trade_return = max(-0.99, min(10.0, trade_return))
             returns.append(trade_return)
-            equity *= 1.0 + trade_return
-            peak_equity = max(peak_equity, equity)
-            if peak_equity > 0:
-                drawdown = (peak_equity - equity) / peak_equity
-                max_drawdown = max(max_drawdown, drawdown)
 
-        realized_pnl = sum(closed_pnls)
         wins = sum(1 for value in closed_pnls if value > 0)
         losses = sum(1 for value in closed_pnls if value < 0)
         closed_count = wins + losses
@@ -317,12 +363,26 @@ class HyperliquidDiscoveryService:
 
         roi_base = None
         if account_value is not None and abs(account_value) > 1e-9:
-            roi_base = abs(account_value)
+            start_equity_estimate = abs(account_value - realized_pnl)
+            current_equity = abs(account_value)
+            candidates = [value for value in (start_equity_estimate, current_equity) if value > 1e-9]
+            roi_base = max(candidates) if candidates else None
         else:
             volume = sum(notionals)
             if volume > 1e-9:
-                roi_base = volume
+                roi_base = max(volume / max(1, len(notionals)), 1.0)
         roi_pct = ((realized_pnl / roi_base) * 100.0) if roi_base else None
+
+        equity_base = roi_base or max(1.0, sum(notionals) / max(1, len(notionals)))
+        equity = equity_base
+        peak_equity = equity_base
+        max_drawdown = 0.0
+        for trade_pnl in closed_pnls:
+            equity += trade_pnl
+            peak_equity = max(peak_equity, equity)
+            if peak_equity > 0:
+                drawdown = (peak_equity - equity) / peak_equity
+                max_drawdown = max(max_drawdown, drawdown)
 
         mean_return = (sum(returns) / len(returns)) if returns else 0.0
         volatility = self._population_std(returns) if returns else 0.0
@@ -342,7 +402,7 @@ class HyperliquidDiscoveryService:
         )
 
         return {
-            "trade_count": len(fills),
+            "trade_count": len(trades),
             "closed_trade_count": closed_count,
             "realized_pnl": realized_pnl,
             "win_rate": win_rate,
@@ -783,9 +843,10 @@ class HyperliquidDiscoveryService:
         fills_7d = [item for item in normalized if self._to_int(item.get("time")) >= cut_7d]
         fills_30d = [item for item in normalized if self._to_int(item.get("time")) >= cut_30d]
 
-        trades_24h = len(fills_24h)
-        trades_7d = len(fills_7d)
-        trades_30d = len(fills_30d)
+        trades_24h = len(self._aggregate_trades(fills_24h))
+        trades_7d = len(self._aggregate_trades(fills_7d))
+        aggregated_30d = self._aggregate_trades(fills_30d)
+        trades_30d = len(aggregated_30d)
 
         active_hours_24h = len(
             {
@@ -842,11 +903,11 @@ class HyperliquidDiscoveryService:
         period_30d = self._compute_period_stats(fills=fills_30d, account_value=account_value)
 
         fees_30d = sum(abs(self._to_float(item.get("fee"))) for item in fills_30d)
-        long_count = 0
-        for item in fills_30d:
-            direction = str(item.get("dir", "")).lower()
-            if "long" in direction:
-                long_count += 1
+        long_count = sum(
+            1
+            for trade in aggregated_30d
+            if "long" in str(trade.get("direction", "")).lower()
+        )
 
         volume_usd_30d = float(period_30d["volume_usd"] or 0.0)
         realized_pnl_30d = float(period_30d["realized_pnl"] or 0.0)
@@ -884,40 +945,40 @@ class HyperliquidDiscoveryService:
             else None
         )
 
-        roi_score = self._clamp(roi_30d, -50.0, 200.0) / 200.0
-        sharpe_score = self._clamp(sharpe_30d, -2.0, 5.0) / 5.0
-        sortino_score = self._clamp(sortino_30d, -2.0, 7.0) / 7.0
+        roi_score = self._clamp((roi_30d + 20.0) / 120.0, 0.0, 1.0)
+        sharpe_score = self._clamp((sharpe_30d + 1.0) / 4.0, 0.0, 1.0)
+        sortino_score = self._clamp((sortino_30d + 1.0) / 5.0, 0.0, 1.0)
         win_score = self._clamp(float(win_rate_30d or 0.0), 0.0, 1.0)
         activity_score = (
-            min(1.0, trades_30d / 180.0) * 0.6
-            + min(1.0, active_days_30d / 30.0) * 0.4
+            min(1.0, trades_30d / 180.0) * 0.5
+            + min(1.0, active_days_30d / 30.0) * 0.5
         )
 
-        drawdown_penalty = (
+        drawdown_risk = (
             min(1.0, max(0.0, float(drawdown_30d)) / 35.0)
             if drawdown_30d is not None
-            else 1.0
+            else 0.0
         )
-        volatility_penalty = (
+        volatility_risk = (
             min(1.0, max(0.0, float(volatility_30d)) / 12.0)
             if volatility_30d is not None
-            else 1.0
+            else 0.0
         )
-        fee_penalty = min(1.0, fees_30d / 10_000.0)
+        fee_risk = min(1.0, fees_30d / 10_000.0)
 
         weighted_base = (
-            (roi_score * 0.28)
-            + (sharpe_score * 0.18)
+            (roi_score * 0.26)
+            + (sharpe_score * 0.16)
             + (sortino_score * 0.16)
             + (win_score * 0.20)
-            + (activity_score * 0.18)
+            + (activity_score * 0.22)
         )
-        weighted_penalty = (
-            (drawdown_penalty * 0.18)
-            + (volatility_penalty * 0.10)
-            + (fee_penalty * 0.04)
+        risk_penalty = (
+            (drawdown_risk * 0.60)
+            + (volatility_risk * 0.25)
+            + (fee_risk * 0.15)
         )
-        score = max(0.0, (weighted_base - weighted_penalty) * 100.0)
+        score = self._clamp(weighted_base * (1.0 - risk_penalty), 0.0, 1.0) * 100.0
 
         stats_payload = {
             "vault_tvl": candidate["vault_tvl"],
@@ -986,11 +1047,11 @@ class HyperliquidDiscoveryService:
                 "sortino_score": round(sortino_score, 6),
                 "win_rate_score": round(win_score, 6),
                 "activity_score": round(activity_score, 6),
-                "drawdown_penalty": round(drawdown_penalty, 6),
-                "volatility_penalty": round(volatility_penalty, 6),
-                "fee_penalty": round(fee_penalty, 6),
+                "drawdown_risk": round(drawdown_risk, 6),
+                "volatility_risk": round(volatility_risk, 6),
+                "fee_risk": round(fee_risk, 6),
                 "weighted_base": round(weighted_base, 6),
-                "weighted_penalty": round(weighted_penalty, 6),
+                "risk_penalty": round(risk_penalty, 6),
             },
             "has_month_history": bool(age_days is not None and age_days >= self._config.min_age_days),
         }
@@ -1131,7 +1192,10 @@ class HyperliquidDiscoveryService:
                     skipped_win_rate += 1
                     continue
                 drawdown_30d = item.get("max_drawdown_30d")
-                if drawdown_30d is None or float(drawdown_30d) > self._config.max_drawdown_30d_pct:
+                if (
+                    drawdown_30d is not None
+                    and float(drawdown_30d) > self._config.max_drawdown_30d_pct
+                ):
                     skipped_drawdown += 1
                     continue
                 realized_pnl_30d = float(item.get("realized_pnl_30d") or 0.0)

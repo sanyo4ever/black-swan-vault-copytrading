@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import UTC, datetime
+from typing import Awaitable, Callable, TypeVar
 
 import aiohttp
 
@@ -26,6 +27,9 @@ from bot.trader_store import (
 
 _START_LOCKS: dict[str, asyncio.Lock] = {}
 _START_LOCKS_GUARD = asyncio.Lock()
+_CHAT_LOCKS: dict[int, asyncio.Lock] = {}
+_CHAT_LOCKS_GUARD = asyncio.Lock()
+_T = TypeVar("_T")
 
 
 def _short(address: str) -> str:
@@ -89,10 +93,113 @@ async def _get_start_lock(*, chat_id: int, trader_address: str) -> asyncio.Lock:
         return lock
 
 
-async def _send_welcome(*, session: aiohttp.ClientSession, settings, chat_id: int) -> None:
-    await send_message(
-        session,
-        bot_token=settings.telegram_bot_token,
+async def _get_chat_lock(*, chat_id: int) -> asyncio.Lock:
+    async with _CHAT_LOCKS_GUARD:
+        lock = _CHAT_LOCKS.get(int(chat_id))
+        if lock is None:
+            lock = asyncio.Lock()
+            _CHAT_LOCKS[int(chat_id)] = lock
+        return lock
+
+
+def _store_call_sync(settings, fn):
+    with TraderStore(settings.database_dsn) as store:
+        return fn(store)
+
+
+async def _store_call(settings, fn):
+    return await asyncio.to_thread(_store_call_sync, settings, fn)
+
+
+async def _telegram_call_with_retry(
+    *,
+    logger: logging.Logger,
+    label: str,
+    max_attempts: int,
+    call: Callable[[], Awaitable[_T]],
+) -> _T:
+    attempts = max(1, int(max_attempts))
+    backoff_seconds = 1.0
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return await call()
+        except TelegramClientError as exc:
+            last_error = exc
+            retryable = exc.is_flood_limit() or exc.is_transient()
+            if not retryable or attempt >= attempts:
+                raise
+            retry_after = exc.retry_after if exc.retry_after and exc.retry_after > 0 else None
+            delay_seconds = int(retry_after or backoff_seconds)
+            delay_seconds = max(1, min(30, delay_seconds))
+            logger.warning(
+                "Telegram call retry label=%s attempt=%s/%s delay=%ss error=%s",
+                label,
+                attempt,
+                attempts,
+                delay_seconds,
+                exc,
+            )
+            await asyncio.sleep(delay_seconds)
+            backoff_seconds = min(backoff_seconds * 2.0, 30.0)
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+            last_error = exc
+            if attempt >= attempts:
+                raise
+            delay_seconds = int(max(1.0, min(30.0, backoff_seconds)))
+            logger.warning(
+                "Network retry label=%s attempt=%s/%s delay=%ss error=%s",
+                label,
+                attempt,
+                attempts,
+                delay_seconds,
+                exc,
+            )
+            await asyncio.sleep(delay_seconds)
+            backoff_seconds = min(backoff_seconds * 2.0, 30.0)
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError(f"Unexpected retry loop termination for {label}")
+
+
+def _retry_attempts(settings) -> int:
+    return max(1, int(getattr(settings, "subscriber_telegram_retry_attempts", 5)))
+
+
+async def _send_message_safe(
+    *,
+    session: aiohttp.ClientSession,
+    settings,
+    logger: logging.Logger,
+    chat_id: int,
+    text: str,
+    message_thread_id: int | None = None,
+) -> None:
+    await _telegram_call_with_retry(
+        logger=logger,
+        label="sendMessage",
+        max_attempts=_retry_attempts(settings),
+        call=lambda: send_message(
+            session,
+            bot_token=settings.telegram_bot_token,
+            chat_id=chat_id,
+            text=text,
+            message_thread_id=message_thread_id,
+        ),
+    )
+
+
+async def _send_welcome(
+    *,
+    session: aiohttp.ClientSession,
+    settings,
+    chat_id: int,
+    logger: logging.Logger,
+) -> None:
+    await _send_message_safe(
+        session=session,
+        settings=settings,
+        logger=logger,
         chat_id=chat_id,
         text=(
             "<b>CryptoInsider Bot</b>\n\n"
@@ -119,11 +226,16 @@ async def _delete_topics_best_effort(
         if item.message_thread_id is None:
             continue
         try:
-            await delete_forum_topic(
-                session,
-                bot_token=settings.telegram_bot_token,
-                chat_id=chat_id,
-                message_thread_id=item.message_thread_id,
+            await _telegram_call_with_retry(
+                logger=logger,
+                label="deleteForumTopic",
+                max_attempts=_retry_attempts(settings),
+                call=lambda: delete_forum_topic(
+                    session,
+                    bot_token=settings.telegram_bot_token,
+                    chat_id=chat_id,
+                    message_thread_id=item.message_thread_id,
+                ),
             )
         except Exception as exc:
             failed += 1
@@ -133,11 +245,13 @@ async def _delete_topics_best_effort(
                 item.message_thread_id,
                 exc,
             )
-            with TraderStore(settings.database_dsn) as store:
-                store.set_delivery_session_cleanup_error(
+            await _store_call(
+                settings,
+                lambda store: store.set_delivery_session_cleanup_error(
                     session_id=item.session_id,
                     error=str(exc),
-                )
+                ),
+            )
     return failed
 
 
@@ -150,14 +264,15 @@ async def _handle_start_with_payload(
     logger: logging.Logger,
 ) -> None:
     if not payload.startswith("sub_"):
-        await _send_welcome(session=session, settings=settings, chat_id=chat_id)
+        await _send_welcome(session=session, settings=settings, chat_id=chat_id, logger=logger)
         return
 
     address = payload.removeprefix("sub_").strip().lower()
     if not address:
-        await send_message(
-            session,
-            bot_token=settings.telegram_bot_token,
+        await _send_message_safe(
+            session=session,
+            settings=settings,
+            logger=logger,
             chat_id=chat_id,
             text="Invalid subscription payload.",
         )
@@ -165,40 +280,45 @@ async def _handle_start_with_payload(
 
     start_lock = await _get_start_lock(chat_id=chat_id, trader_address=address)
     async with start_lock:
-        with TraderStore(settings.database_dsn) as store:
-            trader = store.get_trader(address=address)
-            if trader is None:
-                await send_message(
-                    session,
-                    bot_token=settings.telegram_bot_token,
-                    chat_id=chat_id,
-                    text="Trader not found in database.",
-                )
-                return
-            if trader.moderation_state == MODERATION_BLACKLIST:
-                await send_message(
-                    session,
-                    bot_token=settings.telegram_bot_token,
-                    chat_id=chat_id,
-                    text="Trader is not available for subscription.",
-                )
-                return
-            if trader.status in {STATUS_STALE, STATUS_ARCHIVED}:
-                await send_message(
-                    session,
-                    bot_token=settings.telegram_bot_token,
-                    chat_id=chat_id,
-                    text=(
-                        "Trader is currently not eligible for new subscriptions.\n"
-                        "Pick another trader from the listed catalog."
-                    ),
-                )
-                return
-            previous_sessions = [
+        trader = await _store_call(settings, lambda store: store.get_trader(address=address))
+        if trader is None:
+            await _send_message_safe(
+                session=session,
+                settings=settings,
+                logger=logger,
+                chat_id=chat_id,
+                text="Trader not found in database.",
+            )
+            return
+        if trader.moderation_state == MODERATION_BLACKLIST:
+            await _send_message_safe(
+                session=session,
+                settings=settings,
+                logger=logger,
+                chat_id=chat_id,
+                text="Trader is not available for subscription.",
+            )
+            return
+        if trader.status in {STATUS_STALE, STATUS_ARCHIVED}:
+            await _send_message_safe(
+                session=session,
+                settings=settings,
+                logger=logger,
+                chat_id=chat_id,
+                text=(
+                    "Trader is currently not eligible for new subscriptions.\n"
+                    "Pick another trader from the listed catalog."
+                ),
+            )
+            return
+        previous_sessions = await _store_call(
+            settings,
+            lambda store: [
                 item
                 for item in store.list_delivery_sessions_for_chat(chat_id=chat_id)
                 if item.trader_address == trader.address
-            ]
+            ],
+        )
 
         topic_name = f"{_short(address)} | Live"
         topic_result = None
@@ -206,11 +326,16 @@ async def _handle_start_with_payload(
         feed_mode = "chat"
         try:
             try:
-                topic_result = await create_forum_topic(
-                    session,
-                    bot_token=settings.telegram_bot_token,
-                    chat_id=chat_id,
-                    name=topic_name,
+                topic_result = await _telegram_call_with_retry(
+                    logger=logger,
+                    label="createForumTopic",
+                    max_attempts=_retry_attempts(settings),
+                    call=lambda: create_forum_topic(
+                        session,
+                        bot_token=settings.telegram_bot_token,
+                        chat_id=chat_id,
+                        name=topic_name,
+                    ),
                 )
                 candidate_thread_id = int(topic_result.get("message_thread_id", 0))
                 if candidate_thread_id <= 0:
@@ -229,14 +354,16 @@ async def _handle_start_with_payload(
                 else:
                     raise
 
-            with TraderStore(settings.database_dsn) as store:
-                session_info = store.create_subscription_with_session(
+            session_info = await _store_call(
+                settings,
+                lambda store: store.create_subscription_with_session(
                     chat_id=chat_id,
                     trader_address=address,
                     message_thread_id=thread_id,
                     topic_name=topic_name,
                     lifetime_hours=settings.subscription_lifetime_hours,
-                )
+                ),
+            )
             logger.info(
                 "Subscription started trader=%s chat_id=%s feed_mode=%s thread=%s expires_at=%s",
                 address,
@@ -247,9 +374,10 @@ async def _handle_start_with_payload(
             )
 
             if thread_id is not None:
-                await send_message(
-                    session,
-                    bot_token=settings.telegram_bot_token,
+                await _send_message_safe(
+                    session=session,
+                    settings=settings,
+                    logger=logger,
                     chat_id=chat_id,
                     message_thread_id=thread_id,
                     text=(
@@ -260,9 +388,10 @@ async def _handle_start_with_payload(
                     ),
                 )
             else:
-                await send_message(
-                    session,
-                    bot_token=settings.telegram_bot_token,
+                await _send_message_safe(
+                    session=session,
+                    settings=settings,
+                    logger=logger,
                     chat_id=chat_id,
                     text=(
                         "<b>Session started ✅</b>\n"
@@ -272,9 +401,10 @@ async def _handle_start_with_payload(
                     ),
                 )
 
-            await send_message(
-                session,
-                bot_token=settings.telegram_bot_token,
+            await _send_message_safe(
+                session=session,
+                settings=settings,
+                logger=logger,
                 chat_id=chat_id,
                 text=(
                     "<b>Done ✅</b>\n"
@@ -296,17 +426,23 @@ async def _handle_start_with_payload(
             logger.exception("Failed to start subscription for chat %s: %s", chat_id, exc)
             if topic_result and topic_result.get("message_thread_id"):
                 try:
-                    await delete_forum_topic(
-                        session,
-                        bot_token=settings.telegram_bot_token,
-                        chat_id=chat_id,
-                        message_thread_id=int(topic_result["message_thread_id"]),
+                    await _telegram_call_with_retry(
+                        logger=logger,
+                        label="deleteForumTopic",
+                        max_attempts=_retry_attempts(settings),
+                        call=lambda: delete_forum_topic(
+                            session,
+                            bot_token=settings.telegram_bot_token,
+                            chat_id=chat_id,
+                            message_thread_id=int(topic_result["message_thread_id"]),
+                        ),
                     )
                 except Exception:
                     pass
-            await send_message(
-                session,
-                bot_token=settings.telegram_bot_token,
+            await _send_message_safe(
+                session=session,
+                settings=settings,
+                logger=logger,
                 chat_id=chat_id,
                 text=(
                     "Failed to start the subscription.\n"
@@ -343,13 +479,16 @@ async def _handle_message(
         return
 
     if command == "my":
-        with TraderStore(settings.database_dsn) as store:
-            sessions = store.list_delivery_sessions_for_chat(chat_id=chat_id)
+        sessions = await _store_call(
+            settings,
+            lambda store: store.list_delivery_sessions_for_chat(chat_id=chat_id),
+        )
 
         if not sessions:
-            await send_message(
-                session,
-                bot_token=settings.telegram_bot_token,
+            await _send_message_safe(
+                session=session,
+                settings=settings,
+                logger=logger,
                 chat_id=chat_id,
                 text="No active trader subscriptions yet. Pick a trader in the catalog.",
             )
@@ -368,9 +507,10 @@ async def _handle_message(
             )
         lines.append("\nStop a trader: <code>/stop 0x...</code>")
 
-        await send_message(
-            session,
-            bot_token=settings.telegram_bot_token,
+        await _send_message_safe(
+            session=session,
+            settings=settings,
+            logger=logger,
             chat_id=chat_id,
             text="\n".join(lines),
         )
@@ -380,24 +520,28 @@ async def _handle_message(
         parts = arg.strip().split()
         address = parts[0].strip().lower() if parts else ""
         if not address:
-            await send_message(
-                session,
-                bot_token=settings.telegram_bot_token,
+            await _send_message_safe(
+                session=session,
+                settings=settings,
+                logger=logger,
                 chat_id=chat_id,
                 text="Usage: <code>/stop 0x...</code>",
             )
             return
 
-        with TraderStore(settings.database_dsn) as store:
-            sessions = store.cancel_chat_trader_subscriptions(
+        sessions = await _store_call(
+            settings,
+            lambda store: store.cancel_chat_trader_subscriptions(
                 chat_id=chat_id,
                 trader_address=address,
-            )
+            ),
+        )
 
         if not sessions:
-            await send_message(
-                session,
-                bot_token=settings.telegram_bot_token,
+            await _send_message_safe(
+                session=session,
+                settings=settings,
+                logger=logger,
                 chat_id=chat_id,
                 text="No active subscription found for this trader.",
             )
@@ -419,15 +563,16 @@ async def _handle_message(
             len(sessions),
             failed,
         )
-        await send_message(
-            session,
-            bot_token=settings.telegram_bot_token,
+        await _send_message_safe(
+            session=session,
+            settings=settings,
+            logger=logger,
             chat_id=chat_id,
             text=f"Subscription for <code>{_short(address)}</code> has been stopped{suffix}.",
         )
         return
 
-    await _send_welcome(session=session, settings=settings, chat_id=chat_id)
+    await _send_welcome(session=session, settings=settings, chat_id=chat_id, logger=logger)
 
 
 async def run_bot() -> None:
@@ -441,50 +586,52 @@ async def run_bot() -> None:
     )
     logger = logging.getLogger("cryptoinsider.subscriber-bot")
     set_telegram_http_logging(settings.log_telegram_http)
-    logger.info("Service started long_poll_timeout=%s", 50)
+    logger.info(
+        "Service started long_poll_timeout=%s update_concurrency=%s retry_attempts=%s",
+        50,
+        settings.subscriber_update_concurrency,
+        settings.subscriber_telegram_retry_attempts,
+    )
 
     long_poll_timeout = 50
     timeout = aiohttp.ClientTimeout(total=long_poll_timeout + 20)
     offset: int | None = None
     cycle = 0
+    update_concurrency = max(1, int(settings.subscriber_update_concurrency))
+    update_sem = asyncio.Semaphore(update_concurrency)
+    max_inflight = max(update_concurrency * 4, 32)
 
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        while True:
-            cycle += 1
-            try:
-                with bind_log_context(poll_cycle=cycle, poll_id=new_trace_id("poll")):
-                    updates = await get_updates(
-                        session,
-                        bot_token=settings.telegram_bot_token,
-                        offset=offset,
-                        timeout=long_poll_timeout,
-                    )
-            except asyncio.TimeoutError:
-                logger.warning("getUpdates timeout; retrying")
-                continue
-            except Exception as exc:
-                logger.exception("Failed to fetch updates: %s", exc)
-                await asyncio.sleep(3)
-                continue
-
-            if not updates:
-                continue
-
-            for update in updates:
-                update_id = update.get("update_id")
-                if isinstance(update_id, int):
-                    offset = update_id + 1
-
-                message = update.get("message")
-                if not isinstance(message, dict):
-                    continue
-
-                try:
-                    chat = message.get("chat")
-                    chat_id_raw = chat.get("id") if isinstance(chat, dict) else None
-                    chat_id = int(chat_id_raw) if isinstance(chat_id_raw, (int, float)) else None
-                    text = str(message.get("text", "") or "")
-                    command, _ = _normalize_command(text)
+    async def _process_update(update: dict) -> None:
+        update_id = update.get("update_id")
+        message = update.get("message")
+        if not isinstance(message, dict):
+            return
+        chat = message.get("chat")
+        chat_id_raw = chat.get("id") if isinstance(chat, dict) else None
+        chat_id = int(chat_id_raw) if isinstance(chat_id_raw, (int, float)) else None
+        text = str(message.get("text", "") or "")
+        command, _ = _normalize_command(text)
+        lock: asyncio.Lock | None = None
+        if chat_id is not None:
+            lock = await _get_chat_lock(chat_id=chat_id)
+        try:
+            async with update_sem:
+                if lock is not None:
+                    async with lock:
+                        with bind_log_context(
+                            update_id=update_id,
+                            update_ctx_id=new_trace_id("upd"),
+                            chat_id=chat_id,
+                            command=command or "-",
+                        ):
+                            logger.info("Processing update")
+                            await _handle_message(
+                                session=session,
+                                settings=settings,
+                                message=message,
+                                logger=logger,
+                            )
+                else:
                     with bind_log_context(
                         update_id=update_id,
                         update_ctx_id=new_trace_id("upd"),
@@ -498,8 +645,59 @@ async def run_bot() -> None:
                             message=message,
                             logger=logger,
                         )
-                except Exception as exc:
-                    logger.exception("Failed to process update %s: %s", update_id, exc)
+        except Exception as exc:
+            logger.exception("Failed to process update %s: %s", update_id, exc)
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        inflight: set[asyncio.Task[None]] = set()
+        while True:
+            cycle += 1
+            try:
+                with bind_log_context(poll_cycle=cycle, poll_id=new_trace_id("poll")):
+                    updates = await _telegram_call_with_retry(
+                        logger=logger,
+                        label="getUpdates",
+                        max_attempts=_retry_attempts(settings),
+                        call=lambda: get_updates(
+                            session,
+                            bot_token=settings.telegram_bot_token,
+                            offset=offset,
+                            timeout=long_poll_timeout,
+                        ),
+                    )
+            except asyncio.TimeoutError:
+                logger.warning("getUpdates timeout; retrying")
+                continue
+            except Exception as exc:
+                logger.exception("Failed to fetch updates: %s", exc)
+                await asyncio.sleep(3)
+                continue
+
+            if not updates:
+                continue
+
+            max_update_id: int | None = None
+            for update in updates:
+                update_id = update.get("update_id")
+                if isinstance(update_id, int):
+                    if max_update_id is None or update_id > max_update_id:
+                        max_update_id = update_id
+                task = asyncio.create_task(_process_update(update))
+                inflight.add(task)
+                if len(inflight) >= max_inflight:
+                    done, pending = await asyncio.wait(
+                        inflight,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    inflight = set(pending)
+                    for completed in done:
+                        try:
+                            completed.result()
+                        except Exception as exc:  # pragma: no cover - defensive
+                            logger.exception("Unhandled update task error: %s", exc)
+
+            if max_update_id is not None:
+                offset = max_update_id + 1
 
 
 if __name__ == "__main__":

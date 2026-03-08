@@ -84,11 +84,12 @@ Key tables:
 ## 6. Delivery Reliability Rules
 
 - Dedup key: `source_id:external_id` (stored in `published_signals`).
+- Dedup retention: TTL cleanup on `published_signals`.
 - Retry queue: `delivery_retry_queue` with exponential backoff and `retry_after` support.
 - Error policies:
-  - `flood/transient` -> queue retry.
+  - `flood/transient` -> queue retry + batch-level global flood backoff.
   - `topic_missing` -> deactivate only affected chat+trader target.
-  - `chat_unavailable`/bot blocked -> deactivate all active targets for that chat.
+  - `chat_unavailable`/bot blocked -> deactivate only affected chat+trader target.
 - Dispatcher enforces:
   - global send concurrency,
   - per-chat serialization,

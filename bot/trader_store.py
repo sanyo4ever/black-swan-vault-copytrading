@@ -255,8 +255,84 @@ class TraderStore:
 
     def _q(self, sql: str) -> str:
         if self._driver == "postgres":
-            return sql.replace("?", "%s")
+            return self._convert_qmark_to_postgres(sql)
         return sql
+
+    @staticmethod
+    def _convert_qmark_to_postgres(sql: str) -> str:
+        out: list[str] = []
+        in_single = False
+        in_double = False
+        in_line_comment = False
+        in_block_comment = False
+        i = 0
+        size = len(sql)
+        while i < size:
+            ch = sql[i]
+            nxt = sql[i + 1] if i + 1 < size else ""
+
+            if in_line_comment:
+                out.append(ch)
+                if ch == "\n":
+                    in_line_comment = False
+                i += 1
+                continue
+            if in_block_comment:
+                out.append(ch)
+                if ch == "*" and nxt == "/":
+                    out.append(nxt)
+                    in_block_comment = False
+                    i += 2
+                    continue
+                i += 1
+                continue
+            if in_single:
+                out.append(ch)
+                if ch == "'" and nxt == "'":
+                    out.append(nxt)
+                    i += 2
+                    continue
+                if ch == "'":
+                    in_single = False
+                i += 1
+                continue
+            if in_double:
+                out.append(ch)
+                if ch == '"':
+                    in_double = False
+                i += 1
+                continue
+
+            if ch == "-" and nxt == "-":
+                out.append(ch)
+                out.append(nxt)
+                in_line_comment = True
+                i += 2
+                continue
+            if ch == "/" and nxt == "*":
+                out.append(ch)
+                out.append(nxt)
+                in_block_comment = True
+                i += 2
+                continue
+            if ch == "'":
+                out.append(ch)
+                in_single = True
+                i += 1
+                continue
+            if ch == '"':
+                out.append(ch)
+                in_double = True
+                i += 1
+                continue
+            if ch == "?":
+                out.append("%s")
+                i += 1
+                continue
+
+            out.append(ch)
+            i += 1
+        return "".join(out)
 
     def _execute(self, sql: str, params: Iterable[Any] | tuple[Any, ...] = ()) -> Any:
         return self._connection.execute(self._q(sql), tuple(params))
@@ -404,6 +480,65 @@ class TraderStore:
         except Exception:
             self._connection.rollback()
             raise
+
+    def acquire_runtime_lease(
+        self,
+        *,
+        lock_name: str,
+        holder: str,
+        ttl_seconds: int,
+    ) -> bool:
+        normalized_lock = str(lock_name or "").strip().lower()
+        normalized_holder = str(holder or "").strip()
+        if not normalized_lock or not normalized_holder:
+            return False
+        ttl = max(5, int(ttl_seconds))
+
+        if self._driver == "postgres":
+            cursor = self._execute(
+                """
+                INSERT INTO worker_runtime_leases(lock_name, holder, expires_at, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP + (? * INTERVAL '1 second'), CURRENT_TIMESTAMP)
+                ON CONFLICT(lock_name) DO UPDATE SET
+                    holder = EXCLUDED.holder,
+                    expires_at = EXCLUDED.expires_at,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE worker_runtime_leases.expires_at <= CURRENT_TIMESTAMP
+                   OR worker_runtime_leases.holder = EXCLUDED.holder
+                """,
+                (normalized_lock, normalized_holder, ttl),
+            )
+        else:
+            cursor = self._execute(
+                """
+                INSERT INTO worker_runtime_leases(lock_name, holder, expires_at, updated_at)
+                VALUES (?, ?, datetime('now', ?), CURRENT_TIMESTAMP)
+                ON CONFLICT(lock_name) DO UPDATE SET
+                    holder = excluded.holder,
+                    expires_at = excluded.expires_at,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE worker_runtime_leases.expires_at <= CURRENT_TIMESTAMP
+                   OR worker_runtime_leases.holder = excluded.holder
+                """,
+                (normalized_lock, normalized_holder, f"+{ttl} seconds"),
+            )
+        acquired = int(cursor.rowcount or 0) > 0
+        self._connection.commit()
+        return acquired
+
+    def release_runtime_lease(self, *, lock_name: str, holder: str) -> None:
+        normalized_lock = str(lock_name or "").strip().lower()
+        normalized_holder = str(holder or "").strip()
+        if not normalized_lock or not normalized_holder:
+            return
+        self._execute(
+            """
+            DELETE FROM worker_runtime_leases
+            WHERE lock_name = ? AND holder = ?
+            """,
+            (normalized_lock, normalized_holder),
+        )
+        self._connection.commit()
 
     def _ensure_schema_sqlite(self) -> None:
         self._execute(
@@ -793,6 +928,22 @@ class TraderStore:
             """
             CREATE INDEX IF NOT EXISTS idx_monitoring_pool_next_poll
             ON trader_monitoring_pool(next_poll_at)
+            """
+        )
+        self._execute(
+            """
+            CREATE TABLE IF NOT EXISTS worker_runtime_leases (
+                lock_name TEXT PRIMARY KEY,
+                holder TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_worker_runtime_leases_expiry
+            ON worker_runtime_leases(expires_at)
             """
         )
         self._execute(
@@ -1222,6 +1373,22 @@ class TraderStore:
             """
             CREATE INDEX IF NOT EXISTS idx_monitoring_pool_next_poll
             ON trader_monitoring_pool(next_poll_at)
+            """
+        )
+        self._execute(
+            """
+            CREATE TABLE IF NOT EXISTS worker_runtime_leases (
+                lock_name TEXT PRIMARY KEY,
+                holder TEXT NOT NULL,
+                expires_at TIMESTAMP NOT NULL,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_worker_runtime_leases_expiry
+            ON worker_runtime_leases(expires_at)
             """
         )
         self._execute(
@@ -2427,136 +2594,163 @@ class TraderStore:
             "cold": max(0, len(payload) - hot_count - warm_count),
         }
 
-    def refresh_catalog_current(self, *, activity_window_minutes: int = 60) -> int:
+    def refresh_catalog_current(
+        self,
+        *,
+        activity_window_minutes: int = 60,
+        batch_size: int = 2000,
+    ) -> int:
         now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
-        rows = self._execute(
-            """
-            SELECT
-                address,
-                label,
-                source,
-                status,
-                moderation_state,
-                moderation_note,
-                age_days,
-                trades_24h,
-                active_hours_24h,
-                trades_7d,
-                trades_30d,
-                active_days_30d,
-                win_rate_30d,
-                realized_pnl_30d,
-                volume_usd_30d,
-                score,
-                last_fill_time,
-                stats_json
-            FROM tracked_traders
-            """
-        ).fetchall()
+        chunk_limit = max(100, int(batch_size))
+        last_address = ""
+        total_upserted = 0
 
-        payload: list[tuple[Any, ...]] = []
-        for row in rows:
-            score = float(row["score"] or 0.0)
-            trades_30d = int(row["trades_30d"] or 0)
-            last_fill = int(row["last_fill_time"]) if row["last_fill_time"] is not None else None
-            if last_fill is None:
-                recency_component = 0.0
-            else:
-                age_minutes = max(0.0, (now_ms - last_fill) / 60000.0)
-                recency_component = (
-                    max(0.0, 1.0 - (age_minutes / max(1, activity_window_minutes))) * 40.0
-                )
-            frequency_component = min(30.0, trades_30d / 12.0)
-            quality_component = min(30.0, max(0.0, score))
-            activity_score = round(recency_component + frequency_component + quality_component, 4)
-            payload.append(
-                (
-                    str(row["address"]),
-                    row["label"],
-                    str(row["source"]),
-                    str(row["status"]),
-                    str(row["moderation_state"]),
-                    row["moderation_note"],
-                    row["age_days"],
-                    row["trades_24h"],
-                    row["active_hours_24h"],
-                    row["trades_7d"],
-                    row["trades_30d"],
-                    row["active_days_30d"],
-                    row["win_rate_30d"],
-                    row["realized_pnl_30d"],
-                    row["volume_usd_30d"],
-                    row["score"],
-                    activity_score,
-                    last_fill,
-                    row["stats_json"],
-                )
-            )
+        while True:
+            rows = self._execute(
+                """
+                SELECT
+                    address,
+                    label,
+                    source,
+                    status,
+                    moderation_state,
+                    moderation_note,
+                    age_days,
+                    trades_24h,
+                    active_hours_24h,
+                    trades_7d,
+                    trades_30d,
+                    active_days_30d,
+                    win_rate_30d,
+                    realized_pnl_30d,
+                    volume_usd_30d,
+                    score,
+                    last_fill_time,
+                    stats_json
+                FROM tracked_traders
+                WHERE address > ?
+                ORDER BY address ASC
+                LIMIT ?
+                """,
+                (last_address, chunk_limit),
+            ).fetchall()
+            if not rows:
+                break
 
-        keep = [str(item[0]) for item in payload]
-        try:
-            if payload:
-                self._executemany(
-                    """
-                    INSERT INTO catalog_current(
-                        address,
-                        label,
-                        source,
-                        status,
-                        moderation_state,
-                        moderation_note,
-                        age_days,
-                        trades_24h,
-                        active_hours_24h,
-                        trades_7d,
-                        trades_30d,
-                        active_days_30d,
-                        win_rate_30d,
-                        realized_pnl_30d,
-                        volume_usd_30d,
-                        score,
-                        activity_score,
-                        last_fill_time,
-                        stats_json,
-                        refreshed_at
+            payload: list[tuple[Any, ...]] = []
+            for row in rows:
+                score = float(row["score"] or 0.0)
+                trades_30d = int(row["trades_30d"] or 0)
+                last_fill = int(row["last_fill_time"]) if row["last_fill_time"] is not None else None
+                if last_fill is None:
+                    recency_component = 0.0
+                else:
+                    age_minutes = max(0.0, (now_ms - last_fill) / 60000.0)
+                    recency_component = (
+                        max(0.0, 1.0 - (age_minutes / max(1, activity_window_minutes))) * 40.0
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                    ON CONFLICT(address) DO UPDATE SET
-                        label = excluded.label,
-                        source = excluded.source,
-                        status = excluded.status,
-                        moderation_state = excluded.moderation_state,
-                        moderation_note = excluded.moderation_note,
-                        age_days = excluded.age_days,
-                        trades_24h = excluded.trades_24h,
-                        active_hours_24h = excluded.active_hours_24h,
-                        trades_7d = excluded.trades_7d,
-                        trades_30d = excluded.trades_30d,
-                        active_days_30d = excluded.active_days_30d,
-                        win_rate_30d = excluded.win_rate_30d,
-                        realized_pnl_30d = excluded.realized_pnl_30d,
-                        volume_usd_30d = excluded.volume_usd_30d,
-                        score = excluded.score,
-                        activity_score = excluded.activity_score,
-                        last_fill_time = excluded.last_fill_time,
-                        stats_json = excluded.stats_json,
-                        refreshed_at = CURRENT_TIMESTAMP
-                    """,
-                    payload,
+                frequency_component = min(30.0, trades_30d / 12.0)
+                quality_component = min(30.0, max(0.0, score))
+                activity_score = round(recency_component + frequency_component + quality_component, 4)
+                payload.append(
+                    (
+                        str(row["address"]),
+                        row["label"],
+                        str(row["source"]),
+                        str(row["status"]),
+                        str(row["moderation_state"]),
+                        row["moderation_note"],
+                        row["age_days"],
+                        row["trades_24h"],
+                        row["active_hours_24h"],
+                        row["trades_7d"],
+                        row["trades_30d"],
+                        row["active_days_30d"],
+                        row["win_rate_30d"],
+                        row["realized_pnl_30d"],
+                        row["volume_usd_30d"],
+                        row["score"],
+                        activity_score,
+                        last_fill,
+                        row["stats_json"],
+                    )
                 )
-            if keep:
-                placeholders = ",".join("?" for _ in keep)
-                self._execute(
-                    f"DELETE FROM catalog_current WHERE address NOT IN ({placeholders})",
-                    keep,
+
+            try:
+                if payload:
+                    self._executemany(
+                        """
+                        INSERT INTO catalog_current(
+                            address,
+                            label,
+                            source,
+                            status,
+                            moderation_state,
+                            moderation_note,
+                            age_days,
+                            trades_24h,
+                            active_hours_24h,
+                            trades_7d,
+                            trades_30d,
+                            active_days_30d,
+                            win_rate_30d,
+                            realized_pnl_30d,
+                            volume_usd_30d,
+                            score,
+                            activity_score,
+                            last_fill_time,
+                            stats_json,
+                            refreshed_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                        ON CONFLICT(address) DO UPDATE SET
+                            label = excluded.label,
+                            source = excluded.source,
+                            status = excluded.status,
+                            moderation_state = excluded.moderation_state,
+                            moderation_note = excluded.moderation_note,
+                            age_days = excluded.age_days,
+                            trades_24h = excluded.trades_24h,
+                            active_hours_24h = excluded.active_hours_24h,
+                            trades_7d = excluded.trades_7d,
+                            trades_30d = excluded.trades_30d,
+                            active_days_30d = excluded.active_days_30d,
+                            win_rate_30d = excluded.win_rate_30d,
+                            realized_pnl_30d = excluded.realized_pnl_30d,
+                            volume_usd_30d = excluded.volume_usd_30d,
+                            score = excluded.score,
+                            activity_score = excluded.activity_score,
+                            last_fill_time = excluded.last_fill_time,
+                            stats_json = excluded.stats_json,
+                            refreshed_at = CURRENT_TIMESTAMP
+                        """,
+                        payload,
+                    )
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
+
+            total_upserted += len(payload)
+            last_address = str(rows[-1]["address"])
+
+        try:
+            self._execute(
+                """
+                DELETE FROM catalog_current
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM tracked_traders
+                    WHERE tracked_traders.address = catalog_current.address
                 )
-            else:
-                self._execute("DELETE FROM catalog_current")
+                """
+            )
             self._connection.commit()
         except Exception:
             self._connection.rollback()
             raise
-        return len(payload)
+
+        return total_upserted
 
     def list_catalog_traders(
         self,
@@ -2722,7 +2916,27 @@ class TraderStore:
             where.append("COALESCE(last_fill_time, 0) >= ?")
             params.append(cutoff_ms)
 
-        if cursor_value is not None and cursor_address:
+        cursor_address_norm = (
+            self.normalize_address(cursor_address) if cursor_address else None
+        )
+        effective_cursor_value = cursor_value
+        if cursor_address_norm:
+            cursor_row = self._execute(
+                f"""
+                SELECT ({sort_expr}) AS sort_key
+                FROM catalog_current
+                WHERE address = ?
+                LIMIT 1
+                """,
+                (cursor_address_norm,),
+            ).fetchone()
+            if cursor_row is not None:
+                if isinstance(cursor_row, Mapping):
+                    effective_cursor_value = cursor_row.get("sort_key")
+                else:
+                    effective_cursor_value = cursor_row[0]
+
+        if effective_cursor_value is not None and cursor_address_norm:
             if direction == "DESC":
                 where.append(
                     f"(({sort_expr}) < ? OR (({sort_expr}) = ? AND address > ?))"
@@ -2731,7 +2945,7 @@ class TraderStore:
                 where.append(
                     f"(({sort_expr}) > ? OR (({sort_expr}) = ? AND address > ?))"
                 )
-            params.extend([cursor_value, cursor_value, self.normalize_address(cursor_address)])
+            params.extend([effective_cursor_value, effective_cursor_value, cursor_address_norm])
 
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         rows = self._execute(

@@ -43,7 +43,7 @@ Default thresholds:
 - `trades_7d >= 1`
 - `last_fill_time <= 60 minutes`
 - `win_rate_30d >= 0.52`
-- `max_drawdown_30d <= 25%`
+- `max_drawdown_30d <= 25%` (if drawdown is available)
 - `realized_pnl_30d > 0` (or configured threshold)
 
 ## 5. Metrics Model
@@ -62,6 +62,10 @@ Calculated per period (1d/7d/30d):
 - Sortino
 - ROI volatility
 
+Important implementation detail:
+
+- metrics are computed on aggregated order-level trades (not raw partial fills), which reduces activity inflation.
+
 Additional trader-level fields:
 
 - activity counters (`trades_24h`, `trades_7d`, `trades_30d`, `active_days_30d`)
@@ -72,10 +76,10 @@ Additional trader-level fields:
 
 ## 6. Quality Score (Current)
 
-Composite score uses weighted signal + penalties:
+Composite score uses weighted signal + multiplicative risk penalty:
 
 - positive components: ROI, Sharpe, Sortino, win rate, activity
-- penalties: drawdown, volatility, fee pressure
+- risk penalties: drawdown, volatility, fee pressure (can reduce score to near-zero under extreme risk)
 
 Result is normalized to `0..100` and stored in `tracked_traders.score`.
 

@@ -179,7 +179,7 @@ Tracked traders are never hard-deleted in normal operation.
 - `STALE`: inactive beyond stale threshold, blocked for new subscriptions.
 - `ARCHIVED`: long-inactive historical record, blocked for new subscriptions.
 
-Lifecycle transitions are automatic (`top100_worker` + `universe_worker`) and subscription-safe:
+Lifecycle transitions are automatic (`universe_worker`, coordinated with discovery via DB lease) and subscription-safe:
 
 - active subscriber -> never auto-archived
 - blacklisted trader -> delivery detached by moderation rules

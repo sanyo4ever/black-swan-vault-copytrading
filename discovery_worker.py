@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
+import socket
 import time
 
 import aiohttp
@@ -34,6 +36,8 @@ async def _run() -> None:
     )
     logger = logging.getLogger("cryptoinsider.discovery-worker")
     interval_seconds = args.interval_seconds or settings.discovery_interval_seconds
+    lease_holder = f"{socket.gethostname()}:{os.getpid()}:discovery"
+    lease_ttl_seconds = max(30, int(interval_seconds) * 2)
     logger.info(
         "Service started interval_seconds=%s min_age_days=%s min_trades_30d=%s min_active_days_30d=%s min_win_rate_30d=%s max_drawdown_30d_pct=%s max_last_activity_minutes=%s",
         interval_seconds,
@@ -76,6 +80,14 @@ async def _run() -> None:
             with bind_log_context(cycle=cycle, cycle_id=new_trace_id("disc")):
                 try:
                     with TraderStore(settings.database_dsn) as store:
+                        has_lease = store.acquire_runtime_lease(
+                            lock_name="tracked-traders-write",
+                            holder=lease_holder,
+                            ttl_seconds=lease_ttl_seconds,
+                        )
+                        if not has_lease:
+                            logger.info("Discovery cycle skipped: lease is held by another worker")
+                            continue
                         service = HyperliquidDiscoveryService(
                             http_session=session,
                             store=store,

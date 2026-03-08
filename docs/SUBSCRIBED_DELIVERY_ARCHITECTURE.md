@@ -49,7 +49,7 @@ Per cycle:
 3. Poll new fills incrementally using per-trader watermark (`last_seen_fill_time`).
 4. Build normalized signals and map each signal to subscribed targets.
 5. Send through dispatcher with per-chat pacing and bounded concurrency.
-6. Process retry queue before/after live sends.
+6. Process retry queue once per cycle (before live sends).
 
 ## 5. Routing and Isolation Rules
 
@@ -62,16 +62,18 @@ Per cycle:
 
 - `flood` / transient transport errors:
   - enqueue retry with backoff (`RETRY_BASE_DELAY_SECONDS`, capped).
+  - apply batch-level global flood backoff to avoid 429 cascades.
 - `topic_missing` (thread deleted/not found):
   - deactivate only affected chat+trader target.
 - `chat_unavailable` / bot blocked:
-  - deactivate all active targets for that chat.
+  - deactivate only affected trader target in that chat.
 - non-retryable permanent errors:
   - mark dropped/dead to prevent endless loops.
 
 ## 7. Reliability Controls
 
 - Dedup key: `source_id:external_id`.
+- Dedup retention: old keys are TTL-cleaned from `published_signals`.
 - Retry queue unique key: `(dedup_key, chat_id, message_thread_id)`.
 - Dispatcher:
   - global send concurrency limit,

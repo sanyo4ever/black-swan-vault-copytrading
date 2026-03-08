@@ -78,6 +78,11 @@ class Settings:
     delivery_monitor_http_concurrency: int
     delivery_send_concurrency: int
     delivery_chat_min_interval_ms: int
+    delivery_global_flood_default_retry_seconds: int
+    delivery_global_flood_max_retry_seconds: int
+    dedup_retention_days: int
+    subscriber_update_concurrency: int
+    subscriber_telegram_retry_attempts: int
     log_level: str
     log_format: str
     log_directory: str
@@ -255,6 +260,17 @@ def load_settings(
         delivery_send_concurrency=int(os.getenv("DELIVERY_SEND_CONCURRENCY", "12")),
         delivery_chat_min_interval_ms=int(
             os.getenv("DELIVERY_CHAT_MIN_INTERVAL_MS", "250")
+        ),
+        delivery_global_flood_default_retry_seconds=int(
+            os.getenv("DELIVERY_GLOBAL_FLOOD_DEFAULT_RETRY_SECONDS", "30")
+        ),
+        delivery_global_flood_max_retry_seconds=int(
+            os.getenv("DELIVERY_GLOBAL_FLOOD_MAX_RETRY_SECONDS", "300")
+        ),
+        dedup_retention_days=int(os.getenv("DEDUP_RETENTION_DAYS", "14")),
+        subscriber_update_concurrency=int(os.getenv("SUBSCRIBER_UPDATE_CONCURRENCY", "12")),
+        subscriber_telegram_retry_attempts=int(
+            os.getenv("SUBSCRIBER_TELEGRAM_RETRY_ATTEMPTS", "5")
         ),
         log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
         log_format=_get_log_format(),

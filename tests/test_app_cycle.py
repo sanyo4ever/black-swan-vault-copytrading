@@ -35,6 +35,7 @@ class _SingleSignalSource:
 class _FailingDispatcher:
     def __init__(self) -> None:
         self.calls = 0
+        self.backoffs: list[int | None] = []
 
     async def send(self, *_args, **_kwargs) -> None:
         self.calls += 1
@@ -45,16 +46,80 @@ class _FailingDispatcher:
             description="Too Many Requests: retry after 1",
         )
 
+    async def apply_global_backoff(self, *, retry_after: int | None) -> int:
+        self.backoffs.append(retry_after)
+        return int(retry_after or 1)
+
 
 class _RecordingDispatcher:
     def __init__(self) -> None:
         self.calls = 0
+        self.backoffs: list[int | None] = []
 
     async def send(self, *_args, **_kwargs) -> None:
         self.calls += 1
 
+    async def apply_global_backoff(self, *, retry_after: int | None) -> int:
+        self.backoffs.append(retry_after)
+        return int(retry_after or 1)
+
 
 class AppCycleDedupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_flood_backoff_queues_remaining_targets_without_sending(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "cycle-flood.db"
+            dedup_path = Path(tmpdir) / "dedup-flood.db"
+            address = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+            with TraderStore(db_path) as store:
+                store.add_manual(address=address, label="A")
+                store.create_subscription_with_session(
+                    chat_id=5001,
+                    trader_address=address,
+                    message_thread_id=11,
+                    topic_name="A1",
+                    lifetime_hours=0,
+                )
+                store.create_subscription_with_session(
+                    chat_id=5002,
+                    trader_address=address,
+                    message_thread_id=12,
+                    topic_name="A2",
+                    lifetime_hours=0,
+                )
+
+            settings = SimpleNamespace(
+                sources_config_path=Path("config/sources.yaml"),
+                database_dsn=str(db_path),
+                max_signals_per_cycle=20,
+                telegram_channel_id="",
+                monitor_delivery_only_subscribed=True,
+            )
+            dedup_store = DedupStore(dedup_path)
+            dispatcher = _FailingDispatcher()
+            logger = logging.getLogger("test.app.flood-batch")
+            try:
+                with (
+                    patch("bot.app.load_sources_config", return_value=[{"id": "source"}]),
+                    patch("bot.app.build_source", return_value=_SingleSignalSource()),
+                ):
+                    await _run_cycle(
+                        settings=settings,
+                        http_session=None,
+                        dedup_store=dedup_store,
+                        dispatcher=dispatcher,
+                        logger=logger,
+                    )
+                self.assertEqual(dispatcher.calls, 1)
+                with TraderStore(db_path) as store:
+                    row = store._connection.execute(
+                        "SELECT COUNT(*) AS c FROM delivery_retry_queue WHERE status = 'PENDING'"
+                    ).fetchone()
+                count = int(row["c"] if isinstance(row, dict) else row[0])
+                self.assertEqual(count, 2)
+            finally:
+                dedup_store.close()
+
     async def test_queue_only_delivery_marks_dedup_and_prevents_republish(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "cycle.db"

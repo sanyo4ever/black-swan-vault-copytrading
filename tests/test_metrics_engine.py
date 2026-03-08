@@ -74,7 +74,7 @@ class MetricsComputationTests(unittest.TestCase):
         self.assertAlmostEqual(float(stats["win_rate"] or 0.0), 2 / 3, places=6)
         self.assertAlmostEqual(float(stats["profit_to_loss_ratio"] or 0.0), 2.0, places=6)
         self.assertAlmostEqual(float(stats["roi_pct"] or 0.0), 2.0, places=6)
-        self.assertAlmostEqual(float(stats["max_drawdown_pct"] or 0.0), 10.0, places=3)
+        self.assertAlmostEqual(float(stats["max_drawdown_pct"] or 0.0), 1.980198, places=3)
         self.assertGreater(float(stats["sharpe"] or 0.0), 0.0)
         self.assertGreater(float(stats["sortino"] or 0.0), 0.0)
 

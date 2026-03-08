@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import logging
 import time
+from dataclasses import dataclass
 from datetime import datetime
 
 import aiohttp
@@ -25,6 +26,13 @@ RETRY_BASE_DELAY_SECONDS = 15
 RETRY_MAX_DELAY_SECONDS = 15 * 60
 RETRY_MAX_ATTEMPTS = 8
 RETRY_BATCH_LIMIT = 200
+
+
+@dataclass(frozen=True)
+class DeliveryOutcome:
+    status: str
+    category: str | None = None
+    retry_after: int | None = None
 
 
 def _parse_args() -> argparse.Namespace:
@@ -72,6 +80,15 @@ def _classify_delivery_error(exc: Exception) -> str:
     if isinstance(exc, (aiohttp.ClientError, asyncio.TimeoutError, OSError)):
         return "transient"
     return "permanent"
+
+
+def _store_call_sync(settings, fn):
+    with TraderStore(settings.database_dsn) as store:
+        return fn(store)
+
+
+async def _store_call(settings, fn):
+    return await asyncio.to_thread(_store_call_sync, settings, fn)
 
 
 def _deactivate_chat_targets(
@@ -137,7 +154,7 @@ def _queue_initial_retry(
     attempt_count: int,
     retry_after: int | None,
     logger: logging.Logger,
-) -> None:
+) -> int:
     delay_seconds = _retry_delay_seconds(
         attempt_count=attempt_count,
         retry_after=retry_after,
@@ -160,6 +177,7 @@ def _queue_initial_retry(
         delay_seconds,
         error,
     )
+    return delay_seconds
 
 
 async def _send_live_target(
@@ -173,7 +191,7 @@ async def _send_live_target(
     chat_id: str | int,
     trader_address: str | None,
     message_thread_id: int | None = None,
-) -> str:
+) -> DeliveryOutcome:
     try:
         await dispatcher.send(
             http_session,
@@ -181,26 +199,14 @@ async def _send_live_target(
             text=message_text,
             message_thread_id=message_thread_id,
         )
-        return "sent"
+        return DeliveryOutcome(status="sent")
     except Exception as exc:
         category = _classify_delivery_error(exc)
         error_text = _short_error(exc)
 
-        if (
-            category == "chat_unavailable"
-            and trader_address is not None
-            and message_thread_id is not None
-        ):
-            _deactivate_chat_targets(
-                settings=settings,
-                chat_id=chat_id,
-                logger=logger,
-                reason=error_text,
-            )
-            return "dropped"
-
-        if category == "topic_missing" and message_thread_id is not None:
-            _deactivate_trader_target(
+        if category == "chat_unavailable" and trader_address is not None:
+            await asyncio.to_thread(
+                _deactivate_trader_target,
                 settings=settings,
                 chat_id=chat_id,
                 trader_address=trader_address,
@@ -208,11 +214,24 @@ async def _send_live_target(
                 logger=logger,
                 reason=error_text,
             )
-            return "dropped"
+            return DeliveryOutcome(status="dropped", category=category)
+
+        if category == "topic_missing" and message_thread_id is not None:
+            await asyncio.to_thread(
+                _deactivate_trader_target,
+                settings=settings,
+                chat_id=chat_id,
+                trader_address=trader_address,
+                message_thread_id=message_thread_id,
+                logger=logger,
+                reason=error_text,
+            )
+            return DeliveryOutcome(status="dropped", category=category)
 
         if category in {"flood", "transient"}:
             retry_after = exc.retry_after if isinstance(exc, TelegramClientError) else None
-            _queue_initial_retry(
+            await asyncio.to_thread(
+                _queue_initial_retry,
                 settings=settings,
                 dedup_key=dedup_key,
                 chat_id=chat_id,
@@ -224,7 +243,15 @@ async def _send_live_target(
                 retry_after=retry_after,
                 logger=logger,
             )
-            return "queued"
+            if category == "flood":
+                apply_backoff = getattr(dispatcher, "apply_global_backoff", None)
+                if callable(apply_backoff):
+                    await apply_backoff(retry_after=retry_after)
+            return DeliveryOutcome(
+                status="queued",
+                category=category,
+                retry_after=retry_after,
+            )
 
         logger.warning(
             "Dropping delivery dedup=%s chat=%s thread=%s reason=%s",
@@ -233,10 +260,10 @@ async def _send_live_target(
             message_thread_id,
             error_text,
         )
-        return "dropped"
+        return DeliveryOutcome(status="dropped", category=category)
 
 
-def _handle_retry_delivery_failure(
+async def _handle_retry_delivery_failure(
     *,
     settings,
     logger: logging.Logger,
@@ -246,27 +273,13 @@ def _handle_retry_delivery_failure(
     message_thread_id: int | None,
     attempt_count: int,
     exc: Exception,
-) -> str:
+) -> tuple[str, str | None, int | None]:
     category = _classify_delivery_error(exc)
     error_text = _short_error(exc)
 
-    if (
-        category == "chat_unavailable"
-        and trader_address is not None
-        and message_thread_id is not None
-    ):
-        _deactivate_chat_targets(
-            settings=settings,
-            chat_id=chat_id,
-            logger=logger,
-            reason=error_text,
-        )
-        with TraderStore(settings.database_dsn) as store:
-            store.mark_delivery_retry_dead(retry_id=retry_id, error=error_text)
-        return "dead"
-
-    if category == "topic_missing" and message_thread_id is not None:
-        _deactivate_trader_target(
+    if category == "chat_unavailable" and trader_address is not None:
+        await asyncio.to_thread(
+            _deactivate_trader_target,
             settings=settings,
             chat_id=chat_id,
             trader_address=trader_address,
@@ -274,38 +287,62 @@ def _handle_retry_delivery_failure(
             logger=logger,
             reason=error_text,
         )
-        with TraderStore(settings.database_dsn) as store:
-            store.mark_delivery_retry_dead(retry_id=retry_id, error=error_text)
-        return "dead"
+        await _store_call(
+            settings,
+            lambda store: store.mark_delivery_retry_dead(retry_id=retry_id, error=error_text),
+        )
+        return ("dead", category, None)
+
+    if category == "topic_missing" and message_thread_id is not None:
+        await asyncio.to_thread(
+            _deactivate_trader_target,
+            settings=settings,
+            chat_id=chat_id,
+            trader_address=trader_address,
+            message_thread_id=message_thread_id,
+            logger=logger,
+            reason=error_text,
+        )
+        await _store_call(
+            settings,
+            lambda store: store.mark_delivery_retry_dead(retry_id=retry_id, error=error_text),
+        )
+        return ("dead", category, None)
 
     if category in {"flood", "transient"}:
         if int(attempt_count) >= RETRY_MAX_ATTEMPTS:
-            with TraderStore(settings.database_dsn) as store:
-                store.mark_delivery_retry_dead(retry_id=retry_id, error=error_text)
+            await _store_call(
+                settings,
+                lambda store: store.mark_delivery_retry_dead(retry_id=retry_id, error=error_text),
+            )
             logger.warning(
                 "Retry attempts exhausted retry_id=%s attempts=%s error=%s",
                 retry_id,
                 attempt_count,
                 error_text,
             )
-            return "dead"
+            return ("dead", category, None)
 
         retry_after = exc.retry_after if isinstance(exc, TelegramClientError) else None
         delay_seconds = _retry_delay_seconds(
             attempt_count=attempt_count,
             retry_after=retry_after,
         )
-        with TraderStore(settings.database_dsn) as store:
-            store.reschedule_delivery_retry(
+        await _store_call(
+            settings,
+            lambda store: store.reschedule_delivery_retry(
                 retry_id=retry_id,
                 delay_seconds=delay_seconds,
                 error=error_text,
-            )
-        return "rescheduled"
+            ),
+        )
+        return ("rescheduled", category, delay_seconds)
 
-    with TraderStore(settings.database_dsn) as store:
-        store.mark_delivery_retry_dead(retry_id=retry_id, error=error_text)
-    return "dead"
+    await _store_call(
+        settings,
+        lambda store: store.mark_delivery_retry_dead(retry_id=retry_id, error=error_text),
+    )
+    return ("dead", category, None)
 
 
 async def _process_retry_queue(
@@ -316,8 +353,10 @@ async def _process_retry_queue(
     dispatcher: DeliveryDispatcher,
     logger,
 ) -> int:
-    with TraderStore(settings.database_dsn) as store:
-        jobs = store.list_due_delivery_retries(limit=RETRY_BATCH_LIMIT)
+    jobs = await _store_call(
+        settings,
+        lambda store: store.list_due_delivery_retries(limit=RETRY_BATCH_LIMIT),
+    )
 
     if not jobs:
         return 0
@@ -326,10 +365,25 @@ async def _process_retry_queue(
     skipped = 0
     rescheduled = 0
     dead = 0
+    global_flood_delay: int | None = None
     for job in jobs:
-        if dedup_store.seen(job.dedup_key):
-            with TraderStore(settings.database_dsn) as store:
-                store.mark_delivery_retry_sent(retry_id=job.id)
+        if global_flood_delay is not None:
+            await _store_call(
+                settings,
+                lambda store: store.reschedule_delivery_retry(
+                    retry_id=job.id,
+                    delay_seconds=global_flood_delay,
+                    error="global_flood_backoff",
+                ),
+            )
+            rescheduled += 1
+            continue
+
+        if await asyncio.to_thread(dedup_store.seen, job.dedup_key):
+            await _store_call(
+                settings,
+                lambda store: store.mark_delivery_retry_sent(retry_id=job.id),
+            )
             skipped += 1
             continue
         try:
@@ -339,12 +393,14 @@ async def _process_retry_queue(
                 text=job.message_text,
                 message_thread_id=job.message_thread_id,
             )
-            with TraderStore(settings.database_dsn) as store:
-                store.mark_delivery_retry_sent(retry_id=job.id)
-            dedup_store.remember(job.dedup_key)
+            await _store_call(
+                settings,
+                lambda store: store.mark_delivery_retry_sent(retry_id=job.id),
+            )
+            await asyncio.to_thread(dedup_store.remember, job.dedup_key)
             sent += 1
         except Exception as exc:
-            outcome = _handle_retry_delivery_failure(
+            status, category, delay_seconds = await _handle_retry_delivery_failure(
                 settings=settings,
                 logger=logger,
                 retry_id=job.id,
@@ -354,8 +410,15 @@ async def _process_retry_queue(
                 attempt_count=job.attempt_count,
                 exc=exc,
             )
-            if outcome == "rescheduled":
+            if status == "rescheduled":
                 rescheduled += 1
+                if category == "flood":
+                    global_flood_delay = delay_seconds or int(
+                        getattr(settings, "delivery_global_flood_default_retry_seconds", 30)
+                    )
+                    apply_backoff = getattr(dispatcher, "apply_global_backoff", None)
+                    if callable(apply_backoff):
+                        await apply_backoff(retry_after=global_flood_delay)
             else:
                 dead += 1
 
@@ -371,8 +434,10 @@ async def _process_retry_queue(
 
 
 async def _cleanup_expired_sessions(*, settings, http_session, logger) -> int:
-    with TraderStore(settings.database_dsn) as store:
-        expired = store.expire_due_delivery_sessions()
+    expired = await _store_call(
+        settings,
+        lambda store: store.expire_due_delivery_sessions(),
+    )
 
     if not expired:
         return 0
@@ -409,11 +474,13 @@ async def _cleanup_expired_sessions(*, settings, http_session, logger) -> int:
                 item.session_id,
                 exc,
             )
-            with TraderStore(settings.database_dsn) as store:
-                store.set_delivery_session_cleanup_error(
+            await _store_call(
+                settings,
+                lambda store: store.set_delivery_session_cleanup_error(
                     session_id=item.session_id,
                     error=str(exc),
-                )
+                ),
+            )
         except Exception as exc:
             cleanup_failed += 1
             logger.warning(
@@ -423,11 +490,13 @@ async def _cleanup_expired_sessions(*, settings, http_session, logger) -> int:
                 item.session_id,
                 exc,
             )
-            with TraderStore(settings.database_dsn) as store:
-                store.set_delivery_session_cleanup_error(
+            await _store_call(
+                settings,
+                lambda store: store.set_delivery_session_cleanup_error(
                     session_id=item.session_id,
                     error=str(exc),
-                )
+                ),
+            )
 
     logger.info(
         "Expired sessions cleanup: total=%s ok=%s failed=%s",
@@ -465,8 +534,10 @@ async def _run_cycle(
         logger.info("No signals fetched this cycle")
         return 0
 
-    with TraderStore(settings.database_dsn) as store:
-        subscriber_map = store.list_active_delivery_targets_by_trader()
+    subscriber_map = await _store_call(
+        settings,
+        lambda store: store.list_active_delivery_targets_by_trader(),
+    )
 
     published = 0
     for signal in sorted(all_signals, key=_sort_key):
@@ -474,7 +545,7 @@ async def _run_cycle(
             break
 
         dedup_key = signal.dedup_key()
-        if dedup_store.seen(dedup_key):
+        if await asyncio.to_thread(dedup_store.seen, dedup_key):
             continue
 
         channel_target_count = 0
@@ -493,20 +564,13 @@ async def _run_cycle(
         queued = 0
         try:
             text = format_signal(signal)
-            delivery_tasks: list[asyncio.Task[str]] = []
+            delivery_targets_payload: list[tuple[str | int, str | None, int | None]] = []
             if settings.telegram_channel_id and not settings.monitor_delivery_only_subscribed:
-                delivery_tasks.append(
-                    asyncio.create_task(
-                        _send_live_target(
-                            settings=settings,
-                            http_session=http_session,
-                            dispatcher=dispatcher,
-                            logger=logger,
-                            dedup_key=dedup_key,
-                            message_text=text,
-                            chat_id=settings.telegram_channel_id,
-                            trader_address=signal.trader_address,
-                        )
+                delivery_targets_payload.append(
+                    (
+                        settings.telegram_channel_id,
+                        signal.trader_address,
+                        None,
                     )
                 )
             seen_sub_targets: set[tuple[str, int | None]] = set()
@@ -515,36 +579,71 @@ async def _run_cycle(
                 if target_key in seen_sub_targets:
                     continue
                 seen_sub_targets.add(target_key)
-                delivery_tasks.append(
-                    asyncio.create_task(
-                        _send_live_target(
-                            settings=settings,
-                            http_session=http_session,
-                            dispatcher=dispatcher,
-                            logger=logger,
-                            dedup_key=dedup_key,
-                            message_text=text,
-                            chat_id=target.chat_id,
-                            trader_address=target.trader_address,
-                            message_thread_id=target.message_thread_id,
-                        )
+                delivery_targets_payload.append(
+                    (
+                        target.chat_id,
+                        target.trader_address,
+                        target.message_thread_id,
                     )
                 )
-            results = await asyncio.gather(*delivery_tasks)
-            for status in results:
-                if status == "sent":
+
+            flood_backoff_triggered = False
+            flood_retry_after: int | None = None
+            for idx, (chat_id, trader_address, message_thread_id) in enumerate(
+                delivery_targets_payload
+            ):
+                if flood_backoff_triggered:
+                    await asyncio.to_thread(
+                        _queue_initial_retry,
+                        settings=settings,
+                        dedup_key=dedup_key,
+                        chat_id=chat_id,
+                        trader_address=trader_address,
+                        message_thread_id=message_thread_id,
+                        message_text=text,
+                        error="global_flood_backoff",
+                        attempt_count=1,
+                        retry_after=flood_retry_after,
+                        logger=logger,
+                    )
+                    queued += 1
+                    failed += 1
+                    continue
+
+                outcome = await _send_live_target(
+                    settings=settings,
+                    http_session=http_session,
+                    dispatcher=dispatcher,
+                    logger=logger,
+                    dedup_key=dedup_key,
+                    message_text=text,
+                    chat_id=chat_id,
+                    trader_address=trader_address,
+                    message_thread_id=message_thread_id,
+                )
+                if outcome.status == "sent":
                     delivered += 1
                 else:
                     failed += 1
-                    if status == "queued":
+                    if outcome.status == "queued":
                         queued += 1
+                    if outcome.category == "flood":
+                        flood_backoff_triggered = True
+                        flood_retry_after = outcome.retry_after
+                        remaining = len(delivery_targets_payload) - (idx + 1)
+                        if remaining > 0:
+                            logger.warning(
+                                "Flood detected while publishing signal %s, queueing remaining targets=%s",
+                                dedup_key,
+                                remaining,
+                            )
         except Exception as exc:
             logger.exception("Failed to publish signal %s: %s", dedup_key, exc)
             continue
 
         if delivered <= 0:
             if queued > 0:
-                dedup_store.remember(dedup_key)
+                await asyncio.to_thread(dedup_store.remember, dedup_key)
                 logger.info(
                     "Signal %s queued for retry without live success queued=%s; dedup marked",
                     dedup_key,
@@ -554,7 +653,7 @@ async def _run_cycle(
                 logger.warning("Signal %s had no successful deliveries", dedup_key)
             continue
 
-        dedup_store.remember(dedup_key)
+        await asyncio.to_thread(dedup_store.remember, dedup_key)
         published += 1
         logger.info(
             "Published signal %s to %s target(s), failed=%s queued=%s",
@@ -589,12 +688,17 @@ async def _run() -> None:
     )
 
     timeout = aiohttp.ClientTimeout(total=settings.http_timeout_seconds)
-    dedup_store = DedupStore(settings.database_dsn)
+    dedup_store = DedupStore(
+        settings.database_dsn,
+        retention_days=settings.dedup_retention_days,
+    )
     dispatcher = DeliveryDispatcher(
         config=DeliveryDispatcherConfig(
             bot_token=settings.telegram_bot_token,
             send_concurrency=settings.delivery_send_concurrency,
             chat_min_interval_ms=settings.delivery_chat_min_interval_ms,
+            global_flood_default_retry_seconds=settings.delivery_global_flood_default_retry_seconds,
+            global_flood_max_retry_seconds=settings.delivery_global_flood_max_retry_seconds,
         )
     )
     cycle = 0
@@ -624,13 +728,9 @@ async def _run() -> None:
                         dispatcher=dispatcher,
                         logger=logger,
                     )
-                    await _process_retry_queue(
-                        settings=settings,
-                        http_session=http_session,
-                        dedup_store=dedup_store,
-                        dispatcher=dispatcher,
-                        logger=logger,
-                    )
+                    removed = await asyncio.to_thread(dedup_store.cleanup_if_due)
+                    if removed > 0:
+                        logger.info("Dedup retention cleanup removed=%s", removed)
                     elapsed_ms = int((time.monotonic() - cycle_started) * 1000)
                     logger.info("Cycle finished elapsed_ms=%s", elapsed_ms)
                 if args.once:

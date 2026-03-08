@@ -17,9 +17,14 @@ from bot.trader_store import TraderStore
 class _AlwaysFailDispatcher:
     def __init__(self, exc: Exception) -> None:
         self._exc = exc
+        self.backoffs: list[int | None] = []
 
     async def send(self, *_args, **_kwargs) -> None:
         raise self._exc
+
+    async def apply_global_backoff(self, *, retry_after: int | None) -> int:
+        self.backoffs.append(retry_after)
+        return int(retry_after or 1)
 
 
 class _RecordingDispatcher:
@@ -44,6 +49,7 @@ class SubscriptionDeliveryE2ETests(unittest.IsolatedAsyncioTestCase):
                 telegram_bot_token="123:abc",
                 database_dsn=str(db_path),
                 subscription_lifetime_hours=0,
+                subscriber_telegram_retry_attempts=1,
             )
             logger = logging.getLogger("test.e2e.sub")
             send_mock = AsyncMock()
@@ -139,7 +145,7 @@ class SubscriptionDeliveryE2ETests(unittest.IsolatedAsyncioTestCase):
                 trader_address="0xdddddddddddddddddddddddddddddddddddddddd",
                 message_thread_id=77,
             )
-            self.assertEqual(first_status, "queued")
+            self.assertEqual(first_status.status, "queued")
 
             with TraderStore(db_path) as store:
                 store._connection.execute(
@@ -202,13 +208,13 @@ class SubscriptionDeliveryE2ETests(unittest.IsolatedAsyncioTestCase):
                 trader_address=a1,
                 message_thread_id=91,
             )
-            self.assertEqual(status, "dropped")
+            self.assertEqual(status.status, "dropped")
             with TraderStore(db_path) as store:
                 sessions = store.list_delivery_sessions_for_chat(chat_id=888)
             self.assertEqual(len(sessions), 1)
             self.assertEqual(sessions[0].trader_address, a2)
 
-    async def test_chat_blocked_deactivates_all_targets_for_chat(self) -> None:
+    async def test_chat_blocked_deactivates_only_requested_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "chat-blocked.db"
             a1 = "0x1212121212121212121212121212121212121212"
@@ -250,10 +256,11 @@ class SubscriptionDeliveryE2ETests(unittest.IsolatedAsyncioTestCase):
                 trader_address=a1,
                 message_thread_id=51,
             )
-            self.assertEqual(status, "dropped")
+            self.assertEqual(status.status, "dropped")
             with TraderStore(db_path) as store:
                 sessions = store.list_delivery_sessions_for_chat(chat_id=889)
-            self.assertEqual(sessions, [])
+            self.assertEqual(len(sessions), 1)
+            self.assertEqual(sessions[0].trader_address, a2)
 
 
 if __name__ == "__main__":

@@ -45,6 +45,7 @@ class SubscriberBotFlowTests(unittest.IsolatedAsyncioTestCase):
                 telegram_bot_token="123:abc",
                 database_dsn=str(db_path),
                 subscription_lifetime_hours=24,
+                subscriber_telegram_retry_attempts=1,
             )
             logger = logging.getLogger("test.subscriber-bot")
 
