@@ -187,7 +187,7 @@ def load_settings(
         hyperliquid_info_url=os.getenv("HYPERLIQUID_INFO_URL", "https://api.hyperliquid.xyz/info"),
         discovery_candidate_limit=int(os.getenv("DISCOVERY_CANDIDATE_LIMIT", "60")),
         discovery_min_age_days=int(os.getenv("DISCOVERY_MIN_AGE_DAYS", "30")),
-        discovery_min_trades_30d=int(os.getenv("DISCOVERY_MIN_TRADES_30D", "120")),
+        discovery_min_trades_30d=int(os.getenv("DISCOVERY_MIN_TRADES_30D", "80")),
         discovery_min_active_days_30d=int(os.getenv("DISCOVERY_MIN_ACTIVE_DAYS_30D", "12")),
         discovery_min_win_rate_30d=float(os.getenv("DISCOVERY_MIN_WIN_RATE_30D", "0.52")),
         discovery_max_drawdown_30d_pct=float(
@@ -278,7 +278,7 @@ def load_settings(
         subscription_lifetime_hours=int(os.getenv("SUBSCRIPTION_LIFETIME_HOURS", "0")),
         universe_interval_seconds=int(os.getenv("UNIVERSE_INTERVAL_SECONDS", "300")),
         universe_min_age_days=int(os.getenv("UNIVERSE_MIN_AGE_DAYS", "30")),
-        universe_min_trades_30d=int(os.getenv("UNIVERSE_MIN_TRADES_30D", "120")),
+        universe_min_trades_30d=int(os.getenv("UNIVERSE_MIN_TRADES_30D", "80")),
         universe_min_active_days_30d=int(os.getenv("UNIVERSE_MIN_ACTIVE_DAYS_30D", "12")),
         universe_min_win_rate_30d=float(os.getenv("UNIVERSE_MIN_WIN_RATE_30D", "0.52")),
         universe_max_drawdown_30d_pct=float(

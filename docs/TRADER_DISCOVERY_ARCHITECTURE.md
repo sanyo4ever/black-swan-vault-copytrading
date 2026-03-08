@@ -56,7 +56,7 @@ Design supports additional sources later, but current production ranking is cent
 Default thresholds:
 
 - `age_days >= 30`
-- `trades_30d >= 120`
+- `trades_30d >= 80`
 - `active_days_30d >= 12`
 - `trades_7d >= 1`
 - `last_fill_time <= 60 minutes`
