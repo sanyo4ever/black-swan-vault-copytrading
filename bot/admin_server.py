@@ -873,7 +873,7 @@ def _render_public_directory(
     .brand-mark img {{ display:block; width:100%; height:100%; object-fit:cover; }}
     .brand-copy {{ min-width:0; }}
     .brand-name {{
-      font-size:19px;
+      font-size:57px;
       font-weight:700;
       letter-spacing:.2px;
       margin-bottom:3px;
@@ -1082,7 +1082,7 @@ def _render_public_directory(
       h1 {{ font-size:25px; }}
       .card {{ padding:12px; }}
       .brand-mark {{ width:62px; height:62px; border-radius:14px; }}
-      .brand-name {{ font-size:16px; }}
+      .brand-name {{ font-size:48px; }}
       .hero-btn {{
         padding:12px 20px;
         font-size:18px;
