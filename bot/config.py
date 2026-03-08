@@ -53,6 +53,10 @@ class Settings:
     rotation_scout_candidates: int
     rotation_bootstrap_candidates: int
     rotation_metrics_refresh_hours: int
+    admin_rate_limit_window_seconds: int
+    admin_rate_limit_max_requests: int
+    public_rate_limit_window_seconds: int
+    public_rate_limit_max_requests: int
     admin_panel_username: str
     admin_panel_password: str
     google_analytics_measurement_id: str
@@ -243,6 +247,22 @@ def load_settings(
         rotation_metrics_refresh_hours=max(
             1,
             int(os.getenv("ROTATION_METRICS_REFRESH_HOURS", "24")),
+        ),
+        admin_rate_limit_window_seconds=max(
+            1,
+            int(os.getenv("ADMIN_RATE_LIMIT_WINDOW_SECONDS", "60")),
+        ),
+        admin_rate_limit_max_requests=max(
+            1,
+            int(os.getenv("ADMIN_RATE_LIMIT_MAX_REQUESTS", "30")),
+        ),
+        public_rate_limit_window_seconds=max(
+            1,
+            int(os.getenv("PUBLIC_RATE_LIMIT_WINDOW_SECONDS", "60")),
+        ),
+        public_rate_limit_max_requests=max(
+            1,
+            int(os.getenv("PUBLIC_RATE_LIMIT_MAX_REQUESTS", "120")),
         ),
         admin_panel_username=admin_panel_username,
         admin_panel_password=admin_panel_password,

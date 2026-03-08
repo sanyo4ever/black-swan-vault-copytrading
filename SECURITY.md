@@ -37,3 +37,21 @@ If a secret is accidentally exposed:
 2. Remove from code and git history if committed
 3. Update affected credentials in production
 4. Document remediation in the incident notes
+
+## Production hardening baseline
+
+Recommended baseline for Ubuntu production hosts:
+
+- SSH key-only login (`PasswordAuthentication no`)
+- UFW enabled with default deny incoming, allow only `22`, `80`, `443`
+- Fail2ban enabled for SSH brute-force protection
+- TLS certificates via Let's Encrypt with auto-renew timer enabled
+- App services run as non-root user with systemd hardening (`NoNewPrivileges`, `ProtectSystem`, `ProtectHome`)
+- Secrets stored outside git (for example `/etc/cryptoinsider/env`) with strict file permissions
+- Security updates enabled (`unattended-upgrades`)
+
+Application-level controls:
+
+- Admin endpoints protected by HTTP Basic auth + same-origin CSRF guard
+- Security headers enabled (CSP, HSTS, X-Frame-Options, X-Content-Type-Options)
+- In-memory IP rate limiting for `/admin`, `/api/traders`, `/subscribe/*`, `/telegram/*`

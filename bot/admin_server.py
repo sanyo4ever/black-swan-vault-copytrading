@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import argparse
 import base64
+from collections import deque
 import hmac
 import json
 import logging
+import math
 import re
 import time
 from datetime import UTC, datetime
@@ -328,6 +330,55 @@ def _http_log_level_for_status(status: int) -> int:
     return logging.INFO
 
 
+class _InMemoryRateLimiter:
+    def __init__(
+        self,
+        *,
+        window_seconds: int,
+        max_requests: int,
+        max_keys: int = 20000,
+    ) -> None:
+        self.window_seconds = max(1, int(window_seconds))
+        self.max_requests = max(1, int(max_requests))
+        self.max_keys = max(100, int(max_keys))
+        self._buckets: dict[str, deque[float]] = {}
+        self._ops = 0
+
+    def allow(self, *, key: str, now: float | None = None) -> tuple[bool, int]:
+        current = float(now if now is not None else time.monotonic())
+        cutoff = current - float(self.window_seconds)
+        bucket = self._buckets.get(key)
+        if bucket is None:
+            bucket = deque()
+            self._buckets[key] = bucket
+
+        while bucket and bucket[0] <= cutoff:
+            bucket.popleft()
+
+        if len(bucket) >= self.max_requests:
+            retry_after_seconds = max(
+                1,
+                int(math.ceil(float(self.window_seconds) - (current - bucket[0]))),
+            )
+            return False, retry_after_seconds
+
+        bucket.append(current)
+        self._ops += 1
+        if self._ops % 500 == 0 and len(self._buckets) > self.max_keys:
+            self._cleanup(cutoff=cutoff)
+        return True, 0
+
+    def _cleanup(self, *, cutoff: float) -> None:
+        stale_keys = [key for key, bucket in self._buckets.items() if not bucket or bucket[-1] <= cutoff]
+        for key in stale_keys:
+            self._buckets.pop(key, None)
+        if len(self._buckets) <= self.max_keys:
+            return
+        overflow = len(self._buckets) - self.max_keys
+        for key in list(self._buckets.keys())[:overflow]:
+            self._buckets.pop(key, None)
+
+
 @web.middleware
 async def _request_logging_middleware(request: web.Request, handler):
     logger: logging.Logger = request.app["logger"]
@@ -377,6 +428,43 @@ async def _request_logging_middleware(request: web.Request, handler):
             ua or "-",
         )
         return response
+
+
+def _rate_limit_scope(request: web.Request) -> str | None:
+    path = request.path
+    if path.startswith("/admin"):
+        return "admin"
+    if path.startswith("/api/traders") or path.startswith("/subscribe/") or path.startswith("/telegram/"):
+        return "public"
+    return None
+
+
+@web.middleware
+async def _rate_limit_middleware(request: web.Request, handler):
+    scope = _rate_limit_scope(request)
+    if scope is None:
+        return await handler(request)
+
+    limiter = request.app.get(f"{scope}_rate_limiter")
+    if limiter is None:
+        return await handler(request)
+
+    remote = _client_ip(request)
+    allowed, retry_after = limiter.allow(key=f"{scope}:{remote}")
+    if allowed:
+        return await handler(request)
+
+    request.app["logger"].warning(
+        "Rate limit exceeded scope=%s remote=%s path=%s retry_after=%s",
+        scope,
+        remote,
+        request.path,
+        retry_after,
+    )
+    raise web.HTTPTooManyRequests(
+        text="Too many requests. Please retry in a moment.",
+        headers={"Retry-After": str(retry_after)},
+    )
 
 
 @web.middleware
@@ -2238,14 +2326,23 @@ def create_app(*, settings=None, logger: logging.Logger | None = None) -> web.Ap
     app = web.Application(
         middlewares=[
             _request_logging_middleware,
+            _security_headers_middleware,
+            _rate_limit_middleware,
             _admin_auth_middleware,
             _admin_csrf_middleware,
-            _security_headers_middleware,
         ]
     )
     app["settings"] = resolved_settings
     app["logger"] = resolved_logger
     app["discovery_lock"] = asyncio.Lock()
+    app["admin_rate_limiter"] = _InMemoryRateLimiter(
+        window_seconds=resolved_settings.admin_rate_limit_window_seconds,
+        max_requests=resolved_settings.admin_rate_limit_max_requests,
+    )
+    app["public_rate_limiter"] = _InMemoryRateLimiter(
+        window_seconds=resolved_settings.public_rate_limit_window_seconds,
+        max_requests=resolved_settings.public_rate_limit_max_requests,
+    )
 
     assets_dir = Path(__file__).resolve().parents[1] / "assets"
     if assets_dir.exists():

@@ -1,4 +1,4 @@
-aiohttp==3.11.18
+aiohttp==3.13.3
 PyYAML==6.0.2
 feedparser==6.0.11
 python-dotenv==1.0.1

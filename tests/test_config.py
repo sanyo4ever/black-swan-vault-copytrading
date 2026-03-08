@@ -80,6 +80,10 @@ class ConfigTests(unittest.TestCase):
                 os.environ["LOG_TELEGRAM_HTTP"] = "true"
                 os.environ["DELIVERY_SEND_CONCURRENCY"] = "17"
                 os.environ["DELIVERY_CHAT_MIN_INTERVAL_MS"] = "333"
+                os.environ["ADMIN_RATE_LIMIT_WINDOW_SECONDS"] = "45"
+                os.environ["ADMIN_RATE_LIMIT_MAX_REQUESTS"] = "22"
+                os.environ["PUBLIC_RATE_LIMIT_WINDOW_SECONDS"] = "30"
+                os.environ["PUBLIC_RATE_LIMIT_MAX_REQUESTS"] = "90"
 
                 settings = load_settings()
                 self.assertEqual(settings.log_level, "DEBUG")
@@ -90,6 +94,10 @@ class ConfigTests(unittest.TestCase):
                 self.assertTrue(settings.log_telegram_http)
                 self.assertEqual(settings.delivery_send_concurrency, 17)
                 self.assertEqual(settings.delivery_chat_min_interval_ms, 333)
+                self.assertEqual(settings.admin_rate_limit_window_seconds, 45)
+                self.assertEqual(settings.admin_rate_limit_max_requests, 22)
+                self.assertEqual(settings.public_rate_limit_window_seconds, 30)
+                self.assertEqual(settings.public_rate_limit_max_requests, 90)
             finally:
                 os.environ.clear()
                 os.environ.update(old)
