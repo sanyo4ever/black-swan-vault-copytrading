@@ -34,7 +34,6 @@ from bot.trader_store import (
     TraderStore,
 )
 
-PROJECT_REPO_URL = "https://github.com/sanyo4ever/black-swan-vault-copytrading"
 PUBLIC_SITE_URL = "https://blackswanvault.online"
 PAYPAL_DONATION_EMAIL = "sanyo4ever@gmail.com"
 USDT_TRC20_DONATION_ADDRESS = "TBFmAiNBK9eze43nhAkWXvir9yV6tUzpgQ"
@@ -725,7 +724,7 @@ def _render_public_directory(
     page_title = "Free Crypto Copy Trading Signals for Futures | Black Swan Vault"
     page_description = (
         "Discover active futures traders, compare real performance stats, and start Telegram copy "
-        "trading feeds in one click. Open-source and donation-supported."
+        "trading feeds in one click."
     )
     page_keywords = (
         "copy trading, crypto copy trading, futures copy trading, free crypto signals, "
@@ -757,8 +756,7 @@ def _render_public_directory(
                     "acceptedAnswer": {
                         "@type": "Answer",
                         "text": (
-                            "Yes. Access is open and donation-supported. You can browse traders and join "
-                            "the Telegram channel without a paywall."
+                            "Yes. You can browse traders and join the Telegram channel without a paywall."
                         ),
                     },
                 },
@@ -1093,7 +1091,7 @@ def _render_public_directory(
         </div>
         <div class='brand-copy'>
           <div class='brand-name'>Black Swan Vault</div>
-          <p class='brand-tagline'>Open-source crypto copytrading intelligence</p>
+          <p class='brand-tagline'>Crypto copytrading intelligence</p>
           <a class='domain-chip' href='{escape(PUBLIC_SITE_URL)}' target='_blank' rel='noopener'>blackswanvault.online</a>
         </div>
       </div>
@@ -1107,8 +1105,6 @@ def _render_public_directory(
       </div>
       <div class='hero-actions'>
         {hero_join_button_html}
-        <a class='hero-btn' href='{escape(PROJECT_REPO_URL)}' target='_blank' rel='noopener'>Contribute on GitHub</a>
-        <a class='hero-btn' href='{escape(PROJECT_REPO_URL)}/issues/new' target='_blank' rel='noopener'>Report Issue / Idea</a>
       </div>
       <div class='hero-thanks'>
         Thank you to everyone helping keep this server running. Your support makes public access possible.
@@ -1119,7 +1115,6 @@ def _render_public_directory(
         Table shows objective strategy metrics only (ROI, Drawdown, PnL, Win Rate, P/L Ratio, Sharpe, trade activity).<br/>
         Use the <strong>Range</strong> filter to switch table metrics between 1d, 7d, and 30d windows.<br/>
         Click <strong>Join Channel</strong> to open the Telegram channel with forum topics per trader wallet.<br/>
-        Open-source repository: <a href='{escape(PROJECT_REPO_URL)}' target='_blank' rel='noopener'>GitHub</a>.<br/>
         Project is donation-supported: PayPal <code>{escape(PAYPAL_DONATION_EMAIL)}</code> or USDT TRC20 <code>{escape(USDT_TRC20_DONATION_ADDRESS)}</code>.<br/>
         Informational only. Not financial advice.
       </div>
@@ -1129,7 +1124,7 @@ def _render_public_directory(
           <ul>
             <li>Free access to crypto futures trader data and Telegram signal delivery.</li>
             <li>Performance filters: ROI, win rate, PnL, activity, and consistency proxies.</li>
-            <li>Open-source infrastructure you can audit, fork, and improve.</li>
+            <li>One-click access to trader-specific Telegram topics.</li>
           </ul>
         </div>
         <div class='seo-box'>
@@ -1137,7 +1132,7 @@ def _render_public_directory(
           <ul>
             <li>Users searching for copy trading setups without closed paywalls.</li>
             <li>Traders comparing active accounts before choosing who to follow.</li>
-            <li>Contributors building transparent crypto signal tooling.</li>
+            <li>Communities that need fast, structured futures trade updates.</li>
           </ul>
         </div>
       </div>
@@ -1232,7 +1227,7 @@ def _render_public_directory(
       <h2>FAQ: Copy Trading and Free Crypto Signals</h2>
       <div class='faq-item'>
         <h3>Is this copy trading service free?</h3>
-        <p>Yes. The directory and Telegram flow are open and donation-supported.</p>
+        <p>Yes. The directory and Telegram flow are available without a paywall.</p>
       </div>
       <div class='faq-item'>
         <h3>What kind of signals do I get?</h3>
@@ -1242,11 +1237,220 @@ def _render_public_directory(
         <h3>Is this financial advice?</h3>
         <p>No. It is an informational copy trading and analytics tool, not investment advice.</p>
       </div>
+      <div class='faq-item'>
+        <p>
+          Legal: <a href='/terms'>Terms</a> | <a href='/privacy'>Privacy</a> | <a href='/disclaimer'>Disclaimer</a>
+        </p>
+      </div>
     </div>
   </div>
 </body>
 </html>
 """
+
+
+def _render_legal_page(
+    *,
+    request: web.Request,
+    title: str,
+    body_html: str,
+    google_analytics_measurement_id: str,
+) -> str:
+    origin = _request_origin(request)
+    canonical_url = f"{origin}{request.path}"
+    analytics_tag = _render_google_analytics_tag(google_analytics_measurement_id)
+    updated_on = "March 8, 2026"
+    return f"""
+<!doctype html>
+<html lang='en'>
+<head>
+  <meta charset='utf-8' />
+  <meta name='viewport' content='width=device-width, initial-scale=1' />
+  <meta name='robots' content='index,follow' />
+  <link rel='canonical' href='{escape(canonical_url)}' />
+  <title>{escape(title)} | Black Swan Vault</title>
+  {analytics_tag}
+  <style>
+    :root {{
+      --bg:#06080d;
+      --panel:#0d1119;
+      --line:#242b38;
+      --text:#e9edf6;
+      --muted:#96a0b8;
+      --accent:#ff9f1a;
+    }}
+    * {{ box-sizing:border-box; }}
+    body {{
+      margin:0;
+      color:var(--text);
+      font-family:"Space Grotesk","Segoe UI",sans-serif;
+      background-color:var(--bg);
+      background-image:
+        linear-gradient(rgba(255,159,26,.07) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,159,26,.07) 1px, transparent 1px),
+        radial-gradient(circle at 18% 12%, rgba(255,159,26,.18), transparent 54%);
+      background-size:96px 96px,96px 96px,100% 100%;
+    }}
+    .wrap {{ max-width:900px; margin:0 auto; padding:24px 16px 40px; }}
+    .card {{
+      background:linear-gradient(180deg,rgba(255,159,26,.06),rgba(255,159,26,.015) 42%,rgba(13,17,25,.95));
+      border:1px solid var(--line);
+      border-radius:18px;
+      padding:22px;
+    }}
+    h1 {{ margin:0 0 10px; font-size:34px; }}
+    h2 {{ margin:22px 0 8px; font-size:20px; color:#ffd18a; }}
+    p, li {{ color:#d4daea; line-height:1.6; }}
+    ul {{ margin:0; padding-left:20px; }}
+    .top-links {{
+      display:flex;
+      flex-wrap:wrap;
+      gap:10px;
+      margin-bottom:16px;
+    }}
+    .top-links a {{
+      color:#ffc66a;
+      text-decoration:none;
+      border:1px solid #805215;
+      border-radius:999px;
+      padding:8px 12px;
+      font-size:14px;
+      background:rgba(255,159,26,.12);
+    }}
+    .top-links a:hover {{ background:rgba(255,159,26,.2); }}
+    .updated {{ color:var(--muted); font-size:13px; margin-top:18px; }}
+  </style>
+</head>
+<body>
+  <div class='wrap'>
+    <div class='card'>
+      <div class='top-links'>
+        <a href='/'>Back to Directory</a>
+        <a href='/terms'>Terms</a>
+        <a href='/privacy'>Privacy</a>
+        <a href='/disclaimer'>Disclaimer</a>
+      </div>
+      <h1>{escape(title)}</h1>
+      {body_html}
+      <p class='updated'>Last updated: {escape(updated_on)}</p>
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+
+def _render_terms_page(request: web.Request, *, google_analytics_measurement_id: str) -> str:
+    return _render_legal_page(
+        request=request,
+        title="Terms of Service",
+        google_analytics_measurement_id=google_analytics_measurement_id,
+        body_html="""
+<p>
+  By using Black Swan Vault, you agree to these Terms. If you do not agree, do not use the service.
+</p>
+<h2>Service Scope</h2>
+<ul>
+  <li>The service publishes trade activity and analytics for informational purposes.</li>
+  <li>Availability, data sources, features, and filters may change at any time without notice.</li>
+  <li>We may suspend, limit, or remove access for abuse, misuse, or security reasons.</li>
+</ul>
+<h2>User Responsibilities</h2>
+<ul>
+  <li>You are solely responsible for your decisions, trades, risk management, and legal compliance.</li>
+  <li>You must not use this service for unlawful, abusive, or automated attacks on infrastructure.</li>
+  <li>You must not rely on service uptime or signal completeness as guaranteed.</li>
+</ul>
+<h2>Risk and No Warranty</h2>
+<ul>
+  <li>Trading derivatives and crypto assets carries substantial risk, including total loss of capital.</li>
+  <li>Data may be delayed, incomplete, or inaccurate; no performance outcome is guaranteed.</li>
+  <li>The service is provided "as is" and "as available", without warranties of any kind.</li>
+</ul>
+<h2>Liability</h2>
+<ul>
+  <li>To the maximum extent permitted by law, Black Swan Vault is not liable for losses, damages, or missed opportunities resulting from use of this service.</li>
+  <li>This includes direct, indirect, incidental, consequential, and special damages.</li>
+</ul>
+<h2>Contact</h2>
+<p>Operational and legal contact: <code>sanyo4ever@gmail.com</code></p>
+""",
+    )
+
+
+def _render_privacy_page(request: web.Request, *, google_analytics_measurement_id: str) -> str:
+    return _render_legal_page(
+        request=request,
+        title="Privacy Policy",
+        google_analytics_measurement_id=google_analytics_measurement_id,
+        body_html="""
+<p>
+  This Privacy Policy explains what data we process to run Black Swan Vault.
+</p>
+<h2>What We Collect</h2>
+<ul>
+  <li>Basic server logs: request metadata, IP address, timestamp, and user-agent.</li>
+  <li>Subscription request telemetry used for service operations and abuse prevention.</li>
+  <li>Analytics events through Google Analytics (if enabled on this deployment).</li>
+</ul>
+<h2>Why We Process Data</h2>
+<ul>
+  <li>Operate, secure, and debug the service.</li>
+  <li>Measure usage and improve performance and reliability.</li>
+  <li>Investigate abuse, incidents, and policy violations.</li>
+</ul>
+<h2>Data Sharing</h2>
+<ul>
+  <li>We do not sell personal data.</li>
+  <li>Limited data may be processed by infrastructure and analytics providers as needed to operate the service.</li>
+</ul>
+<h2>Retention</h2>
+<ul>
+  <li>Operational logs and telemetry are retained only as long as necessary for security, troubleshooting, and service quality.</li>
+</ul>
+<h2>Your Choices</h2>
+<ul>
+  <li>You can stop using the service at any time.</li>
+  <li>You can block analytics scripts in your browser if you prefer not to share analytics data.</li>
+</ul>
+<h2>Contact</h2>
+<p>Privacy contact: <code>sanyo4ever@gmail.com</code></p>
+""",
+    )
+
+
+def _render_disclaimer_page(
+    request: web.Request,
+    *,
+    google_analytics_measurement_id: str,
+) -> str:
+    return _render_legal_page(
+        request=request,
+        title="Disclaimer",
+        google_analytics_measurement_id=google_analytics_measurement_id,
+        body_html="""
+<p><strong>Not financial advice.</strong></p>
+<p>
+  Black Swan Vault is an informational analytics and signal-delivery tool. It does not provide
+  investment, financial, tax, legal, or accounting advice.
+</p>
+<h2>No Recommendation</h2>
+<ul>
+  <li>Nothing on this website, in Telegram topics, or in related messages is a recommendation to buy, sell, or hold any asset.</li>
+  <li>Signals reflect observed activity and may be delayed, partial, or incorrect.</li>
+</ul>
+<h2>High-Risk Activity</h2>
+<ul>
+  <li>Crypto and derivatives trading involve high risk and may result in full capital loss.</li>
+  <li>Past performance does not guarantee future results.</li>
+</ul>
+<h2>Your Responsibility</h2>
+<ul>
+  <li>You are solely responsible for your own decisions and risk controls.</li>
+  <li>Always do your own research and consult a licensed advisor where appropriate.</li>
+</ul>
+""",
+    )
 
 
 def _render_admin_index(*, traders, discovery_runs, message: str | None = None) -> str:
@@ -1785,6 +1989,39 @@ async def subscribe_landing(request: web.Request) -> web.Response:
     raise web.HTTPFound(f"/subscribe/{address}/go")
 
 
+async def terms_page(request: web.Request) -> web.Response:
+    settings = request.app["settings"]
+    return web.Response(
+        text=_render_terms_page(
+            request,
+            google_analytics_measurement_id=settings.google_analytics_measurement_id,
+        ),
+        content_type="text/html",
+    )
+
+
+async def privacy_page(request: web.Request) -> web.Response:
+    settings = request.app["settings"]
+    return web.Response(
+        text=_render_privacy_page(
+            request,
+            google_analytics_measurement_id=settings.google_analytics_measurement_id,
+        ),
+        content_type="text/html",
+    )
+
+
+async def disclaimer_page(request: web.Request) -> web.Response:
+    settings = request.app["settings"]
+    return web.Response(
+        text=_render_disclaimer_page(
+            request,
+            google_analytics_measurement_id=settings.google_analytics_measurement_id,
+        ),
+        content_type="text/html",
+    )
+
+
 async def admin_index(request: web.Request) -> web.Response:
     settings = request.app["settings"]
     message = request.query.get("msg")
@@ -1959,6 +2196,9 @@ def create_app(*, settings=None, logger: logging.Logger | None = None) -> web.Ap
         [
             web.get("/", subscriber_directory),
             web.get("/directory", subscriber_directory),
+            web.get("/terms", terms_page),
+            web.get("/privacy", privacy_page),
+            web.get("/disclaimer", disclaimer_page),
             web.get("/api/traders", traders_api),
             web.get("/subscribe/{address}", subscribe_landing),
             web.get("/subscribe/{address}/go", subscribe_redirect),
