@@ -63,22 +63,28 @@ async def _run() -> None:
                         logger.info("Universe cycle skipped: lease is held by another worker")
                         cycle_skipped = True
                     else:
-                        lifecycle_stats = store.apply_trader_lifecycle(
-                            listed_within_minutes=settings.trader_listed_within_minutes,
-                            stale_after_minutes=settings.trader_stale_after_minutes,
-                            archive_after_days=settings.trader_archive_after_days,
-                        )
-                        universe_size = store.refresh_traders_universe_from_tracked(
-                            min_age_days=settings.universe_min_age_days,
-                            min_trades_30d=settings.universe_min_trades_30d,
-                            min_active_days_30d=settings.universe_min_active_days_30d,
-                            min_win_rate_30d=settings.universe_min_win_rate_30d,
-                            max_drawdown_30d_pct=settings.universe_max_drawdown_30d_pct,
-                            max_last_activity_minutes=settings.universe_max_last_activity_minutes,
-                            min_realized_pnl_30d=settings.universe_min_realized_pnl_30d,
-                            min_score=settings.universe_min_score,
-                            max_size=settings.universe_max_size,
-                        )
+                        try:
+                            lifecycle_stats = store.apply_trader_lifecycle(
+                                listed_within_minutes=settings.trader_listed_within_minutes,
+                                stale_after_minutes=settings.trader_stale_after_minutes,
+                                archive_after_days=settings.trader_archive_after_days,
+                            )
+                            universe_size = store.refresh_traders_universe_from_tracked(
+                                min_age_days=settings.universe_min_age_days,
+                                min_trades_30d=settings.universe_min_trades_30d,
+                                min_active_days_30d=settings.universe_min_active_days_30d,
+                                min_win_rate_30d=settings.universe_min_win_rate_30d,
+                                max_drawdown_30d_pct=settings.universe_max_drawdown_30d_pct,
+                                max_last_activity_minutes=settings.universe_max_last_activity_minutes,
+                                min_realized_pnl_30d=settings.universe_min_realized_pnl_30d,
+                                min_score=settings.universe_min_score,
+                                max_size=settings.universe_max_size,
+                            )
+                        finally:
+                            store.release_runtime_lease(
+                                lock_name="tracked-traders-write",
+                                holder=lease_holder,
+                            )
                 if not cycle_skipped:
                     logger.info(
                         "Lifecycle changed=%s listed=%s unlisted=%s stale=%s archived=%s | Universe size=%s",

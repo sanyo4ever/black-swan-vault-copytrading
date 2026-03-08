@@ -90,13 +90,19 @@ async def _run() -> None:
                             logger.info("Discovery cycle skipped: lease is held by another worker")
                             cycle_skipped = True
                         else:
-                            service = HyperliquidDiscoveryService(
-                                http_session=session,
-                                store=store,
-                                config=config,
-                                logger=logger,
-                            )
-                            summary = await service.discover()
+                            try:
+                                service = HyperliquidDiscoveryService(
+                                    http_session=session,
+                                    store=store,
+                                    config=config,
+                                    logger=logger,
+                                )
+                                summary = await service.discover()
+                            finally:
+                                store.release_runtime_lease(
+                                    lock_name="tracked-traders-write",
+                                    holder=lease_holder,
+                                )
                     if not cycle_skipped:
                         logger.info(
                             "Cycle done: candidates=%s qualified=%s upserted=%s unlisted=%s",

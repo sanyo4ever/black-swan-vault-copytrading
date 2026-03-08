@@ -61,22 +61,28 @@ async def _run() -> None:
                         logger.info("Top100 cycle skipped: lease is held by another worker")
                         cycle_skipped = True
                     else:
-                        catalog_size = store.refresh_catalog_current(
-                            activity_window_minutes=settings.live_top100_active_window_minutes,
-                        )
-                        count = store.refresh_top100_live(
-                            max_rows=settings.live_top100_size,
-                            active_window_minutes=settings.live_top100_active_window_minutes,
-                        )
-                        monitoring_stats = store.refresh_monitoring_pool(
-                            hot_size=settings.monitor_hot_size,
-                            warm_size=settings.monitor_warm_size,
-                            hot_poll_seconds=settings.monitor_hot_poll_seconds,
-                            warm_poll_seconds=settings.monitor_warm_poll_seconds,
-                            cold_poll_seconds=settings.monitor_cold_poll_seconds,
-                            hot_recency_minutes=settings.monitor_hot_recency_minutes,
-                            warm_recency_minutes=settings.monitor_warm_recency_minutes,
-                        )
+                        try:
+                            catalog_size = store.refresh_catalog_current(
+                                activity_window_minutes=settings.live_top100_active_window_minutes,
+                            )
+                            count = store.refresh_top100_live(
+                                max_rows=settings.live_top100_size,
+                                active_window_minutes=settings.live_top100_active_window_minutes,
+                            )
+                            monitoring_stats = store.refresh_monitoring_pool(
+                                hot_size=settings.monitor_hot_size,
+                                warm_size=settings.monitor_warm_size,
+                                hot_poll_seconds=settings.monitor_hot_poll_seconds,
+                                warm_poll_seconds=settings.monitor_warm_poll_seconds,
+                                cold_poll_seconds=settings.monitor_cold_poll_seconds,
+                                hot_recency_minutes=settings.monitor_hot_recency_minutes,
+                                warm_recency_minutes=settings.monitor_warm_recency_minutes,
+                            )
+                        finally:
+                            store.release_runtime_lease(
+                                lock_name="top100-cycle",
+                                holder=lease_holder,
+                            )
                 if not cycle_skipped:
                     logger.info(
                         "Catalog size=%s | Top100 size=%s | Monitoring pool total=%s hot=%s warm=%s cold=%s",
