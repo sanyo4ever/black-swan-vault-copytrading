@@ -172,6 +172,30 @@ Lifecycle transitions are automatic (`top100_worker` + `universe_worker`) and su
 - blacklisted trader -> delivery detached by moderation rules
 - discovery "prune" -> soft unlist, not delete
 
+## QA Certification Gate
+
+Run the full QA gate locally (unit/integration/e2e tests):
+
+```bash
+python scripts/qa_certification.py --skip-db-audit
+```
+
+Run with live DB quality audit and JSON report:
+
+```bash
+python scripts/qa_certification.py \
+  --database "$DATABASE_URL" \
+  --freshness-minutes 60 \
+  --min-active-listed 1 \
+  --json-out data/qa-report.json
+```
+
+What the gate checks:
+
+- Data quality invariants (schema/ranges/freshness)
+- Metrics integrity (ROI/Win Rate/Drawdown/Sharpe/Sortino/volatility)
+- Business e2e flows (subscribe/unsubscribe/fanout/retry/Telegram edge cases)
+
 ## Test Data Hygiene
 
 Never leave synthetic traders in shared databases after manual/E2E testing.

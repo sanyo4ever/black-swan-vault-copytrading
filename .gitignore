@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 .env
 data/*.db
+data/qa-report*.json
 
 # Local Codex/agent files
 PROJECT_MEMORY.md
