@@ -118,6 +118,7 @@ class ConfigTests(unittest.TestCase):
                 os.environ["ROTATION_SCOUT_ON_STALE_IMMEDIATE"] = "true"
                 os.environ["ROTATION_STALE_HOURS"] = "96"
                 os.environ["ROTATION_STALE_CYCLES"] = "4"
+                os.environ["ROTATION_SCOUT_MAX_LAST_ACTIVITY_MINUTES"] = "1440"
                 os.environ["ROTATION_SCORE_THRESHOLD_PCT"] = "6.5"
                 os.environ["ROTATION_SCOUT_CANDIDATES"] = "40"
                 os.environ["ROTATION_BOOTSTRAP_CANDIDATES"] = "70"
@@ -132,6 +133,7 @@ class ConfigTests(unittest.TestCase):
                 self.assertTrue(settings.rotation_scout_on_stale_immediate)
                 self.assertEqual(settings.rotation_stale_hours, 96)
                 self.assertEqual(settings.rotation_stale_cycles, 4)
+                self.assertEqual(settings.rotation_scout_max_last_activity_minutes, 1440)
                 self.assertEqual(settings.rotation_score_threshold_pct, 6.5)
                 self.assertEqual(settings.rotation_scout_candidates, 40)
                 self.assertEqual(settings.rotation_bootstrap_candidates, 70)

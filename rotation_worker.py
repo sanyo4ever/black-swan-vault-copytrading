@@ -98,7 +98,13 @@ class LightweightRotationWorker:
                 holder=self._lease_holder,
             )
 
-    def _passes_hard_filters(self, item: dict[str, Any], *, now_ms: int) -> bool:
+    def _passes_hard_filters(
+        self,
+        item: dict[str, Any],
+        *,
+        now_ms: int,
+        max_last_activity_minutes: int | None = None,
+    ) -> bool:
         age_days = item.get("age_days")
         if age_days is None or float(age_days) < float(self._settings.discovery_min_age_days):
             return False
@@ -109,7 +115,9 @@ class LightweightRotationWorker:
         if int(item.get("trades_7d") or 0) < int(self._settings.discovery_min_trades_7d):
             return False
 
-        cutoff_ms = now_ms - (max(1, int(self._settings.discovery_max_last_activity_minutes)) * 60 * 1000)
+        if max_last_activity_minutes is None:
+            max_last_activity_minutes = int(self._settings.discovery_max_last_activity_minutes)
+        cutoff_ms = now_ms - (max(1, int(max_last_activity_minutes)) * 60 * 1000)
         if int(item.get("last_fill_time") or 0) < cutoff_ms:
             return False
 
@@ -254,7 +262,12 @@ class LightweightRotationWorker:
             )
         return thread_id
 
-    async def _discover_scored_candidates(self, *, limit: int) -> list[dict[str, Any]]:
+    async def _discover_scored_candidates(
+        self,
+        *,
+        limit: int,
+        max_last_activity_minutes: int | None = None,
+    ) -> list[dict[str, Any]]:
         now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
         with TraderStore(self._settings.database_dsn) as store:
             service = HyperliquidDiscoveryService(
@@ -290,7 +303,11 @@ class LightweightRotationWorker:
         for item in metrics:
             if not item:
                 continue
-            if self._passes_hard_filters(item, now_ms=now_ms):
+            if self._passes_hard_filters(
+                item,
+                now_ms=now_ms,
+                max_last_activity_minutes=max_last_activity_minutes,
+            ):
                 qualified.append(item)
                 continue
             if self._passes_soft_filters(item, now_ms=now_ms):
@@ -573,6 +590,7 @@ class LightweightRotationWorker:
 
         candidates = await self._discover_scored_candidates(
             limit=max(int(self._settings.rotation_scout_candidates), slots * 2),
+            max_last_activity_minutes=int(self._settings.rotation_scout_max_last_activity_minutes),
         )
         if not candidates:
             self._logger.info("Scout found no qualified replacement candidates")

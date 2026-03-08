@@ -49,6 +49,7 @@ class Settings:
     rotation_scout_on_stale_immediate: bool
     rotation_stale_hours: int
     rotation_stale_cycles: int
+    rotation_scout_max_last_activity_minutes: int
     rotation_score_threshold_pct: float
     rotation_scout_candidates: int
     rotation_bootstrap_candidates: int
@@ -232,6 +233,10 @@ def load_settings(
         ),
         rotation_stale_hours=max(1, int(os.getenv("ROTATION_STALE_HOURS", "72"))),
         rotation_stale_cycles=max(1, int(os.getenv("ROTATION_STALE_CYCLES", "3"))),
+        rotation_scout_max_last_activity_minutes=max(
+            1,
+            int(os.getenv("ROTATION_SCOUT_MAX_LAST_ACTIVITY_MINUTES", "1440")),
+        ),
         rotation_score_threshold_pct=max(
             0.0,
             float(os.getenv("ROTATION_SCORE_THRESHOLD_PCT", "5")),

@@ -38,6 +38,7 @@ ROTATION_BOOTSTRAP_INTERVAL_MINUTES=360
 ROTATION_SCOUT_INTERVAL_HOURS=24
 ROTATION_HEALTH_INTERVAL_MINUTES=180
 ROTATION_SCOUT_ON_STALE_IMMEDIATE=true
+ROTATION_SCOUT_MAX_LAST_ACTIVITY_MINUTES=1440
 ADMIN_PANEL_USERNAME=admin
 ADMIN_PANEL_PASSWORD=strong_password
 ADMIN_RATE_LIMIT_WINDOW_SECONDS=60
@@ -79,6 +80,8 @@ sudo systemctl disable --now cryptoinsider-top100.service
 
 Recommended for low API pressure: keep bootstrap/scout intervals high
 (`ROTATION_BOOTSTRAP_INTERVAL_MINUTES`, `ROTATION_SCOUT_INTERVAL_HOURS`).
+For scout candidate breadth across time zones, use
+`ROTATION_SCOUT_MAX_LAST_ACTIVITY_MINUTES=1440` (24h).
 
 ## 5. Deploy update (recommended workflow)
 
