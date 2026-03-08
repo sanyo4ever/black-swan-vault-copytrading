@@ -65,6 +65,8 @@ Calculated per period (1d/7d/30d):
 Important implementation detail:
 
 - metrics are computed on aggregated order-level trades (not raw partial fills), which reduces activity inflation.
+- ROI uses period-start equity estimated from `accountValue`, realized PnL, unrealized PnL, and non-funding
+  ledger capital flows (`userNonFundingLedgerUpdates`) so deposits/withdrawals do not distort performance.
 
 Additional trader-level fields:
 

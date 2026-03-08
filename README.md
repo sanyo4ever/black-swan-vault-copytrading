@@ -54,6 +54,7 @@ Most copytrading tools are closed, expensive, or difficult to self-host. Black S
 - Composite quality score:
   - ROI + Sharpe + Sortino + Win Rate + Activity
   - penalties for drawdown, volatility, and fees
+  - ROI baseline is capital-flow adjusted (ledger deposits/withdrawals/transfers)
 - Tiered monitoring to reduce load:
   - HOT (frequent)
   - WARM (medium)

@@ -18,6 +18,7 @@ class _StubDiscoveryService(HyperliquidDiscoveryService):
         store: TraderStore,
         fills: list[dict],
         account_value: float = 10_000.0,
+        ledger_updates: list[dict] | None = None,
     ) -> None:
         super().__init__(
             http_session=object(),  # network is stubbed in tests
@@ -30,6 +31,7 @@ class _StubDiscoveryService(HyperliquidDiscoveryService):
         )
         self._fills = fills
         self._account_value = account_value
+        self._ledger_updates = list(ledger_updates or [])
 
     async def _info(self, payload: dict) -> object:
         payload_type = str(payload.get("type", ""))
@@ -44,7 +46,12 @@ class _StubDiscoveryService(HyperliquidDiscoveryService):
                 }
             }
         if payload_type == "userNonFundingLedgerUpdates":
-            return []
+            start_time = int(payload.get("startTime") or 0)
+            return [
+                item
+                for item in self._ledger_updates
+                if int(item.get("time") or 0) >= start_time
+            ]
         raise AssertionError(f"Unexpected payload in test: {payload}")
 
 
@@ -115,9 +122,72 @@ class MetricsComputationTests(unittest.TestCase):
         ]
         stats = self.service._compute_period_stats(fills=fills, account_value=200.0)
         self.assertAlmostEqual(float(stats["realized_pnl"] or 0.0), 100.0, places=6)
-        # start_equity_estimate = abs(200 - 100) = 100. ROI should use 100 (=> 100%),
+        # start_equity_estimate = 200 - 100 = 100. ROI should use 100 (=> 100%),
         # not current equity 200 (=> 50%).
         self.assertAlmostEqual(float(stats["roi_pct"] or 0.0), 100.0, places=6)
+
+    def test_roi_adjusts_for_ledger_capital_flows(self) -> None:
+        fills = [
+            {"oid": "1", "time": 1, "px": "100", "sz": "1", "closedPnl": "100"},
+        ]
+        stats = self.service._compute_period_stats(
+            fills=fills,
+            account_value=1100.0,
+            net_capital_flow=500.0,
+        )
+        self.assertAlmostEqual(float(stats["realized_pnl"] or 0.0), 100.0, places=6)
+        self.assertAlmostEqual(float(stats["net_capital_flow"] or 0.0), 500.0, places=6)
+        # start_equity = 1100 - 100 - 500 = 500 => ROI = 100/500 = 20%
+        self.assertAlmostEqual(float(stats["roi_pct"] or 0.0), 20.0, places=6)
+
+    def test_extract_ledger_capital_flow_signs(self) -> None:
+        address = "0xabcabcabcabcabcabcabcabcabcabcabcabcabca"
+        deposit = {
+            "time": 1,
+            "delta": {"type": "deposit", "usdc": "250.5", "user": address},
+        }
+        withdrawal = {
+            "time": 2,
+            "delta": {"type": "withdraw", "usdc": "-100", "fee": "1.5", "user": address},
+        }
+        transfer_in = {
+            "time": 3,
+            "delta": {
+                "type": "subAccountTransfer",
+                "usdc": "40",
+                "user": "0xdddddddddddddddddddddddddddddddddddddddd",
+                "destination": address,
+            },
+        }
+        transfer_out = {
+            "time": 4,
+            "delta": {
+                "type": "subAccountTransfer",
+                "usdc": "25",
+                "user": address,
+                "destination": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            },
+        }
+        self.assertAlmostEqual(
+            self.service._extract_ledger_capital_flow_usd(deposit, address=address),
+            250.5,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            self.service._extract_ledger_capital_flow_usd(withdrawal, address=address),
+            -101.5,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            self.service._extract_ledger_capital_flow_usd(transfer_in, address=address),
+            40.0,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            self.service._extract_ledger_capital_flow_usd(transfer_out, address=address),
+            -25.0,
+            places=6,
+        )
 
     def test_drawdown_uses_closed_pnls_even_when_returns_are_empty(self) -> None:
         fills = [
@@ -204,6 +274,65 @@ class MetricsFetchPipelineTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreaterEqual(float(metrics["roi_volatility_30d"] or 0.0), 0.0)
             self.assertGreaterEqual(float(metrics["trades_30d"]), 1.0)
             self.assertIsNotNone(metrics["win_rate_30d"])
+
+            store.close()
+
+    async def test_fetch_metrics_roi_uses_ledger_flow_adjustment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "metrics-ledger-flow.db"
+            store = TraderStore(db_path)
+            now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
+            address = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            fills = [
+                {
+                    "oid": "1",
+                    "time": now_ms - (2 * 24 * 60 * 60 * 1000),
+                    "px": "100",
+                    "sz": "1",
+                    "closedPnl": "100",
+                    "dir": "Close Long",
+                    "side": "A",
+                    "fee": "0.5",
+                }
+            ]
+            ledger_updates = [
+                {
+                    "time": now_ms - (3 * 24 * 60 * 60 * 1000),
+                    "delta": {
+                        "type": "deposit",
+                        "usdc": "500",
+                        "user": address,
+                    },
+                }
+            ]
+            service = _StubDiscoveryService(
+                store=store,
+                fills=fills,
+                account_value=1100.0,
+                ledger_updates=ledger_updates,
+            )
+
+            metrics = await service._fetch_metrics(
+                {
+                    "address": address,
+                    "label": "LedgerFixture",
+                    "source": "hyperliquid_recent_trades",
+                    "vault_tvl": 120_000.0,
+                },
+                now_ms=now_ms,
+            )
+            self.assertAlmostEqual(float(metrics["roi_30d"] or 0.0), 20.0, places=6)
+            self.assertAlmostEqual(
+                float(metrics["net_capital_flow_30d"] or 0.0),
+                500.0,
+                places=6,
+            )
+            stats_payload = json.loads(str(metrics["stats_json"]))
+            self.assertAlmostEqual(
+                float(stats_payload["metrics_30d"]["net_capital_flow"] or 0.0),
+                500.0,
+                places=6,
+            )
 
             store.close()
 

@@ -333,6 +333,7 @@ class HyperliquidDiscoveryService:
         account_value: float | None,
         period_days: int = 30,
         unrealized_pnl_end: float | None = None,
+        net_capital_flow: float | None = None,
     ) -> dict[str, float | int | None]:
         trades = self._aggregate_trades(fills)
         notionals = [
@@ -370,12 +371,19 @@ class HyperliquidDiscoveryService:
         )
         avg_pnl_per_trade = (realized_pnl / closed_count) if closed_count else None
 
+        unrealized_end = float(unrealized_pnl_end or 0.0)
+        capital_flow = float(net_capital_flow or 0.0)
+
         roi_base = None
-        if account_value is not None and abs(account_value) > 1e-9:
-            start_equity_estimate = abs(account_value - realized_pnl)
-            current_equity = abs(account_value)
+        if account_value is not None:
+            current_equity = float(account_value)
+            # Period-start equity estimate:
+            # end_equity = start_equity + realized_pnl + net_capital_flow + unrealized_end
+            # => start_equity = end_equity - realized_pnl - net_capital_flow - unrealized_end
+            start_equity_estimate = (
+                current_equity - realized_pnl - capital_flow - unrealized_end
+            )
             if start_equity_estimate > 1e-9:
-                # Use estimated period-start equity to avoid under-reporting profitable accounts.
                 roi_base = start_equity_estimate
             elif current_equity > 1e-9:
                 roi_base = current_equity
@@ -396,7 +404,6 @@ class HyperliquidDiscoveryService:
                 drawdown = (peak_equity - equity) / peak_equity
                 max_drawdown = max(max_drawdown, drawdown)
 
-        unrealized_end = float(unrealized_pnl_end or 0.0)
         if abs(unrealized_end) > 1e-12 and peak_equity > 0:
             equity_with_unrealized = equity + unrealized_end
             drawdown = (peak_equity - equity_with_unrealized) / peak_equity
@@ -429,6 +436,7 @@ class HyperliquidDiscoveryService:
             "profit_to_loss_ratio": profit_to_loss_ratio,
             "avg_pnl_per_trade": avg_pnl_per_trade,
             "roi_pct": roi_pct,
+            "net_capital_flow": capital_flow,
             "max_drawdown_pct": (max_drawdown * 100.0) if closed_pnls else None,
             "sharpe": sharpe,
             "sortino": sortino,
@@ -437,6 +445,77 @@ class HyperliquidDiscoveryService:
             "avg_notional": ((sum(notionals) / len(notionals)) if notionals else None),
             "max_notional": (max(notionals) if notionals else None),
         }
+
+    @staticmethod
+    def _normalize_address(raw: Any) -> str:
+        return str(raw or "").strip().lower()
+
+    def _extract_ledger_capital_flow_usd(
+        self,
+        update: dict[str, Any],
+        *,
+        address: str,
+    ) -> float:
+        if not isinstance(update, dict):
+            return 0.0
+        delta = update.get("delta")
+        if not isinstance(delta, dict):
+            return 0.0
+
+        delta_type = str(delta.get("type") or "").strip().lower()
+        usdc = self._to_float(delta.get("usdc"))
+        user = self._normalize_address(delta.get("user"))
+        destination = self._normalize_address(delta.get("destination"))
+        normalized_address = self._normalize_address(address)
+
+        amount = abs(usdc)
+        if amount <= 1e-12:
+            amount = abs(self._to_float(delta.get("amount")))
+        if amount <= 1e-12:
+            amount = abs(self._to_float(delta.get("usdcValue")))
+        fee = abs(self._to_float(delta.get("fee")))
+
+        if delta_type == "deposit":
+            if amount > 1e-12:
+                return amount
+            return abs(usdc)
+        if delta_type in {"withdraw", "cwithdrawal"}:
+            if amount > 1e-12:
+                return -(amount + fee)
+            return -abs(usdc)
+        if delta_type == "accountclasstransfer":
+            if amount <= 1e-12:
+                return usdc
+            to_perp = bool(delta.get("toPerp"))
+            return amount if to_perp else -amount
+        if delta_type in {"subaccounttransfer", "internaltransfer"}:
+            if amount <= 1e-12:
+                return usdc
+            if user == normalized_address and destination and destination != normalized_address:
+                return -amount
+            if destination == normalized_address and user and user != normalized_address:
+                return amount
+            return usdc
+
+        # Unknown ledger types are ignored for ROI capital-flow adjustment.
+        return 0.0
+
+    def _sum_ledger_capital_flow(
+        self,
+        *,
+        updates: list[dict[str, Any]],
+        address: str,
+        since_ms: int,
+    ) -> float:
+        total = 0.0
+        for update in updates:
+            if not isinstance(update, dict):
+                continue
+            ts = self._to_int(update.get("time"))
+            if ts < since_ms:
+                continue
+            total += self._extract_ledger_capital_flow_usd(update, address=address)
+        return total
 
     async def _probe_account_first_activity_time(self, address: str) -> int | None:
         try:
@@ -904,6 +983,46 @@ class HyperliquidDiscoveryService:
         fills_7d = [item for item in normalized if self._to_int(item.get("time")) >= cut_7d]
         fills_30d = [item for item in normalized if self._to_int(item.get("time")) >= cut_30d]
 
+        ledger_updates: list[dict[str, Any]] = []
+        try:
+            raw_ledger_updates = await self._info(
+                {
+                    "type": "userNonFundingLedgerUpdates",
+                    "user": candidate["address"],
+                    "startTime": cut_30d,
+                }
+            )
+        except Exception as exc:
+            self._logger.debug(
+                "Ledger flow fetch failed address=%s error=%s",
+                candidate["address"],
+                exc,
+            )
+            raw_ledger_updates = []
+        if isinstance(raw_ledger_updates, list):
+            ledger_updates = [
+                item
+                for item in raw_ledger_updates
+                if isinstance(item, dict) and self._to_int(item.get("time")) > 0
+            ]
+            ledger_updates.sort(key=lambda item: self._to_int(item.get("time")))
+
+        net_capital_flow_1d = self._sum_ledger_capital_flow(
+            updates=ledger_updates,
+            address=candidate["address"],
+            since_ms=cut_24h,
+        )
+        net_capital_flow_7d = self._sum_ledger_capital_flow(
+            updates=ledger_updates,
+            address=candidate["address"],
+            since_ms=cut_7d,
+        )
+        net_capital_flow_30d = self._sum_ledger_capital_flow(
+            updates=ledger_updates,
+            address=candidate["address"],
+            since_ms=cut_30d,
+        )
+
         trades_24h = len(self._aggregate_trades(fills_24h))
         trades_7d = len(self._aggregate_trades(fills_7d))
         aggregated_30d = self._aggregate_trades(fills_30d)
@@ -965,18 +1084,21 @@ class HyperliquidDiscoveryService:
             account_value=account_value,
             period_days=1,
             unrealized_pnl_end=unrealized_pnl_end,
+            net_capital_flow=net_capital_flow_1d,
         )
         period_7d = self._compute_period_stats(
             fills=fills_7d,
             account_value=account_value,
             period_days=7,
             unrealized_pnl_end=unrealized_pnl_end,
+            net_capital_flow=net_capital_flow_7d,
         )
         period_30d = self._compute_period_stats(
             fills=fills_30d,
             account_value=account_value,
             period_days=30,
             unrealized_pnl_end=unrealized_pnl_end,
+            net_capital_flow=net_capital_flow_30d,
         )
 
         fees_30d = sum(abs(self._to_float(item.get("fee"))) for item in fills_30d)
@@ -1073,6 +1195,7 @@ class HyperliquidDiscoveryService:
             "metrics_1d": {
                 "roi_pct": period_1d["roi_pct"],
                 "realized_pnl": period_1d["realized_pnl"],
+                "net_capital_flow": period_1d["net_capital_flow"],
                 "win_rate": period_1d["win_rate"],
                 "wins": period_1d["wins"],
                 "losses": period_1d["losses"],
@@ -1087,6 +1210,7 @@ class HyperliquidDiscoveryService:
             "metrics_7d": {
                 "roi_pct": period_7d["roi_pct"],
                 "realized_pnl": period_7d["realized_pnl"],
+                "net_capital_flow": period_7d["net_capital_flow"],
                 "win_rate": period_7d["win_rate"],
                 "wins": period_7d["wins"],
                 "losses": period_7d["losses"],
@@ -1102,6 +1226,7 @@ class HyperliquidDiscoveryService:
             "metrics_30d": {
                 "roi_pct": period_30d["roi_pct"],
                 "realized_pnl": period_30d["realized_pnl"],
+                "net_capital_flow": period_30d["net_capital_flow"],
                 "win_rate": period_30d["win_rate"],
                 "wins": period_30d["wins"],
                 "losses": period_30d["losses"],
@@ -1118,6 +1243,10 @@ class HyperliquidDiscoveryService:
             "fills_capped": fills_capped,
             "age_probe_used": age_probe_used,
             "ledger_first_activity_time": ledger_first_activity_time,
+            "ledger_updates_30d": len(ledger_updates),
+            "net_capital_flow_1d": net_capital_flow_1d,
+            "net_capital_flow_7d": net_capital_flow_7d,
+            "net_capital_flow_30d": net_capital_flow_30d,
             "score_components": {
                 "roi_score": round(roi_score, 6),
                 "sharpe_score": round(sharpe_score, 6),
@@ -1161,6 +1290,7 @@ class HyperliquidDiscoveryService:
             "total_ntl_pos": total_ntl_pos,
             "total_margin_used": total_margin_used,
             "unrealized_pnl_end": unrealized_pnl_end,
+            "net_capital_flow_30d": net_capital_flow_30d,
             "score": round(score, 4),
             "stats_json": json.dumps(stats_payload, ensure_ascii=True, separators=(",", ":")),
         }
