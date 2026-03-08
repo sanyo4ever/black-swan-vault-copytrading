@@ -1,0 +1,11 @@
+[cryptoinsider-http-abuse]
+enabled = true
+port = http,https
+filter = cryptoinsider-http-abuse
+logpath = /var/log/nginx/access.log
+backend = auto
+findtime = 10m
+maxretry = 20
+bantime = 2h
+# Add trusted maintenance IPs here.
+ignoreip = 127.0.0.1/8 ::1

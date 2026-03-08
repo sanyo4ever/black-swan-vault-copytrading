@@ -163,3 +163,20 @@ source /etc/cryptoinsider/env
   --sqlite-path data/signals.db \
   --postgres-url "$DATABASE_URL"
 ```
+
+## 10. Fail2ban hardening for HTTP abuse (recommended)
+
+Install filter and jail:
+
+```bash
+sudo cp deploy/fail2ban/cryptoinsider-http-abuse.conf /etc/fail2ban/filter.d/
+sudo cp deploy/fail2ban/cryptoinsider-http-abuse.local /etc/fail2ban/jail.d/
+sudo systemctl restart fail2ban
+```
+
+Validate:
+
+```bash
+sudo fail2ban-client status
+sudo fail2ban-client status cryptoinsider-http-abuse
+```
