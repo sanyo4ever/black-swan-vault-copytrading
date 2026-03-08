@@ -32,6 +32,11 @@ TELEGRAM_CHANNEL_ID=...
 TELEGRAM_FORUM_CHAT_ID=...
 TELEGRAM_JOIN_URL=https://t.me/YourChannelOrInvite
 DATABASE_URL=postgresql://cryptoinsider:strong_password@127.0.0.1:5432/cryptoinsider
+SHOWCASE_MODE_ENABLED=true
+SHOWCASE_SLOTS=25
+ROTATION_BOOTSTRAP_INTERVAL_MINUTES=360
+ROTATION_SCOUT_INTERVAL_HOURS=24
+ROTATION_HEALTH_INTERVAL_MINUTES=180
 ADMIN_PANEL_USERNAME=admin
 ADMIN_PANEL_PASSWORD=strong_password
 GOOGLE_ANALYTICS_MEASUREMENT_ID=G-XXXXXXXXXX
@@ -66,6 +71,9 @@ sudo systemctl disable --now cryptoinsider-discovery.service
 sudo systemctl disable --now cryptoinsider-universe.service
 sudo systemctl disable --now cryptoinsider-top100.service
 ```
+
+Recommended for low API pressure: keep bootstrap/scout intervals high
+(`ROTATION_BOOTSTRAP_INTERVAL_MINUTES`, `ROTATION_SCOUT_INTERVAL_HOURS`).
 
 ## 5. Deploy update (recommended workflow)
 

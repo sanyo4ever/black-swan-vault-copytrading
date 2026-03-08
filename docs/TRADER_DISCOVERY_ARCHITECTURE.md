@@ -14,6 +14,9 @@ When `SHOWCASE_MODE_ENABLED=true`, the runtime can operate in a lightweight
 
 This mode is designed to reduce API/DB pressure while keeping fast Telegram delivery.
 
+Operational note: bootstrap/scout cadence is configurable. For low-pressure mode use
+larger values for `ROTATION_BOOTSTRAP_INTERVAL_MINUTES` and `ROTATION_SCOUT_INTERVAL_HOURS`.
+
 ## 1. Objectives
 
 - Continuously discover active futures traders.

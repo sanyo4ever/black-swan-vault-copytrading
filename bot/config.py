@@ -45,6 +45,7 @@ class Settings:
     showcase_slots: int
     rotation_scout_interval_hours: int
     rotation_health_interval_minutes: int
+    rotation_bootstrap_interval_minutes: int
     rotation_stale_hours: int
     rotation_stale_cycles: int
     rotation_score_threshold_pct: float
@@ -215,6 +216,10 @@ def load_settings(
         rotation_health_interval_minutes=max(
             1,
             int(os.getenv("ROTATION_HEALTH_INTERVAL_MINUTES", "60")),
+        ),
+        rotation_bootstrap_interval_minutes=max(
+            1,
+            int(os.getenv("ROTATION_BOOTSTRAP_INTERVAL_MINUTES", "180")),
         ),
         rotation_stale_hours=max(1, int(os.getenv("ROTATION_STALE_HOURS", "72"))),
         rotation_stale_cycles=max(1, int(os.getenv("ROTATION_STALE_CYCLES", "3"))),

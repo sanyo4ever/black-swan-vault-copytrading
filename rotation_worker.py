@@ -80,6 +80,7 @@ class LightweightRotationWorker:
         )
         self._last_health_ts = 0.0
         self._last_scout_ts = 0.0
+        self._last_bootstrap_ts = 0.0
         self._last_metrics_ts = 0.0
 
     def _acquire_lease(self) -> bool:
@@ -612,14 +613,21 @@ class LightweightRotationWorker:
             self._logger.info("Rotation tick skipped: lease is held by another worker")
             return
         try:
-            inserted = await self._bootstrap_if_needed()
             now = time.monotonic()
 
+            bootstrap_interval = max(
+                1,
+                int(self._settings.rotation_bootstrap_interval_minutes),
+            ) * 60
             health_interval = max(1, int(self._settings.rotation_health_interval_minutes)) * 60
             scout_interval = max(1, int(self._settings.rotation_scout_interval_hours)) * 3600
             metrics_interval = max(1, int(self._settings.rotation_metrics_refresh_hours)) * 3600
 
-            if inserted > 0:
+            if self._last_bootstrap_ts <= 0 or (now - self._last_bootstrap_ts) >= bootstrap_interval:
+                inserted = await self._bootstrap_if_needed()
+                if inserted > 0:
+                    self._logger.info("Bootstrap tick filled=%s", inserted)
+                self._last_bootstrap_ts = time.monotonic()
                 now = time.monotonic()
 
             if self._last_health_ts <= 0 or (now - self._last_health_ts) >= health_interval:
