@@ -432,16 +432,17 @@ class LightweightRotationWorker:
         self._logger.info("Showcase metrics refresh updated=%s", changed)
         return changed
 
-    async def _health_check(self) -> int:
+    async def _health_check(self) -> tuple[int, int]:
         with TraderStore(self._settings.database_dsn) as store:
             wallets = store.list_showcase_wallets(limit=max(1, int(self._settings.showcase_slots) * 2))
         if not wallets:
-            return 0
+            return 0, 0
 
         now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
         stale_hours = float(max(1, int(self._settings.rotation_stale_hours)))
         stale_cycles_required = int(max(1, int(self._settings.rotation_stale_cycles)))
         changed = 0
+        newly_stale = 0
 
         for wallet in wallets:
             if wallet.last_fill_time is not None and wallet.last_fill_time > 0:
@@ -457,6 +458,8 @@ class LightweightRotationWorker:
             next_status = (
                 SHOWCASE_STATUS_STALE if idle_cycles >= stale_cycles_required else SHOWCASE_STATUS_ACTIVE
             )
+            if next_status == SHOWCASE_STATUS_STALE and wallet.status != SHOWCASE_STATUS_STALE:
+                newly_stale += 1
             if next_status != wallet.status or abs(float(wallet.idle_hours) - idle_hours) > 0.01:
                 with TraderStore(self._settings.database_dsn) as store:
                     store.update_showcase_health(
@@ -473,8 +476,12 @@ class LightweightRotationWorker:
                     activity_window_minutes=self._settings.live_top100_active_window_minutes,
                 )
 
-        self._logger.info("Showcase health check changed=%s", changed)
-        return changed
+        self._logger.info(
+            "Showcase health check changed=%s newly_stale=%s",
+            changed,
+            newly_stale,
+        )
+        return changed, newly_stale
 
     async def _swap_wallet(self, *, old_wallet: ShowcaseWallet, candidate: dict[str, Any], reason: str) -> bool:
         old_address = str(old_wallet.address)
@@ -642,8 +649,20 @@ class LightweightRotationWorker:
                 now = time.monotonic()
 
             if self._last_health_ts <= 0 or (now - self._last_health_ts) >= health_interval:
-                await self._health_check()
+                _, newly_stale = await self._health_check()
                 self._last_health_ts = time.monotonic()
+                if (
+                    self._settings.rotation_scout_on_stale_immediate
+                    and newly_stale > 0
+                ):
+                    rotated = await self._scout_and_rotate()
+                    self._logger.info(
+                        "Immediate scout after stale detection newly_stale=%s rotations=%s",
+                        newly_stale,
+                        rotated,
+                    )
+                    self._last_scout_ts = time.monotonic()
+                    now = time.monotonic()
 
             if self._last_scout_ts <= 0 or (now - self._last_scout_ts) >= scout_interval:
                 rotated = await self._scout_and_rotate()

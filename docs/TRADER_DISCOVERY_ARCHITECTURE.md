@@ -16,6 +16,7 @@ This mode is designed to reduce API/DB pressure while keeping fast Telegram deli
 
 Operational note: bootstrap/scout cadence is configurable. For low-pressure mode use
 larger values for `ROTATION_BOOTSTRAP_INTERVAL_MINUTES` and `ROTATION_SCOUT_INTERVAL_HOURS`.
+If you need faster stale replacement, enable `ROTATION_SCOUT_ON_STALE_IMMEDIATE=true`.
 
 ## 1. Objectives
 

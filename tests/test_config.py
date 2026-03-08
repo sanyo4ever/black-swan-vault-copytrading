@@ -107,6 +107,7 @@ class ConfigTests(unittest.TestCase):
                 os.environ["ROTATION_SCOUT_INTERVAL_HOURS"] = "8"
                 os.environ["ROTATION_HEALTH_INTERVAL_MINUTES"] = "45"
                 os.environ["ROTATION_BOOTSTRAP_INTERVAL_MINUTES"] = "360"
+                os.environ["ROTATION_SCOUT_ON_STALE_IMMEDIATE"] = "true"
                 os.environ["ROTATION_STALE_HOURS"] = "96"
                 os.environ["ROTATION_STALE_CYCLES"] = "4"
                 os.environ["ROTATION_SCORE_THRESHOLD_PCT"] = "6.5"
@@ -120,6 +121,7 @@ class ConfigTests(unittest.TestCase):
                 self.assertEqual(settings.rotation_scout_interval_hours, 8)
                 self.assertEqual(settings.rotation_health_interval_minutes, 45)
                 self.assertEqual(settings.rotation_bootstrap_interval_minutes, 360)
+                self.assertTrue(settings.rotation_scout_on_stale_immediate)
                 self.assertEqual(settings.rotation_stale_hours, 96)
                 self.assertEqual(settings.rotation_stale_cycles, 4)
                 self.assertEqual(settings.rotation_score_threshold_pct, 6.5)
