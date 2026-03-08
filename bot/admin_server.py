@@ -263,15 +263,19 @@ def _catalog_sort_value(*, trader: CatalogTrader, sort_by: str) -> float | int:
     return float(trader.activity_score or -10**9)
 
 
-def _subscribe_button(*, trader_address: str, bot_username: str, trader_status: str) -> str:
-    if not bot_username:
-        return "<span style='opacity:.7'>Bot not configured</span>"
+def _resolve_join_url(settings) -> str:
+    return str(getattr(settings, "telegram_join_url", "") or "").strip()
+
+
+def _subscribe_button(*, trader_address: str, join_url: str, trader_status: str) -> str:
+    if not join_url:
+        return "<span style='opacity:.7'>Channel link not configured</span>"
     if trader_status in {STATUS_STALE, STATUS_ARCHIVED}:
         return "<span style='opacity:.7'>Unavailable</span>"
     encoded = quote(trader_address, safe="")
     return (
-        f"<a class='copy-btn' href='/subscribe/{encoded}/go' target='_blank' rel='noopener'>"
-        "Copy"
+        f"<a class='join-btn' href='/subscribe/{encoded}/go' target='_blank' rel='noopener'>"
+        "Join Channel"
         "</a>"
     )
 
@@ -541,7 +545,7 @@ def _render_public_directory(
     *,
     traders: list[CatalogTrader],
     request: web.Request,
-    bot_username: str,
+    join_url: str,
     next_cursor: str | None,
     google_analytics_measurement_id: str,
 ) -> str:
@@ -621,7 +625,7 @@ def _render_public_directory(
             f"<div>{escape(last_traded_at)}</div>"
             f"<div class='muted-mini'>{escape(freshness)}</div>"
             "</td>"
-            f"<td>{_subscribe_button(trader_address=trader.address, bot_username=bot_username, trader_status=trader.status)}</td>"
+            f"<td>{_subscribe_button(trader_address=trader.address, join_url=join_url, trader_status=trader.status)}</td>"
             "</tr>"
         )
 
@@ -752,8 +756,8 @@ def _render_public_directory(
                     "acceptedAnswer": {
                         "@type": "Answer",
                         "text": (
-                            "Yes. Access is open and donation-supported. You can browse traders and open "
-                            "Telegram trader chats without a paywall."
+                            "Yes. Access is open and donation-supported. You can browse traders and join "
+                            "the Telegram channel without a paywall."
                         ),
                     },
                 },
@@ -774,8 +778,8 @@ def _render_public_directory(
                     "acceptedAnswer": {
                         "@type": "Answer",
                         "text": (
-                            "Click Open Trader Chat, start the bot, and the bot posts new fills from the "
-                            "selected trader into your Telegram chat thread."
+                            "Click Join Channel. The channel uses dedicated forum topics per trader wallet, "
+                            "and new fills are posted in the matching topic."
                         ),
                     },
                 },
@@ -1036,7 +1040,7 @@ def _render_public_directory(
     .metric-neg {{ color:var(--red); font-weight:700; }}
     .metric-flat {{ color:#b9c0d1; }}
     .muted-mini {{ color:var(--muted); font-size:11px; margin-top:3px; }}
-    .copy-btn {{
+    .join-btn {{
       display:inline-flex;
       align-items:center;
       justify-content:center;
@@ -1051,7 +1055,7 @@ def _render_public_directory(
       font-weight:700;
       letter-spacing:.2px;
     }}
-    .copy-btn:hover {{ background:rgba(255,159,26,.2); }}
+    .join-btn:hover {{ background:rgba(255,159,26,.2); }}
     .faq-item {{ border-top:1px solid var(--line); padding:10px 0; }}
     .faq-item:first-of-type {{ border-top:none; padding-top:0; }}
     .faq-item p {{ line-height:1.5; }}
@@ -1097,7 +1101,7 @@ def _render_public_directory(
         Catalog refresh: <strong>{escape(refreshed_at)}</strong>.<br/>
         Table shows objective strategy metrics only (ROI, Drawdown, PnL, Win Rate, P/L Ratio, Sharpe, trade activity).<br/>
         Use the <strong>Range</strong> filter to switch table metrics between 1d, 7d, and 30d windows.<br/>
-        Click <strong>Copy</strong> to receive free crypto signals from your selected trader in Telegram.<br/>
+        Click <strong>Join Channel</strong> to open the Telegram channel with forum topics per trader wallet.<br/>
         Open-source repository: <a href='{escape(PROJECT_REPO_URL)}' target='_blank' rel='noopener'>GitHub</a>.<br/>
         Project is donation-supported: PayPal <code>{escape(PAYPAL_DONATION_EMAIL)}</code> or USDT TRC20 <code>{escape(USDT_TRC20_DONATION_ADDRESS)}</code>.<br/>
         Informational only. Not financial advice.
@@ -1412,85 +1416,14 @@ def _render_admin_index(*, traders, discovery_runs, message: str | None = None) 
 """
 
 
-def _build_subscribe_deep_link(*, bot_username: str, trader_address: str) -> str:
-    start_payload = f"sub_{trader_address}"
-    return f"https://t.me/{bot_username}?start={quote(start_payload, safe='')}"
-
-
-def _render_subscribe_landing(
-    *,
-    trader,
-    deep_link: str,
-    go_link: str,
-    google_analytics_measurement_id: str,
-) -> str:
-    label = trader.label or "-"
-    analytics_tag = _render_google_analytics_tag(google_analytics_measurement_id)
-    return f"""
-<!doctype html>
-<html lang='en'>
-<head>
-  <meta charset='utf-8' />
-  <meta name='viewport' content='width=device-width, initial-scale=1' />
-  <title>Subscribe Trader</title>
-  {analytics_tag}
-  <style>
-    :root {{ --bg:#0b1220; --panel:#131f36; --line:#2b4267; --text:#e8f0ff; --muted:#9eb4d8; --accent:#4ca7ff; --ok:#4bd39e; }}
-    * {{ box-sizing:border-box; }}
-    body {{ margin:0; min-height:100vh; display:grid; place-items:center; font-family:"Space Grotesk","Segoe UI",sans-serif; background:radial-gradient(circle at top,#1a2f52 0%,var(--bg) 62%); color:var(--text); padding:16px; }}
-    .card {{ width:min(760px,100%); background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(255,255,255,.01)); border:1px solid var(--line); border-radius:16px; padding:18px; }}
-    h1 {{ margin:0 0 10px; font-size:24px; }}
-    p {{ color:var(--muted); margin:6px 0; }}
-    .meta {{ margin-top:12px; display:grid; grid-template-columns:1fr 1fr; gap:10px; }}
-    .box {{ border:1px solid var(--line); border-radius:12px; padding:10px; background:#0f1b31; }}
-    .box strong {{ display:block; margin-bottom:3px; font-size:13px; color:var(--muted); }}
-    code {{ color:#88d8ff; }}
-    .cta {{ margin-top:16px; display:flex; flex-wrap:wrap; gap:10px; align-items:center; }}
-    .btn {{ display:inline-block; text-decoration:none; border-radius:10px; padding:10px 14px; border:1px solid #3476bd; background:#1b4679; color:var(--text); }}
-    .btn:hover {{ background:#235998; }}
-    .note {{ margin-top:10px; color:var(--muted); font-size:13px; }}
-    .ok {{ color:var(--ok); }}
-  </style>
-</head>
-<body>
-  <div class='card'>
-    <h1>Trader Subscription</h1>
-    <p>Open Telegram and start your personal trader chat thread.</p>
-    <div class='meta'>
-      <div class='box'><strong>Trader Address</strong><code>{escape(trader.address)}</code></div>
-      <div class='box'><strong>Label</strong>{escape(label)}</div>
-      <div class='box'><strong>Subscription</strong><span class='ok'>Active until cancellation</span></div>
-      <div class='box'><strong>Support Model</strong><span class='ok'>Donation-supported (no paywall)</span></div>
-      <div class='box'><strong>Open Source</strong><a href='{escape(PROJECT_REPO_URL)}' target='_blank' rel='noopener'>GitHub Repository</a></div>
-      <div class='box'><strong>Donate (PayPal)</strong><code>{escape(PAYPAL_DONATION_EMAIL)}</code></div>
-      <div class='box'><strong>Donate (USDT TRC20)</strong><code>{escape(USDT_TRC20_DONATION_ADDRESS)}</code></div>
-    </div>
-    <div class='cta'>
-      <a class='btn' href='{escape(go_link)}'>Create Chat in Telegram</a>
-      <a class='btn' href='{escape(go_link)}' target='_blank' rel='noopener'>Open Bot Directly</a>
-      <span class='note'>Auto-open in <span id='count'>5</span>s...</span>
-    </div>
-    <p class='note'>After <code>/start</code> in Telegram, bot creates a dedicated thread and posts trades until you cancel with <code>/stop 0x...</code>.</p>
-  </div>
-  <script>
-    (function() {{
-      var secs = 5;
-      var el = document.getElementById('count');
-      var link = {json.dumps(go_link)};
-      var timer = setInterval(function() {{
-        secs -= 1;
-        if (secs <= 0) {{
-          clearInterval(timer);
-          window.location.href = link;
-          return;
-        }}
-        if (el) el.textContent = String(secs);
-      }}, 1000);
-    }})();
-  </script>
-</body>
-</html>
-"""
+def _subscription_redirect_url(settings) -> str:
+    join_url = _resolve_join_url(settings)
+    if join_url:
+        return join_url
+    fallback = str(getattr(settings, "telegram_channel_id", "") or "").strip()
+    if fallback.startswith("@"):
+        return f"https://t.me/{fallback.removeprefix('@')}"
+    return ""
 
 
 async def subscriber_directory(request: web.Request) -> web.Response:
@@ -1565,7 +1498,7 @@ async def subscriber_directory(request: web.Request) -> web.Response:
         text=_render_public_directory(
             traders=traders,
             request=request,
-            bot_username=settings.telegram_bot_username,
+            join_url=_resolve_join_url(settings),
             next_cursor=next_cursor,
             google_analytics_measurement_id=settings.google_analytics_measurement_id,
         ),
@@ -1697,54 +1630,19 @@ async def subscribe_redirect(request: web.Request) -> web.Response:
         )
     logger.info("Subscription redirect trader=%s client_ip=%s", trader.address, _client_ip(request))
 
-    if not settings.telegram_bot_username:
+    destination_url = _subscription_redirect_url(settings)
+    if not destination_url:
         return web.Response(
             status=503,
-            text="TELEGRAM_BOT_USERNAME is not configured on server.",
+            text="TELEGRAM_JOIN_URL is not configured on server.",
         )
 
-    deep_link = _build_subscribe_deep_link(
-        bot_username=settings.telegram_bot_username,
-        trader_address=trader.address,
-    )
-    raise web.HTTPFound(deep_link)
+    raise web.HTTPFound(destination_url)
 
 
 async def subscribe_landing(request: web.Request) -> web.Response:
-    settings = request.app["settings"]
-    address = request.match_info.get("address", "")
-
-    with TraderStore(settings.database_dsn) as store:
-        trader = store.get_trader(address=address)
-        if trader is None:
-            raise web.HTTPNotFound(text="Trader not found")
-        if trader.moderation_state == MODERATION_BLACKLIST:
-            raise web.HTTPForbidden(text="Trader is not available for subscription")
-        if trader.status in {STATUS_STALE, STATUS_ARCHIVED}:
-            raise web.HTTPServiceUnavailable(
-                text="Trader is currently not eligible for new subscriptions."
-            )
-
-    if not settings.telegram_bot_username:
-        return web.Response(
-            status=503,
-            text="TELEGRAM_BOT_USERNAME is not configured on server.",
-        )
-
-    deep_link = _build_subscribe_deep_link(
-        bot_username=settings.telegram_bot_username,
-        trader_address=trader.address,
-    )
-    go_link = f"/subscribe/{quote(trader.address, safe='')}/go"
-    return web.Response(
-        text=_render_subscribe_landing(
-            trader=trader,
-            deep_link=deep_link,
-            go_link=go_link,
-            google_analytics_measurement_id=settings.google_analytics_measurement_id,
-        ),
-        content_type="text/html",
-    )
+    address = quote(request.match_info.get("address", ""), safe="")
+    raise web.HTTPFound(f"/subscribe/{address}/go")
 
 
 async def admin_index(request: web.Request) -> web.Response:

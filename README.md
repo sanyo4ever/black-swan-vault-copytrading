@@ -22,7 +22,7 @@ Most copytrading tools are closed, expensive, or difficult to self-host. Black S
 - Free access for retail users and small communities
 - Transparent ranking metrics and data pipeline
 - Self-hosted deployment with production-ready services
-- One-click subscription flow to trader-specific Telegram delivery
+- One-click Join Channel flow to trader-specific Telegram forum topics
 - Open contribution model for researchers, backend engineers, and traders
 
 ## What it does
@@ -31,12 +31,13 @@ Most copytrading tools are closed, expensive, or difficult to self-host. Black S
 - Computes 1d/7d/30d performance and risk metrics
 - Builds ranked trader universe and monitoring tiers (HOT/WARM/COLD)
 - Serves a public searchable catalog page + API
-- Delivers trader fills to Telegram sessions for active subscribers
+- Delivers trader fills into dedicated Telegram forum topics per tracked wallet
 
 ## Current Product Rules
 
-- Subscriptions are active until explicit user cancellation (`/stop 0x...`).
-- Bot tries to create a forum topic when possible; if unsupported, it falls back to direct private chat delivery.
+- Public UI uses `Join Channel`; no DM subscription flow is required for delivery.
+- Poster auto-creates and reuses one forum topic per trader wallet in the configured forum chat.
+- If a topic is removed manually, mapping is dropped and recreated automatically on the next signal.
 - The project is donation-supported in the current production mode (no mandatory paywall).
 
 ## Feature Highlights
@@ -57,24 +58,26 @@ Most copytrading tools are closed, expensive, or difficult to self-host. Black S
   - HOT (frequent)
   - WARM (medium)
   - COLD (slow)
-- Demand-only delivery mode:
-  - scans and posts signals only for traders with active subscriptions
-  - adaptive polling scheduler keeps API load bounded while prioritizing demanded traders
+- Shared-forum delivery mode:
+  - scans tracked trader pools and posts signals into per-trader forum topics
+  - adaptive polling scheduler keeps API load bounded while prioritizing active traders
 
-## Subscriber Delivery Architecture
+## Shared Forum Delivery Architecture
 
-The signal pipeline is optimized for active subscriptions first:
+The signal pipeline is optimized for a shared Telegram forum chat:
 
-- `delivery_monitor_state` is refreshed from active `subscriptions + delivery_sessions`
+- each signal trader resolves to a `trader_forum_topics` mapping (`trader -> chat_id + thread_id`)
+- missing mappings trigger `createForumTopic` and are persisted for reuse
+- `topic_missing` errors purge stale mappings and pending retries for that topic
 - each trader gets adaptive `poll_interval_seconds` based on:
-  - active subscriber count
+  - activity score + quality score
   - recency of latest known activity
-  - quality score
+  - scheduler pressure limits
 - poster scans only due targets (`next_poll_at <= now`) with strict cycle limits
 - each trader keeps a watermark (`last_seen_fill_time`) to fetch incrementally and avoid heavy back-scans
 - on errors, poll interval backs off automatically; on new fills, polling tightens
 
-This gives low latency for requested traders while preventing uncontrolled CPU/API load growth.
+This gives low latency for active traders while preventing uncontrolled CPU/API load growth.
 
 ## Architecture (high level)
 
@@ -88,10 +91,10 @@ This gives low latency for requested traders while preventing uncontrolled CPU/A
                                  trader_monitoring_pool (HOT/WARM/COLD)
                                                           |
                                                           v
-                    [Poster Worker] ---> Telegram topics/sessions for active subscribers
+                    [Poster Worker] ---> Telegram forum topics (one topic per trader)
                                                           ^
                                                           |
-                                  [Subscriber Bot + Web UI + /api/traders]
+                                  [Web UI + /api/traders + Join Channel CTA]
 ```
 
 ## Quick Start (local)
@@ -108,7 +111,8 @@ Set required environment variables in `.env`:
 ```env
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_CHANNEL_ID=-100...
-TELEGRAM_BOT_USERNAME=your_bot_username
+TELEGRAM_FORUM_CHAT_ID=-100...
+TELEGRAM_JOIN_URL=https://t.me/YourChannelOrInvite
 DATABASE_URL=postgresql://cryptoinsider:strong_password@127.0.0.1:5432/cryptoinsider
 ADMIN_PANEL_USERNAME=admin
 ADMIN_PANEL_PASSWORD=strong_password
@@ -147,7 +151,7 @@ TRADER_ARCHIVE_AFTER_DAYS=180
 
 - `/` -> public trader catalog
 - `/api/traders` -> filterable/sortable JSON API
-- `/subscribe/<trader_address>` -> one-click subscription landing page
+- `/subscribe/<trader_address>/go` -> tracks click and redirects to channel join link
 - `/admin` -> password-protected admin panel
 
 ## Documentation Map
@@ -167,21 +171,22 @@ Core tables:
 - `trader_monitoring_pool`: HOT/WARM/COLD due-scan scheduling
 - `delivery_monitor_state`: subscription-driven adaptive scheduler + per-trader watermark state
 - `catalog_current`: denormalized public catalog view
-- `subscriptions`, `delivery_sessions`: Telegram delivery lifecycle
+- `trader_forum_topics`: shared forum topic mapping (`trader_address -> message_thread_id`)
+- `subscriptions`, `delivery_sessions`: legacy DM-subscription lifecycle (kept for compatibility/migration)
 - `discovery_runs`: discovery run observability
 
 ### Trader Lifecycle Consistency
 
 Tracked traders are never hard-deleted in normal operation.
 
-- `ACTIVE_LISTED`: visible in public catalog, open for new subscriptions.
+- `ACTIVE_LISTED`: visible in public catalog.
 - `ACTIVE_UNLISTED`: hidden from default catalog, kept for continuity/history.
-- `STALE`: inactive beyond stale threshold, blocked for new subscriptions.
-- `ARCHIVED`: long-inactive historical record, blocked for new subscriptions.
+- `STALE`: inactive beyond stale threshold, hidden from default actionable pool.
+- `ARCHIVED`: long-inactive historical record.
 
 Lifecycle transitions are automatic (`universe_worker`, coordinated with discovery via DB lease) and subscription-safe:
 
-- active subscriber -> never auto-archived
+- historically active records -> never hard-deleted
 - blacklisted trader -> delivery detached by moderation rules
 - discovery "prune" -> soft unlist, not delete
 
@@ -213,7 +218,7 @@ What the gate checks:
 
 - Data quality invariants (schema/ranges/freshness)
 - Metrics integrity (ROI/Win Rate/Drawdown/Sharpe/Sortino/volatility)
-- Business e2e flows (subscribe/unsubscribe/fanout/retry/Telegram edge cases)
+- Business e2e flows (join redirect/fanout/retry/Telegram edge cases)
 
 ## Test Data Hygiene
 

@@ -14,10 +14,15 @@ def build_source(source_cfg: dict, *, http_session, settings):
     if source_type == "hyperliquid_futures":
         merged_cfg = dict(source_cfg)
         merged_cfg.setdefault("trader_limit", settings.monitor_max_targets_per_cycle)
-        merged_cfg.setdefault(
-            "delivery_only_subscribed",
-            settings.monitor_delivery_only_subscribed,
-        )
+        forum_mode_enabled = bool(str(getattr(settings, "telegram_forum_chat_id", "")).strip())
+        if forum_mode_enabled:
+            # Shared channel/forum mode tracks the global pool, not per-user subscriptions.
+            merged_cfg["delivery_only_subscribed"] = False
+        else:
+            merged_cfg.setdefault(
+                "delivery_only_subscribed",
+                settings.monitor_delivery_only_subscribed,
+            )
         merged_cfg.setdefault(
             "max_traders_per_cycle",
             settings.delivery_monitor_max_traders_per_cycle,

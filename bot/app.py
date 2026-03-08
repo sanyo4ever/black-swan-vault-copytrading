@@ -17,6 +17,7 @@ from bot.logging_setup import bind_log_context, build_logging_options, new_trace
 from bot.sources import build_source
 from bot.telegram_client import (
     TelegramClientError,
+    create_forum_topic,
     delete_forum_topic,
     set_telegram_http_logging,
 )
@@ -91,6 +92,43 @@ async def _store_call(settings, fn):
     return await asyncio.to_thread(_store_call_sync, settings, fn)
 
 
+def _normalize_trader_address(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    return normalized or None
+
+
+def _forum_topic_name(trader_address: str) -> str:
+    normalized = _normalize_trader_address(trader_address)
+    if not normalized:
+        return "Trader"
+    if len(normalized) <= 18:
+        return normalized
+    return f"{normalized[:10]}...{normalized[-6:]}"
+
+
+def _forum_chat_id(settings) -> str:
+    return str(getattr(settings, "telegram_forum_chat_id", "") or "").strip()
+
+
+def _is_forum_topic_delivery(
+    *,
+    settings,
+    chat_id: str | int,
+    trader_address: str | None,
+    message_thread_id: int | None,
+) -> bool:
+    forum_chat_id = _forum_chat_id(settings)
+    if not forum_chat_id:
+        return False
+    if message_thread_id is None:
+        return False
+    if _normalize_trader_address(trader_address) is None:
+        return False
+    return str(chat_id).strip() == forum_chat_id
+
+
 def _deactivate_trader_target(
     *,
     settings,
@@ -121,6 +159,127 @@ def _deactivate_trader_target(
         dropped,
         reason,
     )
+
+
+def _forget_forum_topic_mapping(
+    *,
+    settings,
+    chat_id: str | int,
+    trader_address: str | None,
+    message_thread_id: int | None,
+    logger: logging.Logger,
+    reason: str,
+) -> None:
+    normalized = _normalize_trader_address(trader_address)
+    if not normalized:
+        return
+    with TraderStore(settings.database_dsn) as store:
+        deleted_topics = store.delete_trader_forum_topic(
+            trader_address=normalized,
+            forum_chat_id=chat_id,
+        )
+        dropped_retries = store.delete_pending_retries_for_target(
+            chat_id=chat_id,
+            trader_address=normalized,
+            message_thread_id=message_thread_id,
+        )
+    logger.warning(
+        "Dropped forum topic mapping chat_id=%s trader=%s thread=%s deleted_topics=%s pending_retries_deleted=%s reason=%s",
+        chat_id,
+        normalized,
+        message_thread_id,
+        deleted_topics,
+        dropped_retries,
+        reason,
+    )
+
+
+async def _ensure_forum_topic_for_trader(
+    *,
+    settings,
+    http_session,
+    logger: logging.Logger,
+    chat_id: str,
+    trader_address: str,
+    topic_cache: dict[str, int],
+) -> int | None:
+    normalized = _normalize_trader_address(trader_address)
+    if not normalized:
+        return None
+
+    cached_thread_id = topic_cache.get(normalized)
+    if cached_thread_id is not None and cached_thread_id > 0:
+        return cached_thread_id
+
+    existing = await _store_call(
+        settings,
+        lambda store: store.get_trader_forum_topic(
+            trader_address=normalized,
+            forum_chat_id=chat_id,
+        ),
+    )
+    if existing is not None and int(existing.message_thread_id) > 0:
+        topic_cache[normalized] = int(existing.message_thread_id)
+        return int(existing.message_thread_id)
+
+    topic_name = _forum_topic_name(normalized)
+    try:
+        topic_result = await create_forum_topic(
+            http_session,
+            bot_token=settings.telegram_bot_token,
+            chat_id=chat_id,
+            name=topic_name,
+        )
+        thread_id = int(topic_result.get("message_thread_id") or 0)
+        if thread_id <= 0:
+            raise RuntimeError(f"Invalid createForumTopic response: {topic_result}")
+    except TelegramClientError as exc:
+        if exc.is_forum_not_supported():
+            logger.error(
+                "Forum topics are not supported for chat_id=%s; switch chat to supergroup with Topics",
+                chat_id,
+            )
+        elif exc.is_chat_unavailable():
+            logger.error(
+                "Forum chat unavailable while creating topic chat_id=%s trader=%s: %s",
+                chat_id,
+                normalized,
+                exc,
+            )
+        else:
+            logger.warning(
+                "Failed to create forum topic chat_id=%s trader=%s: %s",
+                chat_id,
+                normalized,
+                exc,
+            )
+        return None
+    except Exception as exc:
+        logger.warning(
+            "Unexpected failure creating forum topic chat_id=%s trader=%s: %s",
+            chat_id,
+            normalized,
+            exc,
+        )
+        return None
+
+    await _store_call(
+        settings,
+        lambda store: store.upsert_trader_forum_topic(
+            trader_address=normalized,
+            forum_chat_id=chat_id,
+            message_thread_id=thread_id,
+            topic_name=topic_name,
+        ),
+    )
+    topic_cache[normalized] = thread_id
+    logger.info(
+        "Created forum topic chat_id=%s trader=%s thread=%s",
+        chat_id,
+        normalized,
+        thread_id,
+    )
+    return thread_id
 
 
 def _queue_initial_retry(
@@ -186,6 +345,20 @@ async def _send_live_target(
         error_text = _short_error(exc)
 
         if category == "chat_unavailable" and trader_address is not None:
+            if _is_forum_topic_delivery(
+                settings=settings,
+                chat_id=chat_id,
+                trader_address=trader_address,
+                message_thread_id=message_thread_id,
+            ):
+                logger.error(
+                    "Forum chat unavailable for delivery chat_id=%s trader=%s thread=%s reason=%s",
+                    chat_id,
+                    trader_address,
+                    message_thread_id,
+                    error_text,
+                )
+                return DeliveryOutcome(status="dropped", category=category)
             await asyncio.to_thread(
                 _deactivate_trader_target,
                 settings=settings,
@@ -198,6 +371,22 @@ async def _send_live_target(
             return DeliveryOutcome(status="dropped", category=category)
 
         if category == "topic_missing" and message_thread_id is not None:
+            if _is_forum_topic_delivery(
+                settings=settings,
+                chat_id=chat_id,
+                trader_address=trader_address,
+                message_thread_id=message_thread_id,
+            ):
+                await asyncio.to_thread(
+                    _forget_forum_topic_mapping,
+                    settings=settings,
+                    chat_id=chat_id,
+                    trader_address=trader_address,
+                    message_thread_id=message_thread_id,
+                    logger=logger,
+                    reason=error_text,
+                )
+                return DeliveryOutcome(status="dropped", category=category)
             await asyncio.to_thread(
                 _deactivate_trader_target,
                 settings=settings,
@@ -259,6 +448,17 @@ async def _handle_retry_delivery_failure(
     error_text = _short_error(exc)
 
     if category == "chat_unavailable" and trader_address is not None:
+        if _is_forum_topic_delivery(
+            settings=settings,
+            chat_id=chat_id,
+            trader_address=trader_address,
+            message_thread_id=message_thread_id,
+        ):
+            await _store_call(
+                settings,
+                lambda store: store.mark_delivery_retry_dead(retry_id=retry_id, error=error_text),
+            )
+            return ("dead", category, None)
         await asyncio.to_thread(
             _deactivate_trader_target,
             settings=settings,
@@ -275,6 +475,26 @@ async def _handle_retry_delivery_failure(
         return ("dead", category, None)
 
     if category == "topic_missing" and message_thread_id is not None:
+        if _is_forum_topic_delivery(
+            settings=settings,
+            chat_id=chat_id,
+            trader_address=trader_address,
+            message_thread_id=message_thread_id,
+        ):
+            await asyncio.to_thread(
+                _forget_forum_topic_mapping,
+                settings=settings,
+                chat_id=chat_id,
+                trader_address=trader_address,
+                message_thread_id=message_thread_id,
+                logger=logger,
+                reason=error_text,
+            )
+            await _store_call(
+                settings,
+                lambda store: store.mark_delivery_retry_dead(retry_id=retry_id, error=error_text),
+            )
+            return ("dead", category, None)
         await asyncio.to_thread(
             _deactivate_trader_target,
             settings=settings,
@@ -515,10 +735,15 @@ async def _run_cycle(
         logger.info("No signals fetched this cycle")
         return 0
 
-    subscriber_map = await _store_call(
-        settings,
-        lambda store: store.list_active_delivery_targets_by_trader(),
-    )
+    forum_chat_id = _forum_chat_id(settings)
+    forum_mode_enabled = bool(forum_chat_id)
+    topic_cache: dict[str, int] = {}
+    subscriber_map: dict[str, list] = {}
+    if not forum_mode_enabled:
+        subscriber_map = await _store_call(
+            settings,
+            lambda store: store.list_active_delivery_targets_by_trader(),
+        )
 
     published = 0
     for signal in sorted(all_signals, key=_sort_key):
@@ -529,44 +754,63 @@ async def _run_cycle(
         if await asyncio.to_thread(dedup_store.seen, dedup_key):
             continue
 
-        channel_target_count = 0
-        if settings.telegram_channel_id and not settings.monitor_delivery_only_subscribed:
-            channel_target_count = 1
-        delivery_targets = []
-        if signal.trader_address:
-            delivery_targets = subscriber_map.get(signal.trader_address, [])
-
-        if channel_target_count == 0 and not delivery_targets:
-            logger.info("No targets for signal %s; skipping", dedup_key)
-            continue
-
         delivered = 0
         failed = 0
         queued = 0
         try:
             text = format_signal(signal)
             delivery_targets_payload: list[tuple[str | int, str | None, int | None]] = []
-            if settings.telegram_channel_id and not settings.monitor_delivery_only_subscribed:
-                delivery_targets_payload.append(
-                    (
-                        settings.telegram_channel_id,
-                        signal.trader_address,
-                        None,
-                    )
+            signal_trader = _normalize_trader_address(signal.trader_address)
+            if forum_mode_enabled and signal_trader:
+                thread_id = await _ensure_forum_topic_for_trader(
+                    settings=settings,
+                    http_session=http_session,
+                    logger=logger,
+                    chat_id=forum_chat_id,
+                    trader_address=signal_trader,
+                    topic_cache=topic_cache,
                 )
-            seen_sub_targets: set[tuple[str, int | None]] = set()
-            for target in delivery_targets:
-                target_key = (target.chat_id, target.message_thread_id)
-                if target_key in seen_sub_targets:
-                    continue
-                seen_sub_targets.add(target_key)
-                delivery_targets_payload.append(
-                    (
-                        target.chat_id,
-                        target.trader_address,
-                        target.message_thread_id,
+                if thread_id is not None:
+                    delivery_targets_payload.append((forum_chat_id, signal_trader, thread_id))
+                elif settings.telegram_channel_id:
+                    logger.warning(
+                        "Forum topic unavailable for trader=%s, fallback to channel root",
+                        signal_trader,
                     )
+                    delivery_targets_payload.append(
+                        (settings.telegram_channel_id, signal_trader, None)
+                    )
+            elif forum_mode_enabled and settings.telegram_channel_id:
+                delivery_targets_payload.append((settings.telegram_channel_id, None, None))
+            else:
+                if settings.telegram_channel_id and not settings.monitor_delivery_only_subscribed:
+                    delivery_targets_payload.append(
+                        (
+                            settings.telegram_channel_id,
+                            signal_trader,
+                            None,
+                        )
+                    )
+                delivery_targets = (
+                    subscriber_map.get(signal_trader, []) if signal_trader is not None else []
                 )
+                seen_sub_targets: set[tuple[str, int | None]] = set()
+                for target in delivery_targets:
+                    target_key = (target.chat_id, target.message_thread_id)
+                    if target_key in seen_sub_targets:
+                        continue
+                    seen_sub_targets.add(target_key)
+                    delivery_targets_payload.append(
+                        (
+                            target.chat_id,
+                            target.trader_address,
+                            target.message_thread_id,
+                        )
+                    )
+
+            if not delivery_targets_payload:
+                logger.info("No targets for signal %s; skipping", dedup_key)
+                continue
 
             flood_backoff_triggered = False
             flood_retry_after: int | None = None

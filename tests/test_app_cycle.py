@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from bot.app import _process_retry_queue, _run_cycle
 from bot.dedup import DedupStore
@@ -55,16 +55,146 @@ class _RecordingDispatcher:
     def __init__(self) -> None:
         self.calls = 0
         self.backoffs: list[int | None] = []
+        self.sent_targets: list[tuple[str | int, int | None]] = []
 
-    async def send(self, *_args, **_kwargs) -> None:
+    async def send(self, *_args, **kwargs) -> None:
         self.calls += 1
+        self.sent_targets.append((kwargs.get("chat_id"), kwargs.get("message_thread_id")))
 
     async def apply_global_backoff(self, *, retry_after: int | None) -> int:
         self.backoffs.append(retry_after)
         return int(retry_after or 1)
 
 
+class _TopicMissingDispatcher:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def send(self, *_args, **_kwargs) -> None:
+        self.calls += 1
+        raise TelegramClientError(
+            method="sendMessage",
+            status_code=400,
+            error_code=400,
+            description="Bad Request: message thread not found",
+        )
+
+    async def apply_global_backoff(self, *, retry_after: int | None) -> int:
+        return int(retry_after or 1)
+
+
 class AppCycleDedupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_forum_mode_creates_topic_and_routes_signal_to_thread(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "cycle-forum.db"
+            dedup_path = Path(tmpdir) / "dedup-forum.db"
+            address = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+            with TraderStore(db_path) as store:
+                store.add_manual(address=address, label="A")
+
+            settings = SimpleNamespace(
+                sources_config_path=Path("config/sources.yaml"),
+                database_dsn=str(db_path),
+                max_signals_per_cycle=20,
+                telegram_bot_token="test-token",
+                telegram_channel_id="-100999111",
+                telegram_forum_chat_id="-100999111",
+                monitor_delivery_only_subscribed=False,
+            )
+            dedup_store = DedupStore(dedup_path)
+            dispatcher = _RecordingDispatcher()
+            logger = logging.getLogger("test.app.forum-mode")
+            try:
+                with (
+                    patch("bot.app.load_sources_config", return_value=[{"id": "source"}]),
+                    patch("bot.app.build_source", return_value=_SingleSignalSource()),
+                    patch(
+                        "bot.app.create_forum_topic",
+                        new=AsyncMock(return_value={"message_thread_id": 321}),
+                    ),
+                ):
+                    published = await _run_cycle(
+                        settings=settings,
+                        http_session=None,
+                        dedup_store=dedup_store,
+                        dispatcher=dispatcher,
+                        logger=logger,
+                    )
+
+                self.assertEqual(published, 1)
+                self.assertEqual(dispatcher.calls, 1)
+                self.assertEqual(dispatcher.sent_targets, [("-100999111", 321)])
+                with TraderStore(db_path) as store:
+                    topic = store.get_trader_forum_topic(
+                        trader_address=address,
+                        forum_chat_id="-100999111",
+                    )
+                self.assertIsNotNone(topic)
+                self.assertEqual(topic.message_thread_id, 321)
+            finally:
+                dedup_store.close()
+
+    async def test_forum_topic_missing_clears_mapping_without_deactivating_subscription(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "cycle-forum-missing.db"
+            dedup_path = Path(tmpdir) / "dedup-forum-missing.db"
+            address = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+            with TraderStore(db_path) as store:
+                store.add_manual(address=address, label="A")
+                store.upsert_trader_forum_topic(
+                    trader_address=address,
+                    forum_chat_id="-100999111",
+                    message_thread_id=222,
+                    topic_name="A topic",
+                )
+                store.create_subscription_with_session(
+                    chat_id=7001,
+                    trader_address=address,
+                    message_thread_id=19,
+                    topic_name="Legacy session",
+                    lifetime_hours=0,
+                )
+
+            settings = SimpleNamespace(
+                sources_config_path=Path("config/sources.yaml"),
+                database_dsn=str(db_path),
+                max_signals_per_cycle=20,
+                telegram_bot_token="test-token",
+                telegram_channel_id="-100999111",
+                telegram_forum_chat_id="-100999111",
+                monitor_delivery_only_subscribed=False,
+            )
+            dedup_store = DedupStore(dedup_path)
+            dispatcher = _TopicMissingDispatcher()
+            logger = logging.getLogger("test.app.forum-topic-missing")
+            try:
+                with (
+                    patch("bot.app.load_sources_config", return_value=[{"id": "source"}]),
+                    patch("bot.app.build_source", return_value=_SingleSignalSource()),
+                ):
+                    published = await _run_cycle(
+                        settings=settings,
+                        http_session=None,
+                        dedup_store=dedup_store,
+                        dispatcher=dispatcher,
+                        logger=logger,
+                    )
+
+                self.assertEqual(published, 0)
+                self.assertEqual(dispatcher.calls, 1)
+                with TraderStore(db_path) as store:
+                    topic = store.get_trader_forum_topic(
+                        trader_address=address,
+                        forum_chat_id="-100999111",
+                    )
+                    sessions = store.list_delivery_sessions_for_chat(chat_id=7001)
+                self.assertIsNone(topic)
+                self.assertEqual(len(sessions), 1)
+            finally:
+                dedup_store.close()
+
     async def test_flood_backoff_queues_remaining_targets_without_sending(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "cycle-flood.db"

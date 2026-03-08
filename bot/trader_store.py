@@ -173,6 +173,16 @@ class DeliverySessionInfo:
 
 
 @dataclass(frozen=True)
+class TraderForumTopic:
+    trader_address: str
+    forum_chat_id: str
+    message_thread_id: int
+    topic_name: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
 class DeliveryRetryJob:
     id: int
     dedup_key: str
@@ -1133,6 +1143,25 @@ class TraderStore:
         )
         self._execute(
             """
+            CREATE TABLE IF NOT EXISTS trader_forum_topics (
+                trader_address TEXT PRIMARY KEY,
+                forum_chat_id TEXT NOT NULL,
+                message_thread_id INTEGER NOT NULL,
+                topic_name TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(trader_address) REFERENCES tracked_traders(address) ON DELETE CASCADE
+            )
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_trader_forum_topics_chat_thread
+            ON trader_forum_topics(forum_chat_id, message_thread_id)
+            """
+        )
+        self._execute(
+            """
             CREATE TABLE IF NOT EXISTS delivery_retry_queue (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 dedup_key TEXT NOT NULL,
@@ -1585,6 +1614,25 @@ class TraderStore:
         )
         self._execute(
             """
+            CREATE TABLE IF NOT EXISTS trader_forum_topics (
+                trader_address TEXT PRIMARY KEY,
+                forum_chat_id TEXT NOT NULL,
+                message_thread_id INTEGER NOT NULL,
+                topic_name TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(trader_address) REFERENCES tracked_traders(address) ON DELETE CASCADE
+            )
+            """
+        )
+        self._execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_trader_forum_topics_chat_thread
+            ON trader_forum_topics(forum_chat_id, message_thread_id)
+            """
+        )
+        self._execute(
+            """
             CREATE TABLE IF NOT EXISTS delivery_retry_queue (
                 id BIGSERIAL PRIMARY KEY,
                 dedup_key TEXT NOT NULL,
@@ -1780,6 +1828,17 @@ class TraderStore:
             ),
             topic_name=row["topic_name"],
             expires_at=TraderStore._format_datetime(row["expires_at"]),
+        )
+
+    @staticmethod
+    def _row_to_trader_forum_topic(row: Mapping[str, Any]) -> TraderForumTopic:
+        return TraderForumTopic(
+            trader_address=str(row["trader_address"]),
+            forum_chat_id=str(row["forum_chat_id"]),
+            message_thread_id=int(row["message_thread_id"]),
+            topic_name=(str(row["topic_name"]) if row["topic_name"] else None),
+            created_at=TraderStore._format_datetime(row["created_at"]),
+            updated_at=TraderStore._format_datetime(row["updated_at"]),
         )
 
     @staticmethod
@@ -3215,6 +3274,100 @@ class TraderStore:
             (str(chat_id),),
         ).fetchall()
         return [self._row_to_delivery_session_info(row) for row in rows]
+
+    def get_trader_forum_topic(
+        self,
+        *,
+        trader_address: str,
+        forum_chat_id: str | int,
+    ) -> TraderForumTopic | None:
+        normalized = self.normalize_address(trader_address)
+        row = self._execute(
+            """
+            SELECT
+                trader_address,
+                forum_chat_id,
+                message_thread_id,
+                topic_name,
+                created_at,
+                updated_at
+            FROM trader_forum_topics
+            WHERE trader_address = ?
+              AND forum_chat_id = ?
+            LIMIT 1
+            """,
+            (normalized, str(forum_chat_id)),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_trader_forum_topic(row)
+
+    def upsert_trader_forum_topic(
+        self,
+        *,
+        trader_address: str,
+        forum_chat_id: str | int,
+        message_thread_id: int,
+        topic_name: str | None,
+    ) -> TraderForumTopic:
+        normalized = self.normalize_address(trader_address)
+        forum_chat_id_str = str(forum_chat_id).strip()
+        thread_id = int(message_thread_id)
+        if thread_id <= 0:
+            raise ValueError("message_thread_id must be positive")
+        self._execute(
+            """
+            INSERT INTO trader_forum_topics(
+                trader_address,
+                forum_chat_id,
+                message_thread_id,
+                topic_name,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(trader_address) DO UPDATE SET
+                forum_chat_id = excluded.forum_chat_id,
+                message_thread_id = excluded.message_thread_id,
+                topic_name = excluded.topic_name,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (normalized, forum_chat_id_str, thread_id, topic_name),
+        )
+        self._connection.commit()
+        topic = self.get_trader_forum_topic(
+            trader_address=normalized,
+            forum_chat_id=forum_chat_id_str,
+        )
+        if topic is None:
+            raise RuntimeError("Failed to upsert trader forum topic")
+        return topic
+
+    def delete_trader_forum_topic(
+        self,
+        *,
+        trader_address: str,
+        forum_chat_id: str | int | None = None,
+    ) -> int:
+        normalized = self.normalize_address(trader_address)
+        if forum_chat_id is None:
+            cursor = self._execute(
+                """
+                DELETE FROM trader_forum_topics
+                WHERE trader_address = ?
+                """,
+                (normalized,),
+            )
+        else:
+            cursor = self._execute(
+                """
+                DELETE FROM trader_forum_topics
+                WHERE trader_address = ?
+                  AND forum_chat_id = ?
+                """,
+                (normalized, str(forum_chat_id)),
+            )
+        self._connection.commit()
+        return int(cursor.rowcount or 0)
 
     def list_active_delivery_targets_by_trader(self) -> dict[str, list[DeliveryTarget]]:
         rows = self._execute(

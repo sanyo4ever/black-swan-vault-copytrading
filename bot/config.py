@@ -13,6 +13,8 @@ from dotenv import load_dotenv
 class Settings:
     telegram_bot_token: str
     telegram_channel_id: str
+    telegram_forum_chat_id: str
+    telegram_join_url: str
     telegram_bot_username: str
     sources_config_path: Path
     poll_interval_seconds: int
@@ -152,6 +154,10 @@ def load_settings(
     return Settings(
         telegram_bot_token=telegram_bot_token,
         telegram_channel_id=telegram_channel_id,
+        telegram_forum_chat_id=(
+            os.getenv("TELEGRAM_FORUM_CHAT_ID", "").strip() or telegram_channel_id
+        ),
+        telegram_join_url=os.getenv("TELEGRAM_JOIN_URL", "").strip(),
         telegram_bot_username=os.getenv("TELEGRAM_BOT_USERNAME", "").strip().removeprefix("@"),
         sources_config_path=Path(os.getenv("SOURCES_CONFIG_PATH", "config/sources.yaml")),
         poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "60")),
