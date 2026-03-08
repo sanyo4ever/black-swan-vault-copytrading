@@ -311,6 +311,13 @@ def _request_origin(request: web.Request) -> str:
     return f"{proto}://{host}"
 
 
+def _public_site_origin(request: web.Request) -> str:
+    configured = str(PUBLIC_SITE_URL or "").strip().rstrip("/")
+    if configured:
+        return configured
+    return _request_origin(request).rstrip("/")
+
+
 def _http_log_level_for_status(status: int) -> int:
     if status >= 500:
         return logging.ERROR
@@ -709,12 +716,10 @@ def _render_public_directory(
         else "No active filters"
     )
 
-    origin = _request_origin(request)
-    canonical_url = f"{origin}/"
-    current_url = f"{origin}{request.path_qs}"
+    site_origin = _public_site_origin(request)
+    canonical_url = f"{site_origin}/"
     logo_mark_url = "/assets/blackswanvault-mark.svg"
-    logo_banner_url = "/assets/blackswanvault-logo.svg"
-    logo_og_url = f"{origin}{logo_banner_url}"
+    logo_og_url = f"{site_origin}/assets/blackswanvault-og.png"
     has_query_filters = bool(request.query)
     robots = (
         "noindex,follow"
@@ -802,7 +807,7 @@ def _render_public_directory(
   <meta property='og:site_name' content='Black Swan Vault' />
   <meta property='og:title' content='{escape(page_title)}' />
   <meta property='og:description' content='{escape(page_description)}' />
-  <meta property='og:url' content='{escape(current_url)}' />
+  <meta property='og:url' content='{escape(canonical_url)}' />
   <meta property='og:image' content='{escape(logo_og_url)}' />
   <meta name='twitter:card' content='summary_large_image' />
   <meta name='twitter:title' content='{escape(page_title)}' />
@@ -1113,6 +1118,7 @@ def _render_public_directory(
         <strong>How it works:</strong> Discovery workers collect and score futures traders continuously.<br/>
         Catalog refresh: <strong>{escape(refreshed_at)}</strong>.<br/>
         Table shows objective strategy metrics only (ROI, Drawdown, PnL, Win Rate, P/L Ratio, Sharpe, trade activity).<br/>
+        Data source focus: <strong>Hyperliquid futures</strong> wallets and fills.<br/>
         Use the <strong>Range</strong> filter to switch table metrics between 1d, 7d, and 30d windows.<br/>
         Click <strong>Join Channel</strong> to open the Telegram channel with forum topics per trader wallet.<br/>
         Project is donation-supported: PayPal <code>{escape(PAYPAL_DONATION_EMAIL)}</code> or USDT TRC20 <code>{escape(USDT_TRC20_DONATION_ADDRESS)}</code>.<br/>
@@ -1986,7 +1992,56 @@ async def subscribe_redirect(request: web.Request) -> web.Response:
 
 async def subscribe_landing(request: web.Request) -> web.Response:
     address = quote(request.match_info.get("address", ""), safe="")
-    raise web.HTTPFound(f"/subscribe/{address}/go")
+    raise web.HTTPMovedPermanently(location=f"/subscribe/{address}/go")
+
+
+async def directory_redirect(request: web.Request) -> web.Response:
+    query = str(request.query_string or "").strip()
+    location = "/"
+    if query:
+        location = f"/?{query}"
+    raise web.HTTPMovedPermanently(location=location)
+
+
+async def robots_txt(request: web.Request) -> web.Response:
+    site_origin = _public_site_origin(request)
+    body = "\n".join(
+        [
+            "User-agent: *",
+            "Allow: /",
+            "Disallow: /admin",
+            "Disallow: /api/",
+            f"Sitemap: {site_origin}/sitemap.xml",
+            "",
+        ]
+    )
+    return web.Response(text=body, content_type="text/plain")
+
+
+async def sitemap_xml(request: web.Request) -> web.Response:
+    site_origin = _public_site_origin(request)
+    lastmod = datetime.now(tz=UTC).date().isoformat()
+    urls = (
+        f"{site_origin}/",
+        f"{site_origin}/terms",
+        f"{site_origin}/privacy",
+        f"{site_origin}/disclaimer",
+    )
+    items = []
+    for url in urls:
+        items.append(
+            "<url>"
+            f"<loc>{escape(url)}</loc>"
+            f"<lastmod>{escape(lastmod)}</lastmod>"
+            "</url>"
+        )
+    xml = (
+        "<?xml version='1.0' encoding='UTF-8'?>"
+        "<urlset xmlns='http://www.sitemaps.org/schemas/sitemap/0.9'>"
+        + "".join(items)
+        + "</urlset>"
+    )
+    return web.Response(text=xml, content_type="application/xml")
 
 
 async def terms_page(request: web.Request) -> web.Response:
@@ -2195,7 +2250,9 @@ def create_app(*, settings=None, logger: logging.Logger | None = None) -> web.Ap
     app.add_routes(
         [
             web.get("/", subscriber_directory),
-            web.get("/directory", subscriber_directory),
+            web.get("/directory", directory_redirect),
+            web.get("/robots.txt", robots_txt),
+            web.get("/sitemap.xml", sitemap_xml),
             web.get("/terms", terms_page),
             web.get("/privacy", privacy_page),
             web.get("/disclaimer", disclaimer_page),
