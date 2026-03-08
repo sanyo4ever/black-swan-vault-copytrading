@@ -2524,13 +2524,12 @@ class TraderStore:
         rows = self._execute(
             """
             SELECT
-                u.address,
-                u.score,
-                u.last_fill_time,
+                t.address,
+                t.score,
+                t.last_fill_time,
                 t.trades_24h,
                 t.trades_7d
-            FROM traders_universe u
-            JOIN tracked_traders t ON t.address = u.address
+            FROM tracked_traders t
             WHERE t.status <> ?
               AND COALESCE(t.moderation_state, ?) <> ?
             """,

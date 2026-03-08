@@ -680,6 +680,55 @@ class TraderStoreTests(unittest.TestCase):
             due_after = store.list_due_monitoring_targets(limit=10, only_subscribed=True)
             self.assertNotIn(addresses[0], {item.address for item in due_after})
 
+    def test_monitoring_pool_uses_all_tracked_traders_without_universe_refresh(self) -> None:
+        now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
+        addresses = [
+            "0x7777777777777777777777777777777777777771",
+            "0x7777777777777777777777777777777777777772",
+            "0x7777777777777777777777777777777777777773",
+        ]
+        with TraderStore(self.db_path) as store:
+            for idx, address in enumerate(addresses):
+                store.upsert_discovered(
+                    address=address,
+                    label=f"T{idx + 1}",
+                    source="hyperliquid_recent_trades",
+                    trades_24h=12 - (idx * 2),
+                    active_hours_24h=5,
+                    trades_7d=70 - (idx * 10),
+                    trades_30d=200 - (idx * 20),
+                    active_days_30d=18 - idx,
+                    first_fill_time=now_ms - (100 * 86_400_000),
+                    last_fill_time=now_ms - (idx * 30 * 60_000),
+                    age_days=100.0,
+                    volume_usd_30d=200000.0,
+                    realized_pnl_30d=3000.0,
+                    fees_30d=250.0,
+                    win_rate_30d=0.61,
+                    long_ratio_30d=0.5,
+                    avg_notional_30d=1800.0,
+                    max_notional_30d=9000.0,
+                    account_value=100000.0,
+                    total_ntl_pos=24000.0,
+                    total_margin_used=7000.0,
+                    score=55.0 - (idx * 5),
+                    stats_json='{"metrics_30d":{"max_drawdown_pct":11.0}}',
+                )
+
+            stats = store.refresh_monitoring_pool(
+                hot_size=2,
+                warm_size=1,
+                hot_poll_seconds=60,
+                warm_poll_seconds=600,
+                cold_poll_seconds=3600,
+                hot_recency_minutes=120,
+                warm_recency_minutes=360,
+            )
+            self.assertEqual(stats["total"], 3)
+
+            due = store.list_due_monitoring_targets(limit=10, only_subscribed=False)
+            self.assertEqual({item.address for item in due}, set(addresses))
+
     def test_delivery_monitor_state_refresh_and_polling(self) -> None:
         now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
         active = "0x9999999999999999999999999999999999999991"

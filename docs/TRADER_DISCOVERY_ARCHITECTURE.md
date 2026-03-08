@@ -99,7 +99,7 @@ Critical rule: discovered traders are not hard-deleted; transitions preserve con
 `cryptoinsider-top100` refreshes:
 
 - `traders_top100_live` (activity shortlist)
-- `trader_monitoring_pool` (HOT/WARM/COLD)
+- `trader_monitoring_pool` (HOT/WARM/COLD over all non-archived tracked traders)
 - `catalog_current` (public serving projection)
 
 Public serving path:

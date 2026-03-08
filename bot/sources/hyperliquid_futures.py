@@ -326,7 +326,7 @@ class HyperliquidFuturesSource(Source):
                     only_subscribed=False,
                 )
                 if not legacy_targets:
-                    fallback_addresses = store.list_monitored_addresses(limit=max_traders_per_cycle)
+                    fallback_addresses = store.list_active_addresses(limit=max_traders_per_cycle)
                     legacy_targets = [
                         MonitoringTarget(
                             address=address,
