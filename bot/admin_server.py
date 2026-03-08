@@ -893,7 +893,7 @@ def _render_public_directory(
     .seo-box {{ border:1px solid var(--line); border-radius:10px; padding:10px; background:var(--panel-soft); }}
     .seo-box ul {{ margin:6px 0 0 18px; color:var(--muted); }}
     .seo-box li {{ margin:4px 0; }}
-    .hero-actions {{ margin-top:12px; display:flex; gap:10px; flex-wrap:wrap; }}
+    .hero-actions {{ margin-top:16px; display:flex; gap:14px; flex-wrap:wrap; }}
     .hero-btn {{
       display:inline-block;
       border-radius:999px;
@@ -901,8 +901,9 @@ def _render_public_directory(
       background:rgba(255,159,26,.12);
       color:#ffc66a;
       text-decoration:none;
-      padding:8px 13px;
-      font-size:12px;
+      padding:16px 26px;
+      font-size:24px;
+      line-height:1.1;
       font-weight:600;
     }}
     .hero-btn-disabled {{
@@ -1045,6 +1046,10 @@ def _render_public_directory(
       .card {{ padding:12px; }}
       .brand-mark {{ width:62px; height:62px; border-radius:14px; }}
       .brand-name {{ font-size:16px; }}
+      .hero-btn {{
+        padding:12px 20px;
+        font-size:18px;
+      }}
     }}
   </style>
 </head>
