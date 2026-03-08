@@ -1,229 +1,186 @@
 # Production Architecture (Ubuntu)
 
-Last updated: 2026-03-07
+Last updated: 2026-03-08
 
-## 1. Goal
-Побудувати безвідмовну систему, яка автоматично:
-1. знаходить активних ф'ючерсних трейдерів;
-2. рахує метрики якості;
-3. показує каталог трейдерів для підписників;
-4. приймає оплату підписки;
-5. підключає користувача до персонального delivery-каналу;
-6. постить трейди вибраних трейдерів без ручного втручання.
+## 1. Purpose
 
-## 2. Reality Check (Telegram API)
-- Bot API не має методу `createChat`/`createChannel` для бота.
-- Для каналів є `createChatSubscriptionInviteLink` (платний інвайт), з періодом підписки `2592000` секунд (30 днів).
-- Для digital goods у Telegram слід використовувати Telegram Stars (XTR).
+This document describes the current production architecture used by Black Swan Vault on Ubuntu.
 
-Висновок: модель "рівно 1 USD/день автосписанням" у Telegram робиться як:
-- або місячна підписка (30 днів) з ціною в Stars еквівалентною ~30 USD;
-- або щоденний one-off invoice (гірший UX).
+Primary goals:
 
-## 3. Recommended Product Model
-1. Користувач обирає трейдера на сторінці каталогу.
-2. Натискає `Subscribe`.
-3. Потрапляє в бот (`/start sub_<trader_address>`).
-4. Оплачує Stars.
-5. Система автоматично призначає delivery-чат (або DM) і починає постинг тільки для цього користувача.
+1. Continuously discover and rank futures traders.
+2. Expose a public catalog with fast filtering/sorting/search.
+3. Let users subscribe to trader feeds in one click.
+4. Deliver trader fills to Telegram with bounded latency and resilient retries.
+5. Keep operations simple for a single-server setup.
 
-## 4. High-Level Components
+## 2. Product Model (Current)
 
-```mermaid
-flowchart LR
-    U["Subscriber"] --> W["Web Directory + API"]
-    U --> B["Telegram Bot"]
-    W --> SVC["Subscription Service"]
-    B --> SVC
-    SVC --> PG["PostgreSQL"]
-    SVC --> R[("Redis")]
+- The project is open-source and donation-supported.
+- There is no mandatory paywall in the current production flow.
+- Telegram subscription sessions remain active until explicit cancellation (`/stop 0x...`).
+- If Telegram forum topics are unsupported in the user chat, delivery automatically falls back to direct private chat mode.
 
-    D["Discovery Worker"] --> EX["Exchange/On-chain APIs"]
-    D --> PG
+## 3. Runtime Topology
 
-    M["Metrics + Ranking Worker"] --> PG
+```text
+Internet -> Nginx (80/443) -> cryptoinsider-admin (127.0.0.1:8080)
+                                       |
+                                       +-> PostgreSQL (127.0.0.1:5432)
 
-    T["Trade Ingestion Worker"] --> EX
-    T --> PG
-    T --> Q["Redis Streams / Queue"]
+Telegram <-> cryptoinsider-subscriberbot (long polling)
 
-    P["Posting Worker"] --> Q
-    P --> B
-    P --> PG
-
-    PAY["Payment Webhook Worker"] --> B
-    PAY --> PG
-
-    PROV["Delivery Provisioner"] --> B
-    PROV --> PG
+Hyperliquid/Nansen -> cryptoinsider-discovery
+                         -> cryptoinsider-universe
+                         -> cryptoinsider-top100
+                         -> cryptoinsider-poster -> Telegram sendMessage
 ```
 
-## 5. Business Processes and Reliability
+## 4. Services and Responsibilities
 
-### 5.1 Trader Discovery Pipeline
-- `discovery-worker` запускається кожні N хвилин.
-- Кроки:
-  1. fetch candidates;
-  2. enrich metrics (30d/7d/24h + account stats);
-  3. upsert in `tracked_traders`;
-  4. prune auto-discovered without manual override.
-- Надійність:
-  - retries з exponential backoff;
-  - idempotent upsert по `address`;
-  - `discovery_runs` audit log;
-  - per-step timeout + circuit breaker.
+- `cryptoinsider-admin`
+  - serves `/`, `/api/traders`, `/subscribe/{address}`, `/admin`.
+  - public catalog + password-protected admin panel.
 
-### 5.2 Metrics + Ranking
-- Окремий `ranking-worker` рахує score і percentiles.
-- Пише snapshot в `trader_metrics_daily` + `trader_rankings`.
-- Надійність:
-  - deterministic recomputation;
-  - materialized views;
-  - backfill mode за історичний період.
+- `cryptoinsider-subscriberbot`
+  - handles `/start sub_<address>`, `/my`, `/stop`.
+  - creates/updates `subscriptions` and `delivery_sessions`.
+  - attempts `createForumTopic`; falls back to direct chat mode when unsupported.
 
-### 5.3 Subscription Flow
-- Веб/бот створює `subscription_intent`.
-- Payment worker переводить `PENDING_PAYMENT -> ACTIVE` тільки після підтвердження платежу.
-- Стейт-машина:
-  - `PENDING_PAYMENT`
-  - `ACTIVE`
-  - `PAST_DUE`
-  - `EXPIRED`
-  - `CANCELLED`
-- Надійність:
-  - унікальний `idempotency_key` на intent;
-  - payment events append-only;
-  - повторна обробка webhook без дублювання.
+- `cryptoinsider-discovery`
+  - fetches candidate traders, enriches metrics, applies hard filters, upserts `tracked_traders`.
 
-### 5.4 Delivery Channel Provisioning
-Рекомендована схема для "автоматом без людини":
-- Таблиця `delivery_chat_pool` з наперед підготовленими приватними чатами/каналами.
-- Provisioner забирає вільний чат і призначає його підписці.
-- Коли пул закінчується: алерт + авто-скрипт поповнення (опційно через MTProto service account).
+- `cryptoinsider-universe`
+  - builds qualified pool (`traders_universe`) from tracked traders.
 
-Fallback:
-- Персональна доставка в DM бота (без окремого чату).
+- `cryptoinsider-top100`
+  - refreshes `traders_top100_live`, monitoring pools, and `catalog_current` projection.
 
-### 5.5 Trade Delivery
-- `trade-ingestion-worker` збирає нові угоди трейдерів.
-- Генерує normalized events у `trade_events`.
-- `delivery-worker` читає події і fan-out тільки на активні підписки.
-- Надійність:
-  - outbox pattern: `delivery_outbox`;
-  - dedup key: `subscription_id + trade_event_id`;
-  - retry queue + dead-letter queue;
-  - rate-limit aware Telegram sender.
+- `cryptoinsider-poster`
+  - refreshes demand-driven monitor state (`delivery_monitor_state`).
+  - scans due subscribed traders (`userFillsByTime`) using per-trader watermarks.
+  - formats and delivers signals to active targets.
+  - handles dedup, retry queue, and Telegram error deactivation rules.
 
-### 5.6 Renewals and Expiration
-- `billing-scheduler` перевіряє підписки, що закінчуються.
-- Без підтвердження оплати: `ACTIVE -> PAST_DUE -> EXPIRED`.
-- Після `EXPIRED` delivery stop автоматично.
+## 5. Data Stores
 
-### 5.7 Incident Recovery
-- Будь-який воркер може падати без втрати даних (черга + outbox).
-- Після рестарту воркер продовжує з останнього `offset/checkpoint`.
-- Runbooks для:
-  - Telegram outage
-  - Exchange API outage
-  - DB failover
-  - corrupted job payload
+- PostgreSQL (single-node, localhost only)
+  - source of truth for traders, catalog, subscriptions, delivery sessions, retries.
 
-## 6. Data Model (PostgreSQL)
+Key tables:
 
-Core tables:
 - `tracked_traders`
-- `trader_metrics_daily`
-- `trader_rankings`
-- `subscribers`
-- `subscription_intents`
+- `traders_universe`
+- `traders_top100_live`
+- `trader_monitoring_pool`
+- `delivery_monitor_state`
+- `catalog_current`
 - `subscriptions`
-- `subscription_traders`
-- `payment_events`
-- `delivery_chat_pool`
-- `delivery_bindings`
-- `trade_events`
-- `delivery_outbox`
-- `worker_checkpoints`
-- `audit_log`
+- `delivery_sessions`
+- `delivery_retry_queue`
+- `published_signals`
+- `discovery_runs`
 
-Critical constraints:
-- unique `tracked_traders(address)`
-- unique `subscriptions(subscriber_id, plan_id, status in active-like)`
-- unique `delivery_outbox(dedup_key)`
-- FK everywhere + NOT NULL for state keys.
+## 6. Delivery Reliability Rules
 
-## 7. Ubuntu Deployment Blueprint
+- Dedup key: `source_id:external_id` (stored in `published_signals`).
+- Retry queue: `delivery_retry_queue` with exponential backoff and `retry_after` support.
+- Error policies:
+  - `flood/transient` -> queue retry.
+  - `topic_missing` -> deactivate only affected chat+trader target.
+  - `chat_unavailable`/bot blocked -> deactivate all active targets for that chat.
+- Dispatcher enforces:
+  - global send concurrency,
+  - per-chat serialization,
+  - per-chat minimum interval.
 
-Single-VM v1 (practical):
-- Ubuntu 24.04 LTS
-- Nginx (TLS termination)
-- App services via `systemd`
-- PostgreSQL 16
-- Redis 7
-- Prometheus Node Exporter + Grafana + Loki/Promtail
+## 7. Security Baseline
 
-Systemd services:
-- `cryptoinsider-api.service`
-- `cryptoinsider-discovery.service`
-- `cryptoinsider-ranking.service`
-- `cryptoinsider-trade-ingestion.service`
-- `cryptoinsider-delivery.service`
-- `cryptoinsider-billing.service`
+- SSH key-only access.
+- Firewall enabled (`ufw`) with minimal exposed ports.
+- Application secrets in `/etc/cryptoinsider/env` with restricted permissions.
+- PostgreSQL bound to localhost.
+- Admin panel protected by Basic Auth.
+- Fail2ban enabled for SSH brute-force mitigation.
 
-All units must have:
-- `Restart=always`
-- `RestartSec=3`
-- `StartLimitIntervalSec=0`
-- dedicated `User=cryptoinsider`
-- health endpoint + watchdog metrics.
-- unified structured logs (`LOG_FORMAT=json` in production), with context keys (`request_id`, `cycle_id`, `update_id`) for end-to-end debugging.
+## 8. Deployment Workflow (Current)
 
-## 8. Security
-- Secrets only in `/etc/cryptoinsider/env` (chmod 600).
-- Bot token rotation policy.
-- DB least-privilege roles (`app_rw`, `app_ro`).
-- Admin panel behind Basic Auth + IP allow-list + Cloudflare Access (recommended).
-- Every operator action in `audit_log`.
+From your local machine:
 
-## 9. Test Strategy (required before production)
+```bash
+git push origin main
+```
 
-### Unit
-- score calculation
-- state transitions subscription/payment
-- dedup and retry policy
+On server:
 
-### Integration
-- discovery -> DB
-- payment webhook -> subscription activation
-- trade event -> outbox -> telegram send
+```bash
+cd /opt/cryptoinsider/app
+git pull --ff-only
+```
 
-### E2E (staging)
-- new user subscribe
-- payment success
-- provisioning success
-- signal delivery under rate limits
-- auto-expire when unpaid
+Restart only changed services (typical web/bot changes):
 
-### Chaos / Reliability
-- kill -9 workers during delivery
-- temporary DB lock
-- exchange API 5xx flood
-- telegram API 429 burst
+```bash
+sudo systemctl restart cryptoinsider-admin
+sudo systemctl restart cryptoinsider-subscriberbot
+sudo systemctl restart cryptoinsider-poster
+```
 
-Acceptance SLOs:
-- Delivery success >= 99.5% within 60s for fresh events
-- No duplicate posts per subscription
-- Recovery < 2 minutes after worker crash
+## 9. Post-Deploy Validation
 
-## 10. Migration Plan from Current Codebase
-1. Move SQLite -> PostgreSQL.
-2. Add queue layer (Redis Streams).
-3. Split monolith loops into dedicated workers.
-4. Implement payment + subscription state machine.
-5. Implement delivery binding (chat pool / DM).
-6. Add observability and runbooks.
+Run QA gate on server:
 
-## 11. Official References
+```bash
+cd /opt/cryptoinsider/app
+/opt/cryptoinsider/app/.venv/bin/python scripts/qa_certification.py --skip-db-audit
+```
+
+Run live data-quality audit:
+
+```bash
+source /etc/cryptoinsider/env
+/opt/cryptoinsider/app/.venv/bin/python scripts/qa_certification.py \
+  --skip-tests \
+  --database "$DATABASE_URL" \
+  --freshness-minutes 60 \
+  --json-out /opt/cryptoinsider/app/data/qa-report-prod.json
+```
+
+Check service state:
+
+```bash
+sudo systemctl is-active \
+  cryptoinsider-admin \
+  cryptoinsider-discovery \
+  cryptoinsider-universe \
+  cryptoinsider-top100 \
+  cryptoinsider-poster \
+  cryptoinsider-subscriberbot
+```
+
+Check logs:
+
+```bash
+sudo journalctl -u cryptoinsider-admin -f
+sudo journalctl -u cryptoinsider-poster -f
+sudo journalctl -u cryptoinsider-subscriberbot -f
+```
+
+## 10. Backups and Recovery
+
+Minimum policy:
+
+- Daily PostgreSQL dump.
+- Weekly restore test to a disposable DB.
+- Keep at least 7 daily snapshots.
+
+Example backup command:
+
+```bash
+pg_dump "$DATABASE_URL" > /var/backups/cryptoinsider/$(date +%F)-cryptoinsider.sql
+```
+
+## 11. References
+
 - Telegram Bot API: https://core.telegram.org/bots/api
-- Bot payments in Stars (`currency=XTR`): https://core.telegram.org/bots/payments-stars
-- Telegram Stars API/revenue and TON withdrawal context: https://core.telegram.org/api/stars
+- Hyperliquid API docs: https://hyperliquid.gitbook.io/hyperliquid-docs/

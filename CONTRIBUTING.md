@@ -1,15 +1,24 @@
 # Contributing to Black Swan Vault Copytrading
 
-Thanks for your interest in improving this project.
+Thanks for helping improve the project.
 
-## Ways to contribute
+## Where to start
 
-- Add new discovery connectors or improve existing ones
-- Improve quality metrics and scoring models
-- Optimize database queries and worker throughput
-- Improve Telegram delivery reliability and UX
-- Improve docs, onboarding, and observability
-- Add tests for edge-cases and regressions
+Read these first:
+
+- [`README.md`](./README.md)
+- [`docs/README.md`](./docs/README.md)
+- [`docs/TRADER_DISCOVERY_ARCHITECTURE.md`](./docs/TRADER_DISCOVERY_ARCHITECTURE.md)
+- [`docs/SUBSCRIBED_DELIVERY_ARCHITECTURE.md`](./docs/SUBSCRIBED_DELIVERY_ARCHITECTURE.md)
+- [`docs/QA_TEST_STRATEGY.md`](./docs/QA_TEST_STRATEGY.md)
+
+## Typical contribution areas
+
+- Discovery connectors and candidate quality improvements
+- Metrics/scoring model improvements
+- Delivery reliability and Telegram edge-case handling
+- Query/index optimization and worker throughput
+- Tests, runbooks, and documentation quality
 
 ## Development setup
 
@@ -20,65 +29,71 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-## Run tests
+## Test and QA commands
+
+Run full local QA gate:
 
 ```bash
-source .venv/bin/activate
-python -m unittest -q tests/test_trader_store.py
-python -m unittest -q tests/test_config.py
-python -m unittest -q tests/test_telegram_client.py
-python -m unittest -q tests/test_subscriber_bot.py
+python scripts/qa_certification.py --skip-db-audit
 ```
 
-After manual/E2E tests against shared DBs, clean synthetic trader rows:
+Run live data quality audit (if DB available):
+
+```bash
+python scripts/qa_certification.py --skip-tests --database "$DATABASE_URL"
+```
+
+Run a focused module quickly:
+
+```bash
+python -m unittest -q tests/test_trader_store.py
+python -m unittest -q tests/test_e2e_subscription_delivery.py
+```
+
+After manual/E2E tests against shared DBs, clean synthetic rows:
 
 ```bash
 python scripts/cleanup_test_traders.py --postgres-url "$DATABASE_URL" --apply --yes
 ```
 
-## Branch and commit style
+## Pull request expectations
 
-- Create a feature branch from `main`
-- Keep PRs focused and reasonably small
-- Use descriptive commit messages
-- Include tests for behavior changes when possible
+- Changes are focused and explainable.
+- Tests added/updated for behavior changes.
+- QA gate passes locally.
+- No secrets/tokens in code/docs/logs/screenshots.
+- Docs updated in the same PR when behavior changed.
 
-Recommended commit style:
+## Documentation update rule (required)
 
-- `feat: ...`
-- `fix: ...`
-- `docs: ...`
-- `refactor: ...`
-- `test: ...`
+If you change behavior, update the relevant docs in the same PR:
 
-## Pull Request checklist
+1. `README.md` for setup/user-facing behavior.
+2. `docs/*.md` for architecture/data flow/state machine changes.
+3. `deploy/README.md` for deployment/ops changes.
 
-- Code builds and tests pass locally
-- New behavior is documented
-- No secrets/tokens in code, docs, screenshots, or logs
-- No leftover test traders in shared DBs (`cleanup_test_traders.py` if needed)
-- Migration steps are included if schema/env changed
-- PR description explains why the change is needed
+## Branching and commits
+
+- Branch from `main`.
+- Keep commits descriptive and scoped.
+- Prefer commit types:
+  - `feat:`
+  - `fix:`
+  - `docs:`
+  - `refactor:`
+  - `test:`
 
 ## Reporting issues
 
 Use GitHub Issues and include:
 
-- Environment (local/prod, Python version, DB type)
-- Steps to reproduce
-- Expected vs actual behavior
-- Relevant logs or stack traces
+- environment (local/prod, Python version, DB type)
+- reproducible steps
+- expected vs actual behavior
+- relevant logs/tracebacks
 
-## Good first issues
+## Security
 
-Look for labels:
+Do not post sensitive vulnerabilities publicly.
 
-- `good first issue`
-- `help wanted`
-- `documentation`
-
-## Security issues
-
-Do not open public issues for sensitive vulnerabilities.
-
-Please follow [`SECURITY.md`](./SECURITY.md).
+Follow [`SECURITY.md`](./SECURITY.md).

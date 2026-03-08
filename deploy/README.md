@@ -1,17 +1,39 @@
 # Deploy on Ubuntu (Current Stack)
 
-## 1. Create service user
-```bash
-sudo useradd --system --create-home --shell /usr/sbin/nologin cryptoinsider
-```
+This guide describes the current deployment workflow for the single-server production setup.
 
-## 2. App path
+## 1. Prerequisites
+
+- Ubuntu server with systemd and nginx
+- Python virtualenv at `/opt/cryptoinsider/app/.venv`
+- PostgreSQL running locally (`127.0.0.1:5432`)
+- Repository cloned to `/opt/cryptoinsider/app`
+- Secrets stored in `/etc/cryptoinsider/env`
+
+## 2. Required paths and permissions
+
 - App root: `/opt/cryptoinsider/app`
 - Env file: `/etc/cryptoinsider/env`
 
-Example DB env (`/etc/cryptoinsider/env`):
+Recommended permissions:
+
 ```bash
+sudo mkdir -p /opt/cryptoinsider /etc/cryptoinsider
+sudo chown -R cryptoinsider:cryptoinsider /opt/cryptoinsider
+sudo chmod 700 /etc/cryptoinsider
+sudo chmod 640 /etc/cryptoinsider/env
+```
+
+## 3. Environment example (`/etc/cryptoinsider/env`)
+
+```env
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHANNEL_ID=...
+TELEGRAM_BOT_USERNAME=...
 DATABASE_URL=postgresql://cryptoinsider:strong_password@127.0.0.1:5432/cryptoinsider
+ADMIN_PANEL_USERNAME=admin
+ADMIN_PANEL_PASSWORD=strong_password
+GOOGLE_ANALYTICS_MEASUREMENT_ID=G-XXXXXXXXXX
 LOG_LEVEL=INFO
 LOG_FORMAT=text
 LOG_DIRECTORY=/opt/cryptoinsider/app/data/logs
@@ -20,15 +42,8 @@ LOG_FILE_BACKUP_COUNT=5
 LOG_TELEGRAM_HTTP=false
 ```
 
-Example permissions:
-```bash
-sudo mkdir -p /opt/cryptoinsider /etc/cryptoinsider
-sudo chown -R cryptoinsider:cryptoinsider /opt/cryptoinsider
-sudo chmod 700 /etc/cryptoinsider
-sudo chmod 600 /etc/cryptoinsider/env
-```
+## 4. Install/enable systemd units
 
-## 3. Install units
 ```bash
 sudo cp deploy/systemd/cryptoinsider-*.service /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -40,61 +55,93 @@ sudo systemctl enable --now cryptoinsider-poster.service
 sudo systemctl enable --now cryptoinsider-subscriberbot.service
 ```
 
-## 4. Check status
+## 5. Deploy update (recommended workflow)
+
+On CI/local machine:
+
 ```bash
-sudo systemctl status cryptoinsider-admin.service
-sudo systemctl status cryptoinsider-discovery.service
-sudo systemctl status cryptoinsider-universe.service
-sudo systemctl status cryptoinsider-top100.service
-sudo systemctl status cryptoinsider-poster.service
-sudo systemctl status cryptoinsider-subscriberbot.service
+git push origin main
 ```
 
-## 5. Run tests on server (required)
-Always run repository tests directly on the server after deploy/restart:
+On server:
 
 ```bash
 cd /opt/cryptoinsider/app
-/opt/cryptoinsider/app/.venv/bin/python -m unittest -q \
-  tests/test_config.py \
-  tests/test_telegram_client.py \
-  tests/test_subscriber_bot.py \
-  tests/test_trader_store.py
+git pull --ff-only
 ```
 
-## 6. Logs
+Restart only changed services (common web/bot update):
+
 ```bash
-sudo journalctl -u cryptoinsider-admin.service -f
-sudo journalctl -u cryptoinsider-discovery.service -f
-sudo journalctl -u cryptoinsider-universe.service -f
-sudo journalctl -u cryptoinsider-top100.service -f
-sudo journalctl -u cryptoinsider-poster.service -f
-sudo journalctl -u cryptoinsider-subscriberbot.service -f
+sudo systemctl restart cryptoinsider-admin
+sudo systemctl restart cryptoinsider-subscriberbot
+sudo systemctl restart cryptoinsider-poster
 ```
 
-Optional file logs (if `LOG_DIRECTORY` is configured):
+## 6. Post-deploy verification (required)
+
+Run QA gate test suite:
+
+```bash
+cd /opt/cryptoinsider/app
+/opt/cryptoinsider/app/.venv/bin/python scripts/qa_certification.py --skip-db-audit
+```
+
+Run live data-quality audit against production DB:
+
+```bash
+source /etc/cryptoinsider/env
+/opt/cryptoinsider/app/.venv/bin/python scripts/qa_certification.py \
+  --skip-tests \
+  --database "$DATABASE_URL" \
+  --freshness-minutes 60 \
+  --json-out /opt/cryptoinsider/app/data/qa-report-prod.json
+```
+
+Check services:
+
+```bash
+sudo systemctl is-active \
+  cryptoinsider-admin \
+  cryptoinsider-discovery \
+  cryptoinsider-universe \
+  cryptoinsider-top100 \
+  cryptoinsider-poster \
+  cryptoinsider-subscriberbot
+```
+
+## 7. Logs and debugging
+
+```bash
+sudo journalctl -u cryptoinsider-admin -f
+sudo journalctl -u cryptoinsider-poster -f
+sudo journalctl -u cryptoinsider-subscriberbot -f
+sudo journalctl -u cryptoinsider-discovery -f
+sudo journalctl -u cryptoinsider-universe -f
+sudo journalctl -u cryptoinsider-top100 -f
+```
+
+Optional file logs (if `LOG_DIRECTORY` configured):
 
 ```bash
 sudo ls -lah /opt/cryptoinsider/app/data/logs
-sudo tail -f /opt/cryptoinsider/app/data/logs/cryptoinsider_subscriber_bot.log
 ```
 
-## 7. Nginx reverse proxy
+## 8. Nginx reverse proxy
+
 ```bash
 sudo cp deploy/nginx/cryptoinsider.conf /etc/nginx/sites-available/cryptoinsider.conf
-sudo ln -s /etc/nginx/sites-available/cryptoinsider.conf /etc/nginx/sites-enabled/cryptoinsider.conf
+sudo ln -sf /etc/nginx/sites-available/cryptoinsider.conf /etc/nginx/sites-enabled/cryptoinsider.conf
 sudo nginx -t
 sudo systemctl reload nginx
 ```
 
-## 8. Next production step
-If you have old SQLite data, migrate once:
+## 9. Legacy SQLite migration (one-time)
+
 ```bash
 cd /opt/cryptoinsider/app
+source /etc/cryptoinsider/env
 /opt/cryptoinsider/app/.venv/bin/python scripts/migrate_sqlite_to_postgres.py \
   --sqlite-path data/signals.db \
   --postgres-url "$DATABASE_URL"
 ```
-
-For full production architecture see:
-- `docs/PRODUCTION_ARCHITECTURE_UBUNTU.md`

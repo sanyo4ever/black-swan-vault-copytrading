@@ -33,6 +33,12 @@ Most copytrading tools are closed, expensive, or difficult to self-host. Black S
 - Serves a public searchable catalog page + API
 - Delivers trader fills to Telegram sessions for active subscribers
 
+## Current Product Rules
+
+- Subscriptions are active until explicit user cancellation (`/stop 0x...`).
+- Bot tries to create a forum topic when possible; if unsupported, it falls back to direct private chat delivery.
+- The project is donation-supported in the current production mode (no mandatory paywall).
+
 ## Feature Highlights
 
 - Multi-source candidate ingest: Hyperliquid + optional Nansen Smart Money
@@ -143,6 +149,13 @@ TRADER_ARCHIVE_AFTER_DAYS=180
 - `/api/traders` -> filterable/sortable JSON API
 - `/subscribe/<trader_address>` -> one-click subscription landing page
 - `/admin` -> password-protected admin panel
+
+## Documentation Map
+
+- [`docs/README.md`](./docs/README.md) -> complete documentation index
+- [`docs/TRADER_DISCOVERY_ARCHITECTURE.md`](./docs/TRADER_DISCOVERY_ARCHITECTURE.md) -> discovery/scoring/catalog internals
+- [`docs/SUBSCRIBED_DELIVERY_ARCHITECTURE.md`](./docs/SUBSCRIBED_DELIVERY_ARCHITECTURE.md) -> subscription/delivery internals
+- [`docs/PRODUCTION_ARCHITECTURE_UBUNTU.md`](./docs/PRODUCTION_ARCHITECTURE_UBUNTU.md) -> production runtime and operations
 
 ## Data Model
 

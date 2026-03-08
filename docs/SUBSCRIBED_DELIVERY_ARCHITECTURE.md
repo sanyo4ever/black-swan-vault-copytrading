@@ -1,97 +1,119 @@
-# Subscription-Driven Delivery Architecture (v2)
+# Subscription-Driven Delivery Architecture
 
-## 1) Goal
-Build a production-ready service that:
-- scans only traders that currently have active subscriptions,
-- emits trade signals with <= 60s typical lag,
-- fans out updates to all subscribed users without cross-chat mixing,
-- survives API limits, temporary outages, and Telegram edge cases.
+Last updated: 2026-03-08
 
-## 2) External Benchmark References
-- Hyperliquid API docs:
-  - WebSocket subscriptions: [docs](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket/subscriptions)
-  - Info endpoint (`userFillsByTime`): [docs](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint)
-  - Rate limits and capacity constraints: [docs](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/rate-limits-and-user-limits)
-- Telegram Bot API and FAQ:
-  - Bot API reference (`sendMessage`, `createForumTopic`, `deleteForumTopic`): [docs](https://core.telegram.org/bots/api)
-  - Broadcast and rate-limit guidance (`429`, `retry_after`, throughput notes): [FAQ](https://core.telegram.org/bots/faq)
-- Copy-trading product reference (follower lifecycle and account linking):  
-  - Bybit Copy Trading API docs: [docs](https://bybit-exchange.github.io/docs/v5/copytrade)
-- Open-source implementation reference:
-  - HyperCopy (Hyperliquid copy-trading bot): [repo](https://github.com/sunmoon97/HyperCopy)
+## 1. Goals
 
-## 3) Hard Constraints That Shape Design
-- Telegram is push-rate limited and can return `429` with `retry_after`.
-- Telegram topics can be missing/deleted manually and chats can become unavailable.
-- Hyperliquid polling can hit `429`/5xx under burst load.
-- Scanner cost must scale with active demand (subscribed traders), not full universe size.
+- Scan only traders that currently have active subscriptions.
+- Deliver updates with typical lag <= 60 seconds.
+- Keep routing deterministic (no cross-target duplication).
+- Recover safely from transient API failures.
 
-## 4) Target Runtime Topology
-One process (`cryptoinsider-poster`) with five internal stages per cycle:
+## 2. Subscription Lifecycle
 
-1. Session lifecycle stage:
-- expire/cancel old sessions,
-- best-effort topic cleanup.
+Entry point:
 
-2. Retry stage:
-- send due jobs from `delivery_retry_queue`,
-- classify errors and reschedule/dead-letter.
+1. User clicks `Copy` in catalog.
+2. User is redirected to bot deep-link: `/start sub_<trader_address>`.
+3. Bot validates trader status/moderation and creates a subscription session.
 
-3. Scan stage:
-- poll only due addresses from `delivery_monitor_state` (built from active sessions),
-- fetch incremental fills via `userFillsByTime` from a watermark.
+Current lifecycle model:
 
-4. Fan-out stage:
-- map signal -> subscribed chat/thread targets,
-- send via controlled dispatcher (global concurrency + per-chat pacing).
+- Subscription status: `ACTIVE` until explicit stop (`/stop 0x...`).
+- Session status: `ACTIVE` until cancellation/expiration/error handling.
 
-5. Retry stage (again):
-- flush immediate transient failures quickly in same cycle.
+Notes:
 
-## 5) Data Plane
-Existing tables already support this architecture:
-- `subscriptions`, `delivery_sessions`: source of truth for active recipients.
-- `delivery_monitor_state`: demand-aware polling schedule per trader.
-- `delivery_retry_queue`: durable retries with dedup key `(dedup_key, chat_id, message_thread_id)`.
-- `tracked_traders`: moderation/status guardrails.
+- `SUBSCRIPTION_LIFETIME_HOURS` is currently treated as permanent mode in runtime logic.
+- If forum topics are unsupported (`createForumTopic` fails with "chat is not a forum"), the bot switches to direct-chat mode (`message_thread_id = NULL`).
 
-## 6) Delivery Algorithm (v2)
-For each cycle:
-1. Refresh `delivery_monitor_state` from active sessions.
-2. Select due traders ordered by priority score.
-3. Poll fills concurrently with bounded HTTP concurrency.
-4. Convert fills to canonical `TradeSignal` IDs.
-5. For each signal, fan out to all active targets for that trader.
-6. On delivery failure:
-- `flood/transient`: enqueue retry with exponential backoff and optional `retry_after`,
-- `topic_missing`: deactivate only that chat+trader target,
-- `chat_unavailable`: deactivate all chat subscriptions.
+## 3. Core Tables
 
-## 7) Dispatcher Contract
-The dispatcher enforces:
-- global in-flight send concurrency cap,
-- per-chat serialization (message order stability),
-- per-chat minimum interval between sends (reduces flood risk).
+- `subscriptions`
+  - subscriber intent and lifecycle state.
+- `delivery_sessions`
+  - active delivery target binding (`chat_id`, `trader_address`, optional `message_thread_id`).
+- `delivery_monitor_state`
+  - demand-aware scanning schedule per trader.
+- `delivery_retry_queue`
+  - durable retries for transient Telegram failures.
+- `published_signals`
+  - dedup store for already-published signals.
 
-This gives predictable fan-out behavior under spikes.
+## 4. Cycle Pipeline (`cryptoinsider-poster`)
 
-## 8) SLOs and Operational Metrics
-- `scan_lag_seconds` (fill timestamp -> post timestamp)
+Per cycle:
+
+1. Refresh demand monitor from active sessions.
+2. Pick due trader targets (`next_poll_at <= now`).
+3. Poll new fills incrementally using per-trader watermark (`last_seen_fill_time`).
+4. Build normalized signals and map each signal to subscribed targets.
+5. Send through dispatcher with per-chat pacing and bounded concurrency.
+6. Process retry queue before/after live sends.
+
+## 5. Routing and Isolation Rules
+
+- Signal fanout target key: `(chat_id, message_thread_id)`.
+- Duplicate target keys in one cycle are removed.
+- If two users subscribe to the same trader, each gets their own delivery target.
+- If one user subscribes to multiple traders in direct-chat mode, messages share chat but remain identifiable by trader line in message body.
+
+## 6. Error Classification and Actions
+
+- `flood` / transient transport errors:
+  - enqueue retry with backoff (`RETRY_BASE_DELAY_SECONDS`, capped).
+- `topic_missing` (thread deleted/not found):
+  - deactivate only affected chat+trader target.
+- `chat_unavailable` / bot blocked:
+  - deactivate all active targets for that chat.
+- non-retryable permanent errors:
+  - mark dropped/dead to prevent endless loops.
+
+## 7. Reliability Controls
+
+- Dedup key: `source_id:external_id`.
+- Retry queue unique key: `(dedup_key, chat_id, message_thread_id)`.
+- Dispatcher:
+  - global send concurrency limit,
+  - per-chat serialization,
+  - per-chat minimum interval.
+- Monitor backoff:
+  - faster polling when fresh fills appear,
+  - slower polling on idle/error streaks.
+
+## 8. Observability
+
+Track at minimum:
+
+- `signals_fetched_per_cycle`
+- `published_signals_per_cycle`
+- `delivery_success_total`
+- `retry_queued_total`
+- `retry_sent_total`
+- `retry_dead_total`
+- `topic_missing_total`
+- `chat_unavailable_total`
 - `cycle_elapsed_ms`
-- `delivery_attempts_total`, `delivery_success_total`, `delivery_retry_queued_total`
-- `retry_sent_total`, `retry_rescheduled_total`, `retry_dead_total`
-- `flood_errors_total`, `topic_missing_total`, `chat_unavailable_total`
-- `due_targets_count`, `signals_per_cycle`
 
-## 9) Failure-Mode Policy
-- Hyperliquid `429/5xx`: retry with capped backoff, summarize in cycle logs.
-- Telegram `429`: reschedule using `retry_after` when present.
-- Topic deleted manually: deactivate only affected trader thread.
-- Bot removed/blocked in chat: deactivate entire chat targets.
-- Process restart: retry queue + DB session state allow clean recovery.
+## 9. Business Scenarios Covered by Tests
 
-## 10) Why This Is Better Than Naive Fan-Out
-- Demand-driven scanning (only subscribed traders) lowers server/API load.
-- Controlled dispatch avoids Telegram flood spikes.
-- Durable retry queue prevents message loss during transient failures.
-- Clear deactivation rules keep stale/dead targets from poisoning delivery.
+Automated tests cover:
+
+- subscribe -> active session creation,
+- stop one trader while keeping other subscriptions active,
+- fanout to multiple chats for same trader,
+- transient send failure -> retry queue -> successful resend,
+- topic missing deactivates one target only,
+- bot blocked deactivates all targets for that chat.
+
+See:
+
+- `tests/test_e2e_subscription_delivery.py`
+- `tests/test_subscriber_bot.py`
+- `tests/test_delivery_dispatcher.py`
+
+## 10. Known Constraints
+
+- Telegram Bot API cannot create a brand-new standalone chat on demand.
+- Topic mode depends on chat capabilities; direct-chat fallback is mandatory.
+- External API limits (Telegram + data sources) require backpressure and retry logic.
