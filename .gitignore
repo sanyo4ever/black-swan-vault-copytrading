@@ -9,3 +9,4 @@ data/qa-report*.json
 PROJECT_MEMORY.md
 AGENTS.md
 .codex/
+.claude/
